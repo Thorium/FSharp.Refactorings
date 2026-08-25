@@ -1,0 +1,8 @@
+bin/
+obj/
+.vs/
+.ionide/
+*.user
+TestResults/
+.tools/
+artifacts/

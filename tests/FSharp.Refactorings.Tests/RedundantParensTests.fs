@@ -1,0 +1,92 @@
+module FSharp.Refactorings.Tests.RedundantParensTests
+
+open Xunit
+open FSharp.Refactorings
+open FSharp.Refactorings.Tests.Parsing
+
+let private findIn (source: string) =
+    let tree, sourceText = parse source
+    RedundantParens.find tree sourceText
+
+let private assertPatched (source: string) (expectedPatched: string) =
+    match findIn source with
+    | [ s ] ->
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.Equal(expectedPatched, patched)
+        Assert.True(parsesCleanly patched, sprintf "Patched source does not parse:\n%s" patched)
+    | other -> failwithf "Expected exactly one suggestion, got %d: %A" (List.length other) other
+
+let private assertNoSuggestion (source: string) = Assert.Empty(findIn source)
+
+[<Fact>]
+let ``list literal argument loses its parens`` () =
+    assertPatched "module Test\nlet m = List.max([ 4; 3 ])" "module Test\nlet m = List.max [ 4; 3 ]"
+
+[<Fact>]
+let ``identifier argument with a space keeps one space`` () =
+    assertPatched
+        "module Test\nlet f (s: string) = String.length (s)"
+        "module Test\nlet f (s: string) = String.length s"
+
+[<Fact>]
+let ``adjacent call gains a separating space`` () =
+    assertPatched "module Test\nlet f (s: string) = String.length(s)" "module Test\nlet f (s: string) = String.length s"
+
+[<Fact>]
+let ``string literal argument loses its parens`` () =
+    assertPatched "module Test\nlet f g = g(\"hi\")" "module Test\nlet f g = g \"hi\""
+
+[<Fact>]
+let ``dotted path argument loses its parens`` () =
+    assertPatched
+        "module Test\ntype R = { Items: int list }\nlet f (r: R) = List.length(r.Items)"
+        "module Test\ntype R = { Items: int list }\nlet f (r: R) = List.length r.Items"
+
+[<Fact>]
+let ``tuple argument is a method argument list and stays`` () =
+    assertNoSuggestion "module Test\nlet c = System.String.Compare(\"a\", \"b\")"
+
+[<Fact>]
+let ``application argument keeps its parens`` () =
+    // `f (g x)` without parens would become a three-argument application
+    assertNoSuggestion "module Test\nlet f g (x: int) = List.singleton(g x)"
+
+[<Fact>]
+let ``negative constant keeps its parens`` () =
+    assertNoSuggestion "module Test\nlet f = abs(-1)"
+
+[<Fact>]
+let ``projection continuation keeps its parens`` () =
+    // review-class regression: `string s.Length` would bind differently
+    assertNoSuggestion "module Test\nlet f (s: string) = string(s).Length"
+
+[<Fact>]
+let ``instance method call keeps its parens`` () =
+    // style guide: method calls parenthesize their arguments
+    assertNoSuggestion "module Test\nlet f (s: string) (t: string) = s.Contains(t)"
+// ---- harder cases ----
+
+[<Fact>]
+let ``unary plus constant keeps its parens`` () =
+    // `f +1` would re-parse as binary addition
+    assertNoSuggestion "module Test\nlet f = abs(+1)"
+
+[<Fact>]
+let ``union case constructor loses its parens`` () =
+    assertPatched "module Test\nlet s = Some(1)" "module Test\nlet s = Some 1"
+
+[<Fact>]
+let ``comprehension argument loses its parens`` () =
+    assertPatched
+        "module Test\nlet m = List.max([ for i in 1..3 -> i ])"
+        "module Test\nlet m = List.max [ for i in 1..3 -> i ]"
+
+[<Fact>]
+let ``curried continuation still parses after removal`` () =
+    assertPatched "module Test\nlet r = List.map(id) [ 1; 2 ]" "module Test\nlet r = List.map id [ 1; 2 ]"
+
+[<Fact>]
+let ``doubly parenthesized operator reference keeps one paren pair`` () =
+    // the operator reference's own parens are part of its range, so only the
+    // redundant outer pair is removed
+    assertPatched "module Test\nlet r = List.map((+)) [ 1 ]" "module Test\nlet r = List.map (+) [ 1 ]"

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "fantomas": {
+      "version": "7.0.6",
+      "commands": [
+        "fantomas"
+      ],
+      "rollForward": false
+    },
+    "dotnet-fsharplint": {
+      "version": "0.27.0",
+      "commands": [
+        "dotnet-fsharplint"
+      ],
+      "rollForward": false
+    },
+    "fsharp-analyzers": {
+      "version": "0.37.2",
+      "commands": [
+        "fsharp-analyzers"
+      ],
+      "rollForward": false
+    }
+  }
+}

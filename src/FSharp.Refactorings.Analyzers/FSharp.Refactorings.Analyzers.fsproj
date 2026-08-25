@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- NuGet convention for F# analyzers: FSAC/CLI load them from analyzers/dotnet/fs -->
+    <IsPackable>true</IsPackable>
+    <BuildOutputTargetFolder>analyzers/dotnet/fs</BuildOutputTargetFolder>
+    <PackageId>FSharp.Refactorings.Analyzers</PackageId>
+    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK.</Description>
+    <Version>0.1.0</Version>
+    <Authors>Tuomas Hietanen</Authors>
+    <PackageProjectUrl>https://github.com/Thorium/FSharp.Refactorings</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Thorium/FSharp.Refactorings</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>fsharp;analyzers;refactoring;codefix;ionide;fsautocomplete</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>Unlicense</PackageLicenseExpression>
+    <!-- analyzers are build-time tools: nothing flows to the consumer's output -->
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <!-- analyzer packages intentionally have no lib/ folder -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Text.fs" />
+    <Compile Include="AstIndex.fs" />
+    <Compile Include="Configuration.fs" />
+    <Compile Include="MatchToIf.fs" />
+    <Compile Include="OptionModule.fs" />
+    <Compile Include="Composition.fs" />
+    <Compile Include="ConversionMove.fs" />
+    <Compile Include="CeStrip.fs" />
+    <Compile Include="ActivePattern.fs" />
+    <Compile Include="MutableRemoval.fs" />
+    <Compile Include="TupleParams.fs" />
+    <Compile Include="ResultModule.fs" />
+    <Compile Include="Simplification.fs" />
+    <Compile Include="StructActivePattern.fs" />
+    <Compile Include="HintEngine.fs" />
+    <Compile Include="RedundantParens.fs" />
+    <Compile Include="DictTryGet.fs" />
+    <Compile Include="RegexUsage.fs" />
+    <Compile Include="StructDu.fs" />
+    <Compile Include="DuFieldNames.fs" />
+    <Compile Include="ParamOrder.fs" />
+    <Compile Include="RaiseFailwith.fs" />
+    <Compile Include="OptionOfObj.fs" />
+    <Compile Include="AutoProperty.fs" />
+    <Compile Include="ClosureCapture.fs" />
+    <Compile Include="QueryInLoop.fs" />
+    <Compile Include="TaskStateMachine.fs" />
+    <Compile Include="AddRange.fs" />
+    <Compile Include="StringConcat.fs" />
+    <Compile Include="ObjectDesign.fs" />
+    <Compile Include="OptionMatch.fs" />
+    <Compile Include="LoopPerf.fs" />
+    <Compile Include="TypeChecks.fs" />
+    <Compile Include="CharOverload.fs" />
+    <Compile Include="CaseInsensitive.fs" />
+    <Compile Include="RedundantGuard.fs" />
+    <Compile Include="VectorizedLinq.fs" />
+    <Compile Include="SprintfInterpolation.fs" />
+    <Compile Include="TypedHoles.fs" />
+    <Compile Include="AsyncIgnore.fs" />
+    <Compile Include="ObjectRules.fs" />
+    <Compile Include="InterpToString.fs" />
+    <Compile Include="Analyzers.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Analyzers.SDK" Version="0.37.2" />
+    <PackageReference Update="FSharp.Core" Version="10.1.201" />
+  </ItemGroup>
+
+</Project>

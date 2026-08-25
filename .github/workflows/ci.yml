@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore tools
+        run: dotnet tool restore
+
+      - name: Check formatting
+        run: dotnet fantomas --check src tests
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Test
+        run: dotnet test -c Release --no-build
+
+      - name: Lint
+        run: |
+          dotnet dotnet-fsharplint lint src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj
+          dotnet dotnet-fsharplint lint tests/FSharp.Refactorings.Tests/FSharp.Refactorings.Tests.fsproj
+
+      - name: Self-analyze (dogfood)
+        run: >
+          dotnet fsharp-analyzers
+          --project src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj
+          --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Release/net8.0
+          --code-root .
+          --report-file self-analysis.sarif
+
+      - name: Pack
+        run: dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.nupkg
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Pack
+        run: dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
+
+      - name: Push to NuGet
+        run: >
+          dotnet nuget push artifacts/*.nupkg
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

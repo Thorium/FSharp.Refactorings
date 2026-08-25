@@ -1,0 +1,119 @@
+/// Refactoring (performance): mark a small discriminated union with
+/// [<Struct>], avoiding a heap allocation per value.
+///
+///     type Shape =                       [<Struct>]
+///         | Circle of radius: float      type Shape =
+///         | Square of side: float            | Circle of radius: float
+///                                            | Square of side: float
+///
+/// Safety rules (struct DUs have real language constraints, so only clearly
+/// safe unions are suggested):
+///   - module-level, attribute-free type definition with 2–3 cases
+///   - every case field's type is a whitelisted small immutable value type
+///     (int, float, bool, char, byte, int64, decimal, Guid, DateTime, ...)
+///     written as a plain identifier — no strings (reference type is fine in
+///     a struct DU but signals a bigger payload), no generics, no options,
+///     no recursion by construction
+///   - when more than one case carries fields, all fields must be named
+///     (unnamed fields collide on the compiled ItemN names in struct unions)
+module FSharp.Refactorings.StructDu
+
+open System
+open FSharp.Compiler.Syntax
+open FSharp.Compiler.Text
+open FSharp.Analyzers.SDK
+open FSharp.Analyzers.SDK.ASTCollecting
+open FSharp.Refactorings.Text
+
+type Suggestion =
+    {
+        /// The type name, for the message.
+        TypeName: string
+        /// Zero-width insertion point before the type declaration.
+        InsertRange: range
+        /// The attribute line plus re-indentation.
+        InsertText: string
+    }
+
+let private smallValueTypes =
+    set
+        [ "int"
+          "int8"
+          "int16"
+          "int32"
+          "int64"
+          "uint"
+          "uint8"
+          "uint16"
+          "uint32"
+          "uint64"
+          "byte"
+          "sbyte"
+          "float"
+          "float32"
+          "single"
+          "double"
+          "decimal"
+          "bool"
+          "char"
+          "nativeint"
+          "unativeint"
+          "Guid"
+          "DateTime"
+          "DateTimeOffset"
+          "TimeSpan" ]
+
+let private isSmallValueType (t: SynType) =
+    match t with
+    | SynType.LongIdent(SynLongIdent(id = ids)) -> smallValueTypes.Contains (List.last ids).idText
+    | _ -> false
+
+/// Find small module-level unions that can carry [<Struct>].
+let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+    let suggestions = ResizeArray<Suggestion>()
+
+    let collector =
+        { new SyntaxCollectorBase() with
+            override _.WalkSynModuleDecl(_path, decl) =
+                match decl with
+                | SynModuleDecl.Types(
+                    typeDefns = [ SynTypeDefn(
+                                      typeInfo = SynComponentInfo(attributes = []; longId = [ typeName ])
+                                      typeRepr = SynTypeDefnRepr.Simple(
+                                          simpleRepr = SynTypeDefnSimpleRepr.Union(unionCases = cases); range = _)
+                                      members = []) ]) when cases.Length >= 2 && cases.Length <= 3 ->
+                    let caseFields =
+                        cases
+                        |> List.map (fun (SynUnionCase(caseType = caseType)) ->
+                            match caseType with
+                            | SynUnionCaseKind.Fields fields -> Some fields
+                            | _ -> None)
+
+                    match List.fold (fun acc f -> Option.map2 (fun a b -> b :: a) acc f) (Some []) caseFields with
+                    | None -> ()
+                    | Some allFields ->
+                        let fieldLists = List.rev allFields
+                        let fields = List.concat fieldLists
+
+                        let allSmall =
+                            fields
+                            |> List.forall (fun (SynField(fieldType = t; isMutable = m)) -> not m && isSmallValueType t)
+
+                        let casesWithFields =
+                            fieldLists |> List.filter (fun fs -> not fs.IsEmpty) |> List.length
+
+                        let allNamed = fields |> List.forall (fun (SynField(idOpt = idOpt)) -> idOpt.IsSome)
+
+                        let namingOk = casesWithFields <= 1 || allNamed
+
+                        if not fields.IsEmpty && allSmall && namingOk then
+                            let indent = String(' ', decl.Range.StartColumn)
+
+                            suggestions.Add
+                                { TypeName = typeName.idText
+                                  InsertRange = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
+                                  InsertText = "[<Struct>]\n" + indent }
+                | _ -> () }
+
+    AstIndex.replay collector parseTree
+    List.ofSeq suggestions
