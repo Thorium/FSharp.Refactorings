@@ -1,16 +1,54 @@
 # FSharp.Refactorings
 
-ReSharper-style **functional refactoring suggestions for F#**, delivered as light-bulb
-quick fixes. Built on [FSharp.Analyzers.SDK](https://github.com/ionide/FSharp.Analyzers.SDK),
-so the same analyzers run in:
+ReSharper-style **functional refactoring suggestions for F#** — light-bulb quick
+fixes in your editor, and a command-line tool that applies them in bulk. Built on
+[FSharp.Analyzers.SDK](https://github.com/ionide/FSharp.Analyzers.SDK).
 
-- **VS Code / Ionide** (via FsAutoComplete) — diagnostics with one-click fixes
-- **CLI / CI** (via the [`fsharp-analyzers`](https://www.nuget.org/packages/fsharp-analyzers) dotnet tool)
+Suggestions are `Hint` severity: they mark an opportunity, not a defect, and
+never gate your build.
 
-Visual Studio 2022 does not load F# analyzers; the plan for VS is to upstream the
-most valuable fixes into `dotnet/fsharp`'s `FSharp.Editor` code fixes.
+---
 
-## Use it from NuGet
+# Using it
+
+## Quick start
+
+Nothing to configure — the tool reads your project, reports what it would
+change, and only edits when you tell it to:
+
+```bash
+dotnet tool install --global fsharp-refactorings-apply
+fsharp-refactor --project Your.fsproj --dry-run
+```
+
+That prints every fix it would make, with file and position, and writes
+nothing. When the list looks right, drop the flag to apply them:
+
+```bash
+fsharp-refactor --project Your.fsproj
+```
+
+It refuses a project that does not already build, and fails loudly if applying
+ever introduces an error. For light bulbs while you type, see
+[VS Code / Ionide](#vs-code--ionide) below.
+
+## What it changes
+
+A spread of what the ~93 rules do — the full list is in
+[Refactorings](#refactorings):
+
+| | Before | After |
+|---|---|---|
+| Correctness | `let s = new FileStream(p, m)` | `use s = new FileStream(p, m)` |
+| Correctness | `raise (Exception "boom")` | `failwith "boom"` |
+| Performance | `s.Contains "x"` | `s.Contains 'x'` |
+| Performance | `xs \|> Seq.toList \|> List.map f` | `xs \|> Seq.map f \|> Seq.toList` |
+| Idiom | `match b with \| true -> 1 \| false -> 0` | `if b then 1 else 0` |
+| Redundancy | `new StringBuilder()` | `StringBuilder()` |
+| Redundancy | `[<SerializableAttribute>]` | `[<Serializable>]` |
+| Diagnostics | `failwith "Error"` | `failwith $"Error, calling f with x: {x}"` |
+
+## Editor and CI setup
 
 The analyzers ship as [`FSharp.Refactorings.Analyzers`](https://www.nuget.org/packages/FSharp.Refactorings.Analyzers).
 The package is a development dependency: it only produces hints and quick
@@ -90,25 +128,6 @@ widen the scope of the contained-type hints (FR0022, FR0069, FR0070, FR0093) to
 public types. Consumers outside the project are the reason this is opt-in:
 their call sites cannot be rewritten, so each rule only fires where a
 missed one would fail to compile rather than change behaviour silently.
-
-## Design principles
-
-1. **Never break user code.** A fix is only offered when it is provably safe to apply;
-   borderline cases simply don't produce a suggestion. Fixes are minimal range-based
-   text edits applied by the editor, so they are always a single native undo step.
-2. **Minimal edits.** Original formatting outside the edited range is untouched —
-   no whole-file reformatting.
-3. **Pure core, thin adapters.** Each refactoring is a pure function
-   `ParsedInput -> ISourceText -> Suggestion list`, unit-tested directly against
-   source strings. The SDK analyzer entry points in `Analyzers.fs` are one-liners.
-4. **Hints point toward idiomatic F# only.** Every analyzer rewrites `a → b`
-   where `b` is the more idiomatic form; we never ship a hint that moves code
-   *away* from idiomatic F#. That is why suggestions are `Hint` severity, not
-   warnings: they mark an opportunity, not a defect, and they never gate CI.
-   Genuinely reversible rewrites where neither direction is more idiomatic
-   (`if ↔ match`, tupled ↔ curried) belong in FsAutoComplete's codefix
-   infrastructure as user-invoked `refactor.rewrite` actions, and should be
-   contributed there rather than here.
 
 ## Refactorings
 
@@ -249,6 +268,40 @@ Custom rules get the same safety treatment as the built-ins: bindings are
 parenthesized as needed, and a rule whose right side drops or duplicates a
 metavariable only fires on pure atoms (never discarding a side effect).
 
+---
+
+# Improving it
+
+Contributions welcome. This section is for working ON the analyzers; everything
+above is for using them.
+
+## Trying your changes
+
+Build the analyzers, then point either host at the build output instead of the
+NuGet cache.
+
+In an editor, via the target repo's `.vscode/settings.json`:
+
+```json
+{
+  "FSharp.enableAnalyzers": true,
+  "FSharp.analyzersPath": ["<path-to>/FSharp.Refactorings.Analyzers/bin/Debug/net8.0"]
+}
+```
+
+Open an F# file containing e.g. `match x with | true -> 1 | false -> 2` — a
+hint appears offering `if x then 1 else 2`.
+
+Or from the CLI:
+
+```bash
+fsharp-analyzers --project YourProject.fsproj --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Debug/net8.0 --code-root .
+```
+
+Note: analyzers must be built against an FSharp.Compiler.Service compatible with
+the host FsAutoComplete. This project currently pins FSharp.Analyzers.SDK 0.37.2
+(FCS 43.12.201). See the SDK's version-pairing table when updating.
+
 ## Building and testing
 
 ```bash
@@ -262,43 +315,38 @@ This project eats its own dog food. Before committing:
 dotnet tool restore
 dotnet fantomas src tests
 dotnet dotnet-fsharplint lint src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj
+dotnet dotnet-fsharplint lint src/FSharp.Refactorings.Apply/FSharp.Refactorings.Apply.fsproj
+dotnet dotnet-fsharplint lint tests/FSharp.Refactorings.Tests/FSharp.Refactorings.Tests.fsproj
 ```
 
-and the analyzers are run against their own source (expecting zero findings):
+and the analyzers are run against their own source, expecting zero findings.
+Both projects, not just the analyzers — the apply tool is F# we ship too, and
+it went a long time unchecked:
 
 ```bash
 dotnet tool run fsharp-analyzers --project src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Debug/net8.0 --code-root .
+dotnet tool run fsharp-analyzers --project src/FSharp.Refactorings.Apply/FSharp.Refactorings.Apply.fsproj --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Debug/net8.0 --code-root .
 ```
 
 Test inputs are string literals, so formatting tools never touch the
 deliberately-shaped source fragments the tests exercise.
 
-## Trying it in VS Code (Ionide)
+## Design principles
 
-1. `dotnet build src/FSharp.Refactorings.Analyzers`
-2. In the target repo's `.vscode/settings.json`:
-
-   ```json
-   {
-     "FSharp.enableAnalyzers": true,
-     "FSharp.analyzersPath": ["<path-to>/FSharp.Refactorings.Analyzers/bin/Debug/net8.0"]
-   }
-   ```
-
-3. Open an F# file containing e.g. `match x with | true -> 1 | false -> 2` —
-   a hint appears with a quick fix to rewrite it as `if x then 1 else 2`.
-
-Note: analyzers must be built against an FSharp.Compiler.Service compatible with
-the host FsAutoComplete. This project currently pins FSharp.Analyzers.SDK 0.37.2
-(FCS 43.12.201). See the SDK's version-pairing table when updating.
-
-## Running the CLI against a local build
-
-To try the analyzers from a checkout of this repository, point the host at
-the build output instead of the NuGet cache:
-
-```bash
-dotnet tool install --global fsharp-analyzers
-fsharp-analyzers --project YourProject.fsproj --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Debug/net8.0 --code-root .
-```
+1. **Never break user code.** A fix is only offered when it is provably safe to apply;
+   borderline cases simply don't produce a suggestion. Fixes are minimal range-based
+   text edits applied by the editor, so they are always a single native undo step.
+2. **Minimal edits.** Original formatting outside the edited range is untouched —
+   no whole-file reformatting.
+3. **Pure core, thin adapters.** Each refactoring is a pure function
+   `ParsedInput -> ISourceText -> Suggestion list`, unit-tested directly against
+   source strings. The SDK analyzer entry points in `Analyzers.fs` are one-liners.
+4. **Hints point toward idiomatic F# only.** Every analyzer rewrites `a → b`
+   where `b` is the more idiomatic form; we never ship a hint that moves code
+   *away* from idiomatic F#. That is why suggestions are `Hint` severity, not
+   warnings: they mark an opportunity, not a defect, and they never gate CI.
+   Genuinely reversible rewrites where neither direction is more idiomatic
+   (`if ↔ match`, tupled ↔ curried) belong in FsAutoComplete's codefix
+   infrastructure as user-invoked `refactor.rewrite` actions, and should be
+   contributed there rather than here.
 
