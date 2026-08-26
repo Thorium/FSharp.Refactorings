@@ -40,7 +40,7 @@ jobs:
           --project src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj
           --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Release/net8.0
           --code-root .
-          --report-file self-analysis.sarif
+          --report self-analysis.sarif
 
       - name: Pack
         run: dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts

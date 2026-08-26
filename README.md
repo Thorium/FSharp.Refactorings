@@ -10,6 +10,49 @@ so the same analyzers run in:
 Visual Studio 2022 does not load F# analyzers; the plan for VS is to upstream the
 most valuable fixes into `dotnet/fsharp`'s `FSharp.Editor` code fixes.
 
+## Use it from NuGet
+
+The analyzers ship as [`FSharp.Refactorings.Analyzers`](https://www.nuget.org/packages/FSharp.Refactorings.Analyzers).
+The package is a development dependency: it only produces hints and quick
+fixes — nothing from it flows into your compiled output.
+
+### VS Code / Ionide
+
+Reference the package from the project you want analyzed:
+
+```xml
+<PackageReference Include="FSharp.Refactorings.Analyzers" Version="0.1.0" PrivateAssets="all" />
+```
+
+then point Ionide at the restored analyzers in `.vscode/settings.json`:
+
+```json
+{
+  "FSharp.enableAnalyzers": true,
+  "FSharp.analyzersPath": [
+    "~/.nuget/packages/fsharp.refactorings.analyzers/0.1.0/analyzers/dotnet/fs"
+  ]
+}
+```
+
+(on Windows the cache lives under `%USERPROFILE%\.nuget\packages`). Suggestions
+appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
+
+### CLI / CI
+
+```bash
+dotnet tool install fsharp-analyzers
+dotnet fsharp-analyzers \
+  --project src/YourProject.fsproj \
+  --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.1.0/analyzers/dotnet/fs \
+  --report analysis.sarif
+```
+
+The CLI reports the same hints (SARIF output works in GitHub code scanning);
+applying fixes is editor-side. Individual rules can be turned off per
+repository with a `fsharprefactorings.json` — see
+[Configuration](#configuration) below.
+
 ## Design principles
 
 1. **Never break user code.** A fix is only offered when it is provably safe to apply;
