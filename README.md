@@ -43,17 +43,23 @@ appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 ### CLI / CI
 
 ```bash
-dotnet tool install fsharp-analyzers
-dotnet fsharp-analyzers \
-  --project src/YourProject.fsproj \
-  --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.2.0/analyzers/dotnet/fs \
-  --report analysis.sarif
+dotnet tool install --global fsharp-analyzers
+fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.2.0/analyzers/dotnet/fs --code-root . --report analysis.sarif
 ```
 
-The CLI reports the same hints (SARIF output works in GitHub code scanning);
-the stock `fsharp-analyzers` tool cannot apply fixes. Individual rules can be
-turned off per repository with a `fsharprefactorings.json` — see
-[Configuration](#configuration) below.
+`fsharp-analyzers` is the analyzer HOST, and it is the dotnet tool you
+install. This package is not a tool: it is a library of analyzer assemblies
+the host loads, so it is passed as a directory rather than installed. That
+directory sits in the NuGet cache because an analyzer package deliberately
+has no `lib/` folder and is marked a development dependency — a
+`PackageReference` therefore puts nothing in your `bin`, and after a restore
+the cache is where the assemblies live. `--analyzers-path` takes any folder
+holding them and searches it recursively.
+
+The CLI only REPORTS; it never edits your files, which is what you want in
+CI (SARIF output works in GitHub code scanning). To apply the fixes, use our
+own tool below. Individual rules can be turned off per repository with a
+`fsharprefactorings.json` — see [Configuration](#configuration) below.
 
 ### Applying fixes from the command line
 
@@ -72,7 +78,10 @@ It reads the exact compiler arguments from MSBuild, runs every analyzer,
 applies non-overlapping fixes bottom-up, and re-analyzes until a pass applies
 nothing (a fix can enable further fixes). The run refuses projects that
 already have errors, and fails loudly if applying ever introduces one.
-`--dry-run` lists what would change; `--codes` restricts to chosen rules.
+`--dry-run` is the report-only mode: it lists every fix it would make, with
+file and position, and writes nothing — the same view the `fsharp-analyzers`
+CLI above gives you, but from this tool. Rewriting is never implicit; drop
+`--dry-run` to let it edit. `--codes` restricts a run to chosen rules.
 `--api-changes` additionally applies cross-file fixes that change internal or
 public signatures — currying a tupled function (FR0090), reordering its
 parameters data-last (FR0091) — rewriting every call site in the project.
@@ -283,7 +292,10 @@ Note: analyzers must be built against an FSharp.Compiler.Service compatible with
 the host FsAutoComplete. This project currently pins FSharp.Analyzers.SDK 0.37.2
 (FCS 43.12.201). See the SDK's version-pairing table when updating.
 
-## Running from the CLI
+## Running the CLI against a local build
+
+To try the analyzers from a checkout of this repository, point the host at
+the build output instead of the NuGet cache:
 
 ```bash
 dotnet tool install --global fsharp-analyzers
