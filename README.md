@@ -196,10 +196,9 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0087 | The pattern `x :: []` → `[ x ]` | |
 | FR0088 | `Case(_, _)` → `Case _` when every field is a wildcard (typed-gated to real union cases; survives field-count changes) | |
 | FR0089 | `[ 1, 2 ]` is a SINGLE-tuple list — `,` builds a tuple, `;` separates elements (note; the classic paste trap, single-tuple lists are sometimes intended) | |
-| FR0092 | A constant `failwith "Error"` gains the enclosing function's arguments — `failwith $"Error, calling mymethod with x: {x}"` — so the log says which call failed, not just which line. Static messages only; an already-interpolated one was written deliberately, as was one that already names a parameter | ✓ |
-FR0012's hint corpus also gained the one-element-of-transformed family: `tryHead ∘ filter` → `tryFind`, `head ∘ sort[By][Descending]` → `min`/`minBy`/`max`/`maxBy`, `head ∘ rev` → `last`, `item 0` → `head` (List/Array/Seq) — each also a perf fix (no full sort or scan for one element).
-| FR0090 | Tupled → curried for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0008) | ✓ |
-| FR0091 | Data-last parameter reorder for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0023). The two parameters must have different concrete types, so that a call site outside the project — which we can neither see nor fix — fails to compile rather than silently swapping two interchangeable arguments | ✓ |
+| FR0090 | Tupled → curried for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0008) |  |
+| FR0091 | Data-last parameter reorder for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0023). The two parameters must have different concrete types, so that a call site outside the project — which we can neither see nor fix — fails to compile rather than silently swapping two interchangeable arguments |  |
+| FR0092 | A constant `failwith "Error"` gains the enclosing function's arguments — `failwith $"Error, calling mymethod with x: {x}"` — so the log says which call failed, not just which line. Static messages only; an already-interpolated one was written deliberately, as was one that already names a parameter |  |
 | — | DU case payload → named record (cross-file) | needs FSAC codefix infra |
 
 ## Configuration
