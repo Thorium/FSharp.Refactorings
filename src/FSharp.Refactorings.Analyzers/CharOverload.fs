@@ -82,7 +82,43 @@ let private (|OrdinalComparison|_|) (e: SynExpr) =
         ValueSome()
     | _ -> ValueNone
 
-/// Does the method identifier resolve to one of the gated BCL types?
+/// Does this method have an overload whose first parameter is char? On
+/// netstandard2.0/net48 e.g. String.Contains(char) does not exist and the
+/// rewrite would not compile. Fails OPEN: when the member list yields no
+/// overloads at all the scan is blind, and no-information must not
+/// suppress — only a visible overload set without a char variant does.
+/// Is the type char, possibly through the F# `char` abbreviation?
+[<TailCall>]
+let rec private isCharType (t: FSharpType) =
+    t.HasTypeDefinition
+    && (t.TypeDefinition.TryFullName = Some "System.Char"
+        || (t.TypeDefinition.IsFSharpAbbreviation
+            && isCharType t.TypeDefinition.AbbreviatedType))
+
+let private hasCharOverload (entity: FSharpEntity) (methodName: string) =
+    let takesChar (m: FSharpMemberOrFunctionOrValue) =
+        try
+            m.CurriedParameterGroups
+            |> Seq.exists (fun group -> group.Count >= 1 && isCharType group.[0].Type)
+        with OptionModule.FcsSymbolFailure ->
+            false
+
+    let overloads =
+        try
+            entity.MembersFunctionsAndValues
+            |> Seq.filter (fun m ->
+                try
+                    m.LogicalName = methodName
+                with OptionModule.FcsSymbolFailure ->
+                    false)
+            |> Seq.toList
+        with OptionModule.FcsSymbolFailure ->
+            []
+
+    overloads.IsEmpty || overloads |> List.exists takesChar
+
+/// Does the method identifier resolve to one of the gated BCL types, with a
+/// char overload available in this compilation's references?
 let private resolvesToGatedMethod (check: FSharpCheckFileResults) (source: ISourceText) (methodId: Ident) =
     let r = methodId.idRange
     let lineText = source.GetLineString(r.EndLine - 1)
@@ -91,16 +127,20 @@ let private resolvesToGatedMethod (check: FSharpCheckFileResults) (source: ISour
     | Some symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
-            let enclosing =
+            let enclosingEntity =
                 try
                     value.ApparentEnclosingEntity
-                    |> Option.bind (fun e -> e.TryFullName)
-                    |> Option.defaultValue ""
-                with _ ->
-                    ""
+                with OptionModule.FcsSymbolFailure ->
+                    None
+
+            let enclosing =
+                enclosingEntity
+                |> Option.bind (fun e -> e.TryFullName)
+                |> Option.defaultValue ""
 
             enclosingEntities
             |> List.exists (fun (entity, methods) -> enclosing = entity && methods.Contains methodId.idText)
+            && (enclosingEntity |> Option.exists (fun e -> hasCharOverload e methodId.idText))
         | _ -> false
     | None -> false
 

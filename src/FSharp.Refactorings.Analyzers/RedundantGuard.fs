@@ -78,13 +78,7 @@ let private resolvesToGated (check: FSharpCheckFileResults) (source: ISourceText
     | Some symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
-            let enclosing =
-                try
-                    value.ApparentEnclosingEntity
-                    |> Option.bind (fun e -> e.TryFullName)
-                    |> Option.defaultValue ""
-                with _ ->
-                    ""
+            let enclosing = OptionModule.enclosingFullName value
 
             gatedEntities
             |> List.exists (fun (prefix, methods) -> enclosing.StartsWith prefix && methods.Contains methodId.idText)

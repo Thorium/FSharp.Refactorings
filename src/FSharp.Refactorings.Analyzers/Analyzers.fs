@@ -270,7 +270,7 @@ let simplificationCliAnalyzer (ctx: CliContext) : Async<Message list> =
 // ---- FR0011 StructActivePattern ----
 
 let private structActivePatternMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
-    StructActivePattern.find parseTree source checkResults
+    StructActivePattern.find (Visibility.apiChangesAllowed ()) parseTree source checkResults
     |> List.map (fun s ->
         hint
             "FR0011"
@@ -382,7 +382,7 @@ let regexUsageCliAnalyzer (ctx: CliContext) : Async<Message list> =
 // ---- FR0016 StructDu ----
 
 let private structDuMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    StructDu.find parseTree source
+    StructDu.find (Visibility.apiChangesAllowed ()) parseTree source
     |> List.map (fun s ->
         hint
             "FR0016"
@@ -405,7 +405,7 @@ let structDuCliAnalyzer (ctx: CliContext) : Async<Message list> =
 // ---- FR0022 DuFieldNames ----
 
 let private duFieldNamesMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    DuFieldNames.find parseTree source
+    DuFieldNames.find (Visibility.apiChangesAllowed ()) parseTree source
     |> List.map (fun s ->
         hint
             "FR0022"
@@ -500,44 +500,74 @@ let dictTryAddCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0018" "DictTryAdd" (fun () ->
         dictTryAddMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
-// ---- FR0019 / FR0020 ObjectRules ----
+// ---- FR0019 / FR0020 / FR0054 ObjectRules ----
 
-let private objectRulesMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    let equalsSuggestions, ctorSuggestions = ObjectRules.find parseTree source
+let private objectRulesMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let equalsEnabled = Configuration.isRuleEnabled fileName "FR0019" "EqualsHashCode"
+    let ctorEnabled = Configuration.isRuleEnabled fileName "FR0020" "CtorAbstractCall"
 
-    let equalsMessages =
-        equalsSuggestions
-        |> List.map (fun s ->
-            hint
-                "FR0019"
-                (sprintf
-                    "Type '%s' overrides Equals without overriding GetHashCode; hash-based collections will misbehave."
-                    s.TypeName)
-                s.Range
-                [])
+    let raiseEnabled =
+        Configuration.isRuleEnabled fileName "FR0054" "RaiseInSpecialMember"
 
-    let ctorMessages =
-        ctorSuggestions
-        |> List.map (fun s ->
-            hint
-                "FR0020"
-                (sprintf
-                    "Abstract member '%s' is used during construction; the override runs before the derived class is initialized."
-                    s.MemberName)
-                s.Range
-                [])
+    if not (equalsEnabled || ctorEnabled || raiseEnabled) then
+        []
+    else
+        let equalsSuggestions, ctorSuggestions, raiseSuggestions =
+            ObjectRules.find parseTree source
 
-    equalsMessages @ ctorMessages
+        let equalsMessages =
+            if equalsEnabled then
+                equalsSuggestions
+                |> List.map (fun s ->
+                    hint
+                        "FR0019"
+                        (sprintf
+                            "Type '%s' overrides Equals without overriding GetHashCode; hash-based collections will misbehave."
+                            s.TypeName)
+                        s.Range
+                        [])
+            else
+                []
 
-[<EditorAnalyzer("ObjectRules", "Equals/GetHashCode pairing and ctor-time abstract calls", HelpBase)>]
+        let ctorMessages =
+            if ctorEnabled then
+                ctorSuggestions
+                |> List.map (fun s ->
+                    hint
+                        "FR0020"
+                        (sprintf
+                            "Abstract member '%s' is used during construction; the override runs before the derived class is initialized."
+                            s.MemberName)
+                        s.Range
+                        [])
+            else
+                []
+
+        let raiseMessages =
+            if raiseEnabled then
+                raiseSuggestions
+                |> List.map (fun s ->
+                    hint
+                        "FR0054"
+                        (sprintf
+                            "Raising from %s surprises its implicit callers (hash containers, debuggers, string formatting, finalization); return a defined value or restructure so the failure surfaces elsewhere."
+                            s.MemberName)
+                        s.Range
+                        [])
+            else
+                []
+
+        equalsMessages @ ctorMessages @ raiseMessages
+
+[<EditorAnalyzer("ObjectRules",
+                 "Equals/GetHashCode pairing, ctor-time abstract calls, raises in special members",
+                 HelpBase)>]
 let objectRulesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
-    whenEnabled ctx.FileName "FR0019" "ObjectRules" (fun () ->
-        objectRulesMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+    async { return objectRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
 
-[<CliAnalyzer("ObjectRules", "Equals/GetHashCode pairing and ctor-time abstract calls", HelpBase)>]
+[<CliAnalyzer("ObjectRules", "Equals/GetHashCode pairing, ctor-time abstract calls, raises in special members", HelpBase)>]
 let objectRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
-    whenEnabled ctx.FileName "FR0019" "ObjectRules" (fun () ->
-        objectRulesMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+    async { return objectRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
 
 // ---- FR0024 RaiseFailwith ----
 
@@ -739,10 +769,14 @@ let private objectDesignMessages
 
     let staticEnabled = Configuration.isRuleEnabled fileName "FR0033" "StaticMember"
 
-    if not (disposableEnabled || staticEnabled) then
+    let undisposedEnabled =
+        Configuration.isRuleEnabled fileName "FR0047" "UndisposedField"
+
+    if not (disposableEnabled || staticEnabled || undisposedEnabled) then
         []
     else
-        let disposables, statics = ObjectDesign.find parseTree source checkResults
+        let disposables, statics, undisposedFields =
+            ObjectDesign.find parseTree source checkResults
 
         let disposableMessages =
             if disposableEnabled then
@@ -773,7 +807,22 @@ let private objectDesignMessages
             else
                 []
 
-        disposableMessages @ staticMessages
+        let undisposedMessages =
+            if undisposedEnabled then
+                undisposedFields
+                |> List.map (fun s ->
+                    hint
+                        "FR0047"
+                        (sprintf
+                            "Type '%s' is IDisposable but its Dispose never touches disposable field '%s'; the resource leaks despite the pattern."
+                            s.TypeName
+                            s.FieldName)
+                        s.Range
+                        [])
+            else
+                []
+
+        disposableMessages @ staticMessages @ undisposedMessages
 
 [<EditorAnalyzer("ObjectDesign", "Disposable fields without IDisposable; could-be-static members", HelpBase)>]
 let objectDesignEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -983,7 +1032,8 @@ let private vectorizedLinqMessages (parseTree: ParsedInput) (source: ISourceText
         hint
             "FR0041"
             (sprintf
-                "Array.%s is a scalar loop; on .NET 8+ System.Linq's %s%s() is SIMD-vectorized for '%s''s element type (note: LINQ Sum throws on overflow where Array.sum wraps)."
+                "%s.%s over an array is a scalar loop; on .NET 8+ System.Linq's %s%s() is SIMD-vectorized for '%s''s element type (note: LINQ Sum throws on overflow where F#'s sum wraps)."
+                s.ModuleName
                 s.FunctionName
                 (string (System.Char.ToUpperInvariant s.FunctionName.[0]))
                 (s.FunctionName.Substring 1)
@@ -1003,8 +1053,8 @@ let vectorizedLinqCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0042 SprintfInterpolation ----
 
-let private sprintfInterpolationMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    SprintfInterpolation.find parseTree source
+let private sprintfInterpolationMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    SprintfInterpolation.find parseTree source checkResults
     |> List.map (fun s ->
         hint
             "FR0042"
@@ -1015,12 +1065,12 @@ let private sprintfInterpolationMessages (parseTree: ParsedInput) (source: ISour
 [<EditorAnalyzer("SprintfInterpolation", "Rewrite fully applied sprintf as typed interpolation", HelpBase)>]
 let sprintfInterpolationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0042" "SprintfInterpolation" (fun () ->
-        sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        whenChecked ctx (sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
 
 [<CliAnalyzer("SprintfInterpolation", "Rewrite fully applied sprintf as typed interpolation", HelpBase)>]
 let sprintfInterpolationCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0042" "SprintfInterpolation" (fun () ->
-        sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 // ---- FR0043 TypedHoles ----
 
@@ -1045,6 +1095,1048 @@ let typedHolesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
 let typedHolesCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0043" "TypedHoles" (fun () ->
         typedHolesMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0044 Reraise ----
+
+let private reraiseMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    Reraise.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0044"
+            (sprintf
+                "raise %s resets the exception's stack trace; reraise () rethrows it with the original trace intact."
+                s.ExceptionName)
+            s.Range
+            [ fix s.Range s.OriginalText "reraise ()" ])
+
+[<EditorAnalyzer("Reraise", "Rethrow with reraise () to preserve the stack trace", HelpBase)>]
+let reraiseEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0044" "Reraise" (fun () ->
+        whenChecked ctx (reraiseMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("Reraise", "Rethrow with reraise () to preserve the stack trace", HelpBase)>]
+let reraiseCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0044" "Reraise" (fun () ->
+        reraiseMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0045 NaNComparison ----
+
+let private nanComparisonMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    NaNComparison.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0045"
+            "Equality against NaN never holds (IEEE 754: NaN is unequal to everything); IsNaN performs the test this comparison meant."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("NaNComparison", "Test NaN with IsNaN, not equality", HelpBase)>]
+let nanComparisonEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0045" "NaNComparison" (fun () ->
+        whenChecked ctx (nanComparisonMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("NaNComparison", "Test NaN with IsNaN, not equality", HelpBase)>]
+let nanComparisonCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0045" "NaNComparison" (fun () ->
+        nanComparisonMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0046 WeakLock ----
+
+let private weakLockMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    WeakLock.find parseTree source checkResults
+    |> List.map (fun s ->
+        let shared =
+            match s.Kind with
+            | WeakLock.WeakKind.StringValue -> "interned strings are shared process-wide"
+            | WeakLock.WeakKind.TypeObject -> "runtime Type objects are shared process-wide"
+
+        hint
+            "FR0046"
+            (sprintf
+                "Locking on %s synchronizes with any code locking the same value (%s); use a dedicated private lock object (let lockObj = obj ())."
+                s.TargetText
+                shared)
+            s.Range
+            [])
+
+[<EditorAnalyzer("WeakLock", "Do not lock on strings or Type objects", HelpBase)>]
+let weakLockEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0046" "WeakLock" (fun () ->
+        whenChecked ctx (weakLockMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("WeakLock", "Do not lock on strings or Type objects", HelpBase)>]
+let weakLockCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0046" "WeakLock" (fun () ->
+        weakLockMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0048 FormatArgs ----
+
+let private formatArgsMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    FormatArgs.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0048"
+            (sprintf
+                "The format string references {%d} but only %d argument(s) are supplied; this throws FormatException at runtime (sprintf or interpolation would catch it at compile time)."
+                s.MissingIndex
+                s.ArgCount)
+            s.Range
+            [])
+
+[<EditorAnalyzer("FormatArgs", "String.Format placeholders must have arguments", HelpBase)>]
+let formatArgsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0048" "FormatArgs" (fun () ->
+        formatArgsMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("FormatArgs", "String.Format placeholders must have arguments", HelpBase)>]
+let formatArgsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0048" "FormatArgs" (fun () ->
+        formatArgsMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0049 SyncOverAsync ----
+
+let private syncOverAsyncMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    SyncOverAsync.find parseTree source checkResults
+    |> List.map (fun s ->
+        let message =
+            match s.Kind, s.Builder with
+            | kind, None ->
+                let what =
+                    match kind with
+                    | SyncOverAsync.BlockKind.TaskResult -> ".Result"
+                    | SyncOverAsync.BlockKind.TaskWait -> ".Wait()"
+                    | SyncOverAsync.BlockKind.AwaiterGetResult -> "GetAwaiter().GetResult()"
+                    | SyncOverAsync.BlockKind.RunSynchronously -> "Async.RunSynchronously"
+                    | SyncOverAsync.BlockKind.ThreadSleep -> "Thread.Sleep"
+
+                sprintf
+                    "%s is sync-over-async: either make this code async (wrap it in task { } and let!/do!) or call the synchronous API version."
+                    what
+            | kind, Some builder ->
+                let what =
+                    match kind with
+                    | SyncOverAsync.BlockKind.TaskResult -> ".Result blocks the thread"
+                    | SyncOverAsync.BlockKind.TaskWait -> ".Wait() blocks the thread"
+                    | SyncOverAsync.BlockKind.AwaiterGetResult -> "GetAwaiter().GetResult() blocks the thread"
+                    | SyncOverAsync.BlockKind.RunSynchronously -> "Async.RunSynchronously blocks the thread"
+                    | SyncOverAsync.BlockKind.ThreadSleep -> "Thread.Sleep blocks the thread"
+
+                sprintf
+                    "%s inside %s { }; bind with let!/do! instead — sync-over-async in a computation expression invites thread-pool starvation and deadlocks."
+                    what
+                    builder
+
+        let fixes =
+            match s.Fix with
+            | Some(r, original, replacement) -> [ fix r original replacement ]
+            | None -> []
+
+        hint "FR0049" message s.Range fixes)
+
+[<EditorAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
+let syncOverAsyncEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0049" "SyncOverAsync" (fun () ->
+        whenChecked ctx (syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
+let syncOverAsyncCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0049" "SyncOverAsync" (fun () ->
+        syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0050 / FR0051 Accumulation ----
+
+let private accumulationMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
+    let foldEnabled = Configuration.isRuleEnabled fileName "FR0050" "MutableFold"
+
+    let quadraticEnabled =
+        Configuration.isRuleEnabled fileName "FR0051" "QuadraticAppend"
+
+    if not (foldEnabled || quadraticEnabled) then
+        []
+    else
+        let folds, quadratics = Accumulation.find parseTree source checkResults
+
+        let foldMessages =
+            if foldEnabled then
+                folds
+                |> List.map (fun s ->
+                    hint
+                        "FR0050"
+                        "This mutable accumulator loop is a fold; the rewrite evaluates the same expression with the same bindings, without the mutable."
+                        s.Range
+                        [ fix s.Range s.OriginalText s.ReplacementText ])
+            else
+                []
+
+        let quadraticMessages =
+            if quadraticEnabled then
+                quadratics
+                |> List.map (fun s ->
+                    hint
+                        "FR0051"
+                        (sprintf
+                            "Appending to '%s' inside a loop copies it every iteration (O(n²)); accumulate into a ResizeArray, or cons with :: and List.rev once at the end."
+                            s.Name)
+                        s.Range
+                        [])
+            else
+                []
+
+        foldMessages @ quadraticMessages
+
+[<EditorAnalyzer("Accumulation", "Mutable accumulator loops and quadratic appends", HelpBase)>]
+let accumulationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return whenChecked ctx (accumulationMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText) }
+
+[<CliAnalyzer("Accumulation", "Mutable accumulator loops and quadratic appends", HelpBase)>]
+let accumulationCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async {
+        return accumulationMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+    }
+
+// ---- FR0052 CountIsEmpty ----
+
+let private countIsEmptyMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    CountIsEmpty.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0052"
+            "Count on a concurrent collection walks its segments (O(n) with a snapshot); IsEmpty peeks at the head."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("CountIsEmpty", "Prefer IsEmpty over Count for emptiness checks", HelpBase)>]
+let countIsEmptyEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0052" "CountIsEmpty" (fun () ->
+        whenChecked ctx (countIsEmptyMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("CountIsEmpty", "Prefer IsEmpty over Count for emptiness checks", HelpBase)>]
+let countIsEmptyCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0052" "CountIsEmpty" (fun () ->
+        countIsEmptyMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0053 HexString ----
+
+let private hexStringMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    HexString.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0053"
+            "BitConverter.ToString + Replace allocates the dashed string just to strip it; Convert.ToHexString produces the identical hex directly."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("HexString", "Hex-encode with Convert.ToHexString", HelpBase)>]
+let hexStringEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0053" "HexString" (fun () ->
+        whenChecked ctx (hexStringMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("HexString", "Hex-encode with Convert.ToHexString", HelpBase)>]
+let hexStringCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0053" "HexString" (fun () ->
+        hexStringMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0055 SwallowedException ----
+
+let private swallowedExceptionMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    SwallowedException.find parseTree source
+    |> List.map (fun s ->
+        let message =
+            s.FallbackText
+            |> Option.map (fun fallback ->
+                $"'with %s{s.PatternText} -> %s{fallback}' swallows every exception and disguises the failure as a legitimate result; log or reraise () — and catch the specific exception type this code can actually handle.")
+            |> Option.defaultWith (fun () ->
+                $"'with %s{s.PatternText} -> ()' silently swallows every exception, including cancellation and programming errors; log or reraise () — and catch the specific exception type this code can actually handle.")
+
+        hint "FR0055" message s.Range [])
+
+[<EditorAnalyzer("SwallowedException", "Empty catch-all handlers swallow every exception", HelpBase)>]
+let swallowedExceptionEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0055" "SwallowedException" (fun () ->
+        swallowedExceptionMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("SwallowedException", "Empty catch-all handlers swallow every exception", HelpBase)>]
+let swallowedExceptionCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0055" "SwallowedException" (fun () ->
+        swallowedExceptionMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0057 XmlDocParams ----
+
+let private xmlDocParamsMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    XmlDocParams.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0057"
+            (sprintf
+                "The doc comment on '%s' documents some parameters but not %s; drifting docs mislead more than missing ones."
+                s.BindingName
+                (s.MissingParams |> List.map (sprintf "'%s'") |> String.concat ", "))
+            s.Range
+            [])
+
+[<EditorAnalyzer("XmlDocParams", "Doc comments that document only some parameters", HelpBase)>]
+let xmlDocParamsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0057" "XmlDocParams" (fun () ->
+        xmlDocParamsMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("XmlDocParams", "Doc comments that document only some parameters", HelpBase)>]
+let xmlDocParamsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0057" "XmlDocParams" (fun () ->
+        xmlDocParamsMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0058 RecursiveSeq ----
+
+let private recursiveSeqMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    RecursiveSeq.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0058"
+            (sprintf
+                "'%s' re-enters itself through %s { }: each recursion level allocates a fresh enumerator and every element pays O(depth) MoveNexts. Walk with an explicit Stack/queue inside a single %s { } instead."
+                s.FunctionName
+                s.Builder
+                s.Builder)
+            s.Range
+            [])
+
+[<EditorAnalyzer("RecursiveSeq", "Recursive re-entry through sequence builders", HelpBase)>]
+let recursiveSeqEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0058" "RecursiveSeq" (fun () ->
+        recursiveSeqMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("RecursiveSeq", "Recursive re-entry through sequence builders", HelpBase)>]
+let recursiveSeqCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0058" "RecursiveSeq" (fun () ->
+        recursiveSeqMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0059 StructOption ----
+
+let private structOptionMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    StructOption.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0059"
+            (sprintf
+                "Private '%s' returns Option, allocating per call; ValueOption is a struct — the definition and every match site are rewritten together."
+                s.FunctionName)
+            s.DefRange
+            (s.Edits
+             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+
+[<EditorAnalyzer("StructOption", "Move private option-returning functions to ValueOption", HelpBase)>]
+let structOptionEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0059" "StructOption" (fun () ->
+        whenChecked ctx (structOptionMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("StructOption", "Move private option-returning functions to ValueOption", HelpBase)>]
+let structOptionCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0059" "StructOption" (fun () ->
+        structOptionMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0060 AttributeMerge ----
+
+let private attributeMergeMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    AttributeMerge.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0060"
+            "Consecutive attribute brackets can merge into one [<...; ...>] list."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("AttributeMerge", "Merge consecutive attribute brackets", HelpBase)>]
+let attributeMergeEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0060" "AttributeMerge" (fun () ->
+        attributeMergeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("AttributeMerge", "Merge consecutive attribute brackets", HelpBase)>]
+let attributeMergeCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0060" "AttributeMerge" (fun () ->
+        attributeMergeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0061 ArgNames ----
+
+let private argNamesMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    ArgNames.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0061"
+            (sprintf
+                "'%s' is not a parameter of this function (parameters: %s); the wrong name sends the caller debugging the wrong argument — nameof would keep it honest."
+                s.UsedName
+                (String.concat ", " s.ParameterNames))
+            s.Range
+            [])
+
+[<EditorAnalyzer("ArgNames", "Argument-exception parameter names must exist", HelpBase)>]
+let argNamesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0061" "ArgNames" (fun () ->
+        argNamesMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("ArgNames", "Argument-exception parameter names must exist", HelpBase)>]
+let argNamesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0061" "ArgNames" (fun () ->
+        argNamesMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0063 / FR0064 ExceptionRules ----
+
+let private exceptionRulesMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let finallyEnabled = Configuration.isRuleEnabled fileName "FR0063" "RaiseInFinally"
+
+    let reservedEnabled =
+        Configuration.isRuleEnabled fileName "FR0064" "ReservedException"
+
+    if not (finallyEnabled || reservedEnabled) then
+        []
+    else
+        let finallies, reserved = ExceptionRules.find parseTree source
+
+        let finallyMessages =
+            if finallyEnabled then
+                finallies
+                |> List.map (fun s ->
+                    hint
+                        "FR0063"
+                        "Raising inside finally replaces any exception already in flight — the original failure vanishes."
+                        s.Range
+                        [])
+            else
+                []
+
+        let reservedMessages =
+            if reservedEnabled then
+                reserved
+                |> List.map (fun s ->
+                    hint
+                        "FR0064"
+                        $"%s{s.TypeName} is reserved for the runtime; raising it manually misleads catchers and debuggers — InvalidOperationException or an Argument exception says what actually happened."
+                        s.Range
+                        [])
+            else
+                []
+
+        finallyMessages @ reservedMessages
+
+[<EditorAnalyzer("ExceptionRules", "Raise-in-finally and reserved exceptions", HelpBase)>]
+let exceptionRulesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return exceptionRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+[<CliAnalyzer("ExceptionRules", "Raise-in-finally and reserved exceptions", HelpBase)>]
+let exceptionRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async { return exceptionRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+// ---- FR0065 / FR0066 SecurityRules ----
+
+let private securityRulesMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let cryptoEnabled = Configuration.isRuleEnabled fileName "FR0065" "WeakCrypto"
+    let sqlEnabled = Configuration.isRuleEnabled fileName "FR0066" "SqlStrings"
+
+    if not (cryptoEnabled || sqlEnabled) then
+        []
+    else
+        let crypto, sql = SecurityRules.find parseTree source
+
+        let cryptoMessages =
+            if cryptoEnabled then
+                crypto
+                |> List.map (fun s ->
+                    let message =
+                        match s.Kind with
+                        | SecurityRules.WeakKind.Hash name ->
+                            $"%s{name} is collision-broken for security purposes; use SHA-256 or stronger (for non-security checksums, note the intent)."
+                        | SecurityRules.WeakKind.Cipher name ->
+                            $"%s{name}'s key size is within practical attack range; use AES."
+                        | SecurityRules.WeakKind.CertificateBypass ->
+                            "Overriding certificate validation silently accepts any man-in-the-middle; scope trust to the specific expected certificate instead."
+
+                    hint "FR0065" message s.Range [])
+            else
+                []
+
+        let sqlMessages =
+            if sqlEnabled then
+                sql
+                |> List.map (fun s ->
+                    hint
+                        "FR0066"
+                        (sprintf
+                            "SQL assembled from strings flows user data into the query language (%s); use parameters (@name + Parameters.Add) instead."
+                            s.Sink)
+                        s.Range
+                        [])
+            else
+                []
+
+        cryptoMessages @ sqlMessages
+
+[<EditorAnalyzer("SecurityRules", "Weak crypto and string-built SQL", HelpBase)>]
+let securityRulesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return securityRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+[<CliAnalyzer("SecurityRules", "Weak crypto and string-built SQL", HelpBase)>]
+let securityRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async { return securityRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+// ---- FR0062 / FR0067 / FR0068 MiscRules ----
+
+let private miscRulesMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let mutableEnabled =
+        Configuration.isRuleEnabled fileName "FR0062" "VisibleMutableState"
+
+    let parseEnabled = Configuration.isRuleEnabled fileName "FR0067" "CultureParse"
+    let enumEnabled = Configuration.isRuleEnabled fileName "FR0068" "DuplicateEnumValue"
+
+    if not (mutableEnabled || parseEnabled || enumEnabled) then
+        []
+    else
+        let mutables, parses, enums = MiscRules.find parseTree source
+
+        let mutableMessages =
+            if mutableEnabled then
+                mutables
+                |> List.map (fun s ->
+                    hint
+                        "FR0062"
+                        (sprintf
+                            "'%s' is visible mutable module state — a global variable any consumer can write, with no thread safety; make it private or pass the state explicitly."
+                            s.Name)
+                        s.Range
+                        [])
+            else
+                []
+
+        let parseMessages =
+            if parseEnabled then
+                parses
+                |> List.map (fun s ->
+                    hint
+                        "FR0067"
+                        (sprintf
+                            "%s without a culture reads differently under different server cultures ('1,5' vs '1.5', day/month order); pass CultureInfo.InvariantCulture or the intended culture explicitly."
+                            s.CallName)
+                        s.Range
+                        [])
+            else
+                []
+
+        let enumMessages =
+            if enumEnabled then
+                enums
+                |> List.map (fun s ->
+                    hint
+                        "FR0068"
+                        (sprintf
+                            "Enum case '%s' has the same value as '%s'; comparisons and ToString silently conflate them — usually a copy-paste slip."
+                            s.CaseName
+                            s.OriginalName)
+                        s.Range
+                        [])
+            else
+                []
+
+        mutableMessages @ parseMessages @ enumMessages
+
+[<EditorAnalyzer("MiscRules", "Visible mutable state, culture parsing, duplicate enum values", HelpBase)>]
+let miscRulesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return miscRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+[<CliAnalyzer("MiscRules", "Visible mutable state, culture parsing, duplicate enum values", HelpBase)>]
+let miscRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async { return miscRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+// ---- FR0069 / FR0070 StructHints ----
+
+let private structHintsMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let voptionEnabled = Configuration.isRuleEnabled fileName "FR0069" "VOptionField"
+    let structEnabled = Configuration.isRuleEnabled fileName "FR0070" "SmallStructType"
+
+    let structTupleEnabled =
+        Configuration.isRuleEnabled fileName "FR0093" "StructTupleField"
+
+    if not (voptionEnabled || structEnabled || structTupleEnabled) then
+        []
+    else
+        let voptions, structs, structTuples =
+            StructHints.find (Visibility.apiChangesAllowed ()) parseTree source
+
+        let voptionMessages =
+            if voptionEnabled then
+                voptions
+                |> List.map (fun s ->
+                    hint
+                        "FR0069"
+                        $"Field '%s{s.FieldName}: %s{s.ElementText} option' of the contained type '%s{s.TypeName}' boxes the %s{s.ElementText} on every Some; '%s{s.ElementText} voption' keeps it flat — and private/internal visibility keeps the migration contained (public types risk serialization changes and unbounded call-site churn)."
+                        s.Range
+                        [])
+            else
+                []
+
+        let structMessages =
+            if structEnabled then
+                structs
+                |> List.map (fun s ->
+                    hint
+                        "FR0070"
+                        $"Contained record '%s{s.TypeName}' has only %d{s.FieldCount} small struct field(s); [<Struct>] removes a heap allocation per instance (mind copy semantics: struct records copy on assignment)."
+                        s.Range
+                        [])
+            else
+                []
+
+        let structTupleMessages =
+            if structTupleEnabled then
+                structTuples
+                |> List.map (fun s ->
+                    hint
+                        "FR0093"
+                        $"Field '%s{s.FieldName}: %s{s.TupleText}' of the contained type '%s{s.TypeName}' is a reference tuple: one heap object per value. 'struct (%s{s.TupleText})' stores it inline — but every construction and destructuring of the field needs the struct keyword too, so this is advice, not a mechanical fix."
+                        s.Range
+                        [])
+            else
+                []
+
+        voptionMessages @ structMessages @ structTupleMessages
+
+[<EditorAnalyzer("StructHints", "voption fields and [<Struct>] candidates in contained types", HelpBase)>]
+let structHintsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+[<CliAnalyzer("StructHints", "voption fields and [<Struct>] candidates in contained types", HelpBase)>]
+let structHintsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async { return structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+// ---- FR0071 LoopInvariant ----
+
+let private loopInvariantMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    LoopInvariant.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0071"
+            $"'let %s{s.Name} = ...' does not depend on the loop, but every iteration re-evaluates it; the rewrite hoists it above the loop (the value is pure, so evaluating it once is the only observable change — a saving)."
+            s.Range
+            [ for range, original, replacement in s.Edits -> fix range original replacement ])
+
+[<EditorAnalyzer("LoopInvariant", "Hoist pure loop-invariant bindings out of loops", HelpBase)>]
+let loopInvariantEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0071" "LoopInvariant" (fun () ->
+        whenChecked ctx (loopInvariantMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("LoopInvariant", "Hoist pure loop-invariant bindings out of loops", HelpBase)>]
+let loopInvariantCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0071" "LoopInvariant" (fun () ->
+        loopInvariantMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0072 ExpandWildcard ----
+
+let private expandWildcardMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    ExpandWildcard.find parseTree source checkResults
+    |> List.map (fun s ->
+        let hidden = String.concat ", " s.HiddenCases
+
+        hint
+            "FR0072"
+            $"This wildcard stands in for exactly %s{hidden}; matching explicitly keeps the match closed, so a future union case raises an incomplete-match warning instead of silently taking this branch."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("ExpandWildcard", "Expand a wildcard hiding one or two DU cases", HelpBase)>]
+let expandWildcardEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0072" "ExpandWildcard" (fun () ->
+        whenChecked ctx (expandWildcardMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("ExpandWildcard", "Expand a wildcard hiding one or two DU cases", HelpBase)>]
+let expandWildcardCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0072" "ExpandWildcard" (fun () ->
+        expandWildcardMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0073 MatchBang ----
+
+let private matchBangMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    MatchBangRule.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0073"
+            $"'{s.Name}' exists only to be matched; 'match!' binds and matches in one step (F# 4.5+)."
+            s.Range
+            [ for range, original, replacement in s.Edits -> fix range original replacement ])
+
+[<EditorAnalyzer("MatchBang", "Collapse let!-then-match into match!", HelpBase)>]
+let matchBangEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0073" "MatchBang" (fun () ->
+        matchBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("MatchBang", "Collapse let!-then-match into match!", HelpBase)>]
+let matchBangCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0073" "MatchBang" (fun () ->
+        matchBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0078 WhileBang ----
+
+/// Does the project's --langversion allow at least this F# major version?
+/// An absent flag means the SDK default, which is the latest.
+let private langVersionAtLeast (major: float) (options: AnalyzerProjectOptions) =
+    let explicitVersion =
+        options.OtherOptions
+        |> List.tryPick (fun (arg: string) ->
+            if arg.StartsWith "--langversion:" then
+                Some(arg.Substring "--langversion:".Length)
+            else
+                None)
+
+    match explicitVersion with
+    | None
+    | Some("latest" | "preview" | "latestmajor") -> true
+    | Some v ->
+        match
+            System.Double.TryParse(
+                v,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture
+            )
+        with
+        | true, n -> n >= major
+        | false, _ -> false
+
+let private whileBangMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    MatchBangRule.findWhileBang parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0078"
+            $"This mutable-'%s{s.Name}' loop is the F# 8 'while!' idiom spelled out; 'while!' re-evaluates the computation each iteration, replacing all three bindings."
+            s.Range
+            [ for range, original, replacement in s.Edits -> fix range original replacement ])
+
+[<EditorAnalyzer("WhileBang", "Collapse the mutable-condition loop idiom into while! (F# 8)", HelpBase)>]
+let whileBangEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0078" "WhileBang" (fun () ->
+        if langVersionAtLeast 8.0 ctx.ProjectOptions then
+            whileBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        else
+            [])
+
+[<CliAnalyzer("WhileBang", "Collapse the mutable-condition loop idiom into while! (F# 8)", HelpBase)>]
+let whileBangCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0078" "WhileBang" (fun () ->
+        if langVersionAtLeast 8.0 ctx.ProjectOptions then
+            whileBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        else
+            [])
+
+// ---- FR0074 NestedRecordUpdate ----
+
+let private nestedRecordUpdateMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    NestedRecordUpdate.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0074"
+            $"F# 8 updates nested fields directly: this copy-and-update chain flattens to '%s{s.Path}' path syntax."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("NestedRecordUpdate", "Flatten nested record copy-and-update (F# 8)", HelpBase)>]
+let nestedRecordUpdateEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0074" "NestedRecordUpdate" (fun () ->
+        if langVersionAtLeast 8.0 ctx.ProjectOptions then
+            whenChecked ctx (nestedRecordUpdateMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        else
+            [])
+
+[<CliAnalyzer("NestedRecordUpdate", "Flatten nested record copy-and-update (F# 8)", HelpBase)>]
+let nestedRecordUpdateCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0074" "NestedRecordUpdate" (fun () ->
+        if langVersionAtLeast 8.0 ctx.ProjectOptions then
+            nestedRecordUpdateMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+        else
+            [])
+
+// ---- FR0075 UseBinding ----
+
+let private useBindingMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    UseBinding.find parseTree source checkResults
+    |> List.map (fun s ->
+        match s.Fix with
+        | Some(original, replacement) ->
+            hint
+                "FR0075"
+                $"'%s{s.Name}' is a locally constructed disposable that nothing disposes; 'use' disposes it at scope exit, and every mention stays inside the scope."
+                s.Range
+                [ fix s.Range original replacement ]
+        | None ->
+            hint
+                "FR0075"
+                $"'%s{s.Name}' is a locally constructed disposable that nothing disposes; it also escapes this scope (passed, stored, or returned), so decide the owner — 'use' here, or disposal at the destination."
+                s.Range
+                [])
+
+[<EditorAnalyzer("UseBinding", "Locally constructed disposables become use-bindings", HelpBase)>]
+let useBindingEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0075" "UseBinding" (fun () ->
+        whenChecked ctx (useBindingMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("UseBinding", "Locally constructed disposables become use-bindings", HelpBase)>]
+let useBindingCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0075" "UseBinding" (fun () ->
+        useBindingMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0076 MapIgnore ----
+
+let private mapIgnoreMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    MapIgnore.find parseTree source checkResults
+    |> List.map (fun s ->
+        match s.ReplacementText with
+        | Some replacement ->
+            hint
+                "FR0076"
+                $"%s{s.ModuleName}.map allocates a result list just to discard it; iter runs the same calls in the same order without it."
+                s.Range
+                [ fix s.Range s.OriginalText replacement ]
+        | None ->
+            hint
+                "FR0076"
+                "Seq.map is lazy: piping it to ignore evaluates nothing — the mapping never runs. Seq.iter would run the effects; if none are wanted, delete the line."
+                s.Range
+                [])
+
+[<EditorAnalyzer("MapIgnore", "map-then-ignore pipelines", HelpBase)>]
+let mapIgnoreEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0076" "MapIgnore" (fun () ->
+        whenChecked ctx (mapIgnoreMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("MapIgnore", "map-then-ignore pipelines", HelpBase)>]
+let mapIgnoreCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0076" "MapIgnore" (fun () ->
+        mapIgnoreMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0092 FailwithContext ----
+
+let private failwithContextMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    FailwithContext.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0092"
+            $"This failure message is a constant: every occurrence in the log reads the same. Interpolating %s{s.FunctionName}'s arguments says which call produced it — check the values are safe to log first."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("FailwithContext", "Static failwith messages that could carry their arguments", HelpBase)>]
+let failwithContextEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0092" "FailwithContext" (fun () ->
+        whenChecked ctx (failwithContextMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("FailwithContext", "Static failwith messages that could carry their arguments", HelpBase)>]
+let failwithContextCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0092" "FailwithContext" (fun () ->
+        failwithContextMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0079 SingleAwaitable ----
+
+let private singleAwaitableMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    SingleAwaitable.find parseTree source checkResults
+    |> List.map (fun s ->
+        let advice =
+            if s.CallName = "Async.Parallel" then
+                "nothing runs in parallel — run the one computation directly (the result becomes 'T instead of 'T[])"
+            else
+                "await the one task directly (the task keeps its result where WhenAll returns plain Task)"
+
+        hint
+            "FR0079"
+            $"%s{s.CallName} over a single-element literal adds indirection for nothing; %s{advice}."
+            s.Range
+            [])
+
+[<EditorAnalyzer("SingleAwaitable", "WhenAll/WaitAll/Parallel over a single awaitable", HelpBase)>]
+let singleAwaitableEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0079" "SingleAwaitable" (fun () ->
+        whenChecked ctx (singleAwaitableMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("SingleAwaitable", "WhenAll/WaitAll/Parallel over a single awaitable", HelpBase)>]
+let singleAwaitableCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0079" "SingleAwaitable" (fun () ->
+        singleAwaitableMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0077 ImplementMissing ----
+
+let private implementMissingMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    // deliberately NO hasErrors gate: this rule exists to fix the
+    // missing-members compile error
+    ImplementMissing.find parseTree source checkResults
+    |> List.map (fun s ->
+        let missing = String.concat ", " s.MissingNames
+
+        hint
+            "FR0077"
+            $"This object expression is missing %d{s.MissingNames.Length} member(s) of %s{s.InterfaceName} (%s{missing}); the fix stubs them with NotImplementedException so the code compiles and the TODOs are explicit."
+            s.Range
+            [ fix s.Range "" s.InsertText ])
+
+[<EditorAnalyzer("ImplementMissing", "Stub missing interface members with NotImplementedException", HelpBase)>]
+let implementMissingEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0077" "ImplementMissing" (fun () ->
+        whenChecked ctx (implementMissingMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("ImplementMissing", "Stub missing interface members with NotImplementedException", HelpBase)>]
+let implementMissingCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0077" "ImplementMissing" (fun () ->
+        implementMissingMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0080 TabIndentation ----
+
+let private tabIndentationMessages (fileName: string) (source: ISourceText) : Message list =
+    // works from source text alone: tab-indented files do not parse
+    // (FS1161), and repairing that is the point
+    TabIndentation.find fileName source
+    |> List.map (fun s ->
+        hint
+            "FR0080"
+            $"TABs are not allowed as F# indentation (FS1161) — pasted code often brings them along; the fix expands each leading TAB to four spaces on all %d{s.Edits.Length} affected line(s)."
+            s.Range
+            [ for range, original, replacement in s.Edits -> fix range original replacement ])
+
+[<EditorAnalyzer("TabIndentation", "Expand pasted TAB indentation to spaces", HelpBase)>]
+let tabIndentationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0080" "TabIndentation" (fun () -> tabIndentationMessages ctx.FileName ctx.SourceText)
+
+[<CliAnalyzer("TabIndentation", "Expand pasted TAB indentation to spaces", HelpBase)>]
+let tabIndentationCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0080" "TabIndentation" (fun () -> tabIndentationMessages ctx.FileName ctx.SourceText)
+
+// ---- FR0081 PathSeparator ----
+
+let private pathSeparatorMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    PathSeparator.find parseTree source
+    |> List.map (fun s ->
+        let sep = if s.Separator = "/" then "'/'" else "'\\'"
+
+        hint
+            "FR0081"
+            $"This concatenation joins path fragments with a hard-coded %s{sep}; Path.Combine handles separators and platform differences (advice: it treats a ROOTED second argument as absolute, and a URL should stay string-joined or use Uri)."
+            s.Range
+            [])
+
+[<EditorAnalyzer("PathSeparator", "Hand-built path concatenation", HelpBase)>]
+let pathSeparatorEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0081" "PathSeparator" (fun () ->
+        pathSeparatorMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("PathSeparator", "Hand-built path concatenation", HelpBase)>]
+let pathSeparatorCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0081" "PathSeparator" (fun () ->
+        pathSeparatorMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0082 / FR0083 / FR0084 / FR0086 RedundantSyntax ----
+
+let private redundantSyntaxMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let codeOf kind =
+        match kind with
+        | RedundantSyntax.Kind.AttributeSuffix -> "FR0082", "AttributeSuffix"
+        | RedundantSyntax.Kind.AttributeParens -> "FR0083", "AttributeParens"
+        | RedundantSyntax.Kind.Backticks -> "FR0084", "RedundantBackticks"
+        | RedundantSyntax.Kind.HoleFreeInterpolation -> "FR0086", "HoleFreeInterpolation"
+
+    let messageOf kind =
+        match kind with
+        | RedundantSyntax.Kind.AttributeSuffix ->
+            "The Attribute suffix is redundant; the compiler resolves the short form."
+        | RedundantSyntax.Kind.AttributeParens -> "An empty argument list on an attribute says nothing."
+        | RedundantSyntax.Kind.Backticks -> "These backticks quote a plain identifier; the quoting does nothing."
+        | RedundantSyntax.Kind.HoleFreeInterpolation ->
+            "This interpolated string has no holes; a plain string literal says the same with less."
+
+    RedundantSyntax.find parseTree source
+    |> List.choose (fun s ->
+        let code, name = codeOf s.Kind
+
+        if Configuration.isRuleEnabled fileName code name then
+            Some(hint code (messageOf s.Kind) s.Range [ fix s.Range s.OriginalText s.ReplacementText ])
+        else
+            None)
+
+[<EditorAnalyzer("RedundantSyntax", "Attribute suffix/parens, backticks, hole-free interpolation", HelpBase)>]
+let redundantSyntaxEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return redundantSyntaxMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+[<CliAnalyzer("RedundantSyntax", "Attribute suffix/parens, backticks, hole-free interpolation", HelpBase)>]
+let redundantSyntaxCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async { return redundantSyntaxMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+// ---- FR0085 RedundantNew ----
+
+let private redundantNewMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    RedundantNew.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0085"
+            $"'new' is conventionally reserved for disposable constructions (the compiler warns the inverse as FS0760); %s{s.TypeName} is not IDisposable, so the keyword is noise."
+            s.Range
+            [ fix s.Range s.OriginalText "" ])
+
+[<EditorAnalyzer("RedundantNew", "new on non-disposable constructions", HelpBase)>]
+let redundantNewEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0085" "RedundantNew" (fun () ->
+        whenChecked ctx (redundantNewMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("RedundantNew", "new on non-disposable constructions", HelpBase)>]
+let redundantNewCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0085" "RedundantNew" (fun () ->
+        redundantNewMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0087 / FR0088 / FR0089 PatternCleanups ----
+
+let private patternCleanupMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
+    let consEnabled = Configuration.isRuleEnabled fileName "FR0087" "ConsListPat"
+
+    let wildEnabled =
+        Configuration.isRuleEnabled fileName "FR0088" "RedundantCaseFieldPats"
+
+    let tupleEnabled = Configuration.isRuleEnabled fileName "FR0089" "TupleInList"
+
+    if not (consEnabled || wildEnabled || tupleEnabled) then
+        []
+    else
+        let conses, wilds, tuples = PatternCleanups.find parseTree source checkResults
+
+        [ if consEnabled then
+              for s in conses do
+                  hint
+                      "FR0087"
+                      "The pattern `x :: []` is a one-element list; `[ x ]` says so directly."
+                      s.Range
+                      [ fix s.Range s.OriginalText s.ReplacementText ]
+          if wildEnabled then
+              for s in wilds do
+                  hint
+                      "FR0088"
+                      $"Every field of %s{s.CaseName} is a wildcard; '%s{s.CaseName} _' matches the same and survives field-count changes."
+                      s.Range
+                      [ fix s.Range s.OriginalText s.ReplacementText ]
+          if tupleEnabled then
+              for s in tuples do
+                  hint
+                      "FR0089"
+                      $"This literal holds ONE tuple of %d{s.Elements} elements — ',' builds a tuple, ';' separates elements; if a single-tuple collection is intended, ignore or disable this rule."
+                      s.Range
+                      [] ]
+
+[<EditorAnalyzer("PatternCleanups", "Cons-of-empty, all-wildcard case fields, tuple-in-list", HelpBase)>]
+let patternCleanupsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return whenChecked ctx (patternCleanupMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText) }
+
+[<CliAnalyzer("PatternCleanups", "Cons-of-empty, all-wildcard case fields, tuple-in-list", HelpBase)>]
+let patternCleanupsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async {
+        return patternCleanupMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+    }
 
 // ---- FR0021 InterpToString ----
 

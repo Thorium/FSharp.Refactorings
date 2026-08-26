@@ -39,10 +39,30 @@ let ``seq-to-array conversion moves past map`` () =
         "module Test\nlet f g xs = xs |> Seq.map g |> Seq.toArray"
 
 [<Fact>]
-let ``list-to-array conversion moves past choose`` () =
+let ``an operation is not moved out of Array into List`` () =
+    // Array.choose runs over a contiguous block; List.choose would allocate
+    // a cons cell per surviving element and then be walked to build the
+    // array anyway, so the move is a pessimisation
+    assertNoSuggestion "module Test\nlet f g xs = xs |> List.toArray |> Array.choose g"
+
+[<Fact>]
+let ``the Array-of-list spelling is blocked the same way`` () =
+    assertNoSuggestion "module Test\nlet f g xs = xs |> Array.ofList |> Array.map g"
+
+[<Fact>]
+let ``an Array operation still moves into Seq where laziness removes the array`` () =
+    // the seq is enumerated once either way; filtering first means the
+    // unfiltered n-element array is never built at all
     assertPatched
-        "module Test\nlet f g xs = xs |> List.toArray |> Array.choose g"
-        "module Test\nlet f g xs = xs |> List.choose g |> List.toArray"
+        "module Test\nlet f g (xs: int seq) = xs |> Seq.toArray |> Array.filter g"
+        "module Test\nlet f g (xs: int seq) = xs |> Seq.filter g |> Seq.toArray"
+
+[<Fact>]
+let ``a consuming operation still drops a list-to-array conversion`` () =
+    // here the conversion disappears entirely, which is a win either way
+    assertPatched
+        "module Test\nlet f xs = xs |> List.toArray |> Array.length"
+        "module Test\nlet f xs = xs |> List.length"
 
 [<Fact>]
 let ``array-to-list conversion moves past map`` () =

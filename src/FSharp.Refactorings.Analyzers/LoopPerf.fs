@@ -148,7 +148,10 @@ let private loopBinders (path: SyntaxNode list) =
             insideLoop <- true
         | _ -> ()
 
-    if insideLoop then Some(Set.ofSeq binders) else None
+    if insideLoop then
+        ValueSome(Set.ofSeq binders)
+    else
+        ValueNone
 
 /// Find per-iteration linear probes and expensive constructions.
 let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion list * ConstructionSuggestion list =
@@ -161,7 +164,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
         match expr with
         | ContainsCall(moduleName, coll) ->
             match loopBinders path with
-            | Some binders when not (binders.Contains coll.idText) ->
+            | ValueSome binders when not (binders.Contains coll.idText) ->
                 contains.Add
                     { Range = expr.Range
                       CollectionName = coll.idText
@@ -169,11 +172,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
             | _ -> ()
         | ExpensiveCtor typeName ->
             match loopBinders path with
-            | Some _ ->
+            | ValueSome _ ->
                 constructions.Add
                     { Range = expr.Range
                       TypeName = typeName }
-            | None -> ()
+            | ValueNone -> ()
         | _ -> ()
 
     List.ofSeq contains, List.ofSeq constructions

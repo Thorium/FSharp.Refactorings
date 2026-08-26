@@ -1,0 +1,10 @@
+<Project>
+
+  <!-- One version for the whole solution: the analyzers package and the
+       fsharp-refactorings-apply tool embed each other's behavior, so they
+       release in lockstep. Bump HERE (and only here) before tagging. -->
+  <PropertyGroup>
+    <Version>0.2.0</Version>
+  </PropertyGroup>
+
+</Project>

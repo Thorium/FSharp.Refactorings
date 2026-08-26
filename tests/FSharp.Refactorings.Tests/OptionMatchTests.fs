@@ -74,3 +74,36 @@ let ``custom type with IsSome and Value members is left alone`` () =
         optionMatchIn
             "type Box(v: int) =\n    member _.IsSome = true\n    member _.Value = v\nlet f (x: Box) = if x.IsSome then x.Value else 0"
     )
+
+[<Fact>]
+let ``IsSome and a Value predicate becomes Option exists`` () =
+    assertOptionMatch "let f (x: int option) = x.IsSome && x.Value > 3" "x |> Option.exists (fun v -> v > 3)"
+
+[<Fact>]
+let ``an and-chain of predicates joins inside the lambda`` () =
+    assertOptionMatch
+        "let f (x: int option) = x.IsSome && x.Value > 3 && x.Value < 10"
+        "x |> Option.exists (fun v -> v > 3 && v < 10)"
+
+[<Fact>]
+let ``IsNone or a Value predicate becomes Option forall`` () =
+    assertOptionMatch "let f (x: int option) = x.IsNone || x.Value > 3" "x |> Option.forall (fun v -> v > 3)"
+
+[<Fact>]
+let ``a combo without any Value use stays`` () =
+    // `x.IsSome && flag` gains nothing from a lambda
+    Assert.Empty(optionMatchIn "let f (x: int option) (flag: bool) = x.IsSome && flag")
+
+[<Fact>]
+let ``IsNone with && is not the exists shape`` () =
+    Assert.Empty(optionMatchIn "let g (x: int option) = x.IsNone && (try x.Value > 3 with _ -> false)")
+
+[<Fact>]
+let ``a voption combo uses the ValueOption module`` () =
+    assertOptionMatch "let f (x: int voption) = x.IsSome && x.Value > 3" "x |> ValueOption.exists (fun v -> v > 3)"
+
+[<Fact>]
+let ``a multiline if with single-line branches now rewrites`` () =
+    assertOptionMatch
+        "let f (x: int option) =\n    if x.IsSome then\n        x.Value + 1\n    else\n        0"
+        "match x with | Some v -> v + 1 | None -> 0"

@@ -8,7 +8,6 @@
     <BuildOutputTargetFolder>analyzers/dotnet/fs</BuildOutputTargetFolder>
     <PackageId>FSharp.Refactorings.Analyzers</PackageId>
     <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK.</Description>
-    <Version>0.1.0</Version>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/FSharp.Refactorings</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/FSharp.Refactorings</RepositoryUrl>
@@ -28,6 +27,7 @@
 
   <ItemGroup>
     <Compile Include="Text.fs" />
+    <Compile Include="Visibility.fs" />
     <Compile Include="AstIndex.fs" />
     <Compile Include="Configuration.fs" />
     <Compile Include="MatchToIf.fs" />
@@ -66,9 +66,41 @@
     <Compile Include="VectorizedLinq.fs" />
     <Compile Include="SprintfInterpolation.fs" />
     <Compile Include="TypedHoles.fs" />
+    <Compile Include="Reraise.fs" />
+    <Compile Include="NaNComparison.fs" />
+    <Compile Include="WeakLock.fs" />
+    <Compile Include="FormatArgs.fs" />
+    <Compile Include="SyncOverAsync.fs" />
+    <Compile Include="Accumulation.fs" />
+    <Compile Include="CountIsEmpty.fs" />
+    <Compile Include="HexString.fs" />
+    <Compile Include="SwallowedException.fs" />
+    <Compile Include="XmlDocParams.fs" />
+    <Compile Include="RecursiveSeq.fs" />
+    <Compile Include="StructOption.fs" />
+    <Compile Include="AttributeMerge.fs" />
+    <Compile Include="ArgNames.fs" />
+    <Compile Include="ExceptionRules.fs" />
+    <Compile Include="SecurityRules.fs" />
+    <Compile Include="MiscRules.fs" />
+    <Compile Include="StructHints.fs" />
+    <Compile Include="LoopInvariant.fs" />
+    <Compile Include="ExpandWildcard.fs" />
+    <Compile Include="MatchBangRule.fs" />
+    <Compile Include="NestedRecordUpdate.fs" />
+    <Compile Include="UseBinding.fs" />
+    <Compile Include="MapIgnore.fs" />
+    <Compile Include="SingleAwaitable.fs" />
+    <Compile Include="ImplementMissing.fs" />
+    <Compile Include="TabIndentation.fs" />
+    <Compile Include="PathSeparator.fs" />
+    <Compile Include="RedundantSyntax.fs" />
+    <Compile Include="PatternCleanups.fs" />
+    <Compile Include="RedundantNew.fs" />
     <Compile Include="AsyncIgnore.fs" />
     <Compile Include="ObjectRules.fs" />
     <Compile Include="InterpToString.fs" />
+    <Compile Include="FailwithContext.fs" />
     <Compile Include="Analyzers.fs" />
   </ItemGroup>
 

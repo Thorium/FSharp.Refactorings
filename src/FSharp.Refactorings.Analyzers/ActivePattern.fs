@@ -121,16 +121,23 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                 ->
                                 let patternName = capitalize fnName
 
-                                if not (fileText.Value.Contains("(|" + patternName + "|")) then
+                                if not (fileText.Value.Contains $"(|{patternName}|") then
                                     let fnText = textOfRange source fnExpr.Range
+                                    let indent = String(' ', decl.Range.StartColumn)
 
+                                    // new code gets the best form directly:
+                                    // private (no new API surface), inline
+                                    // (tiny body, FS1113-safe because the
+                                    // pattern is as private as any guard it
+                                    // references), and struct-returning (no
+                                    // allocation per match attempt)
                                     let binding =
                                         sprintf
-                                            "let private (|%s|_|) input = if %s input then Some input else None"
+                                            "[<return: Struct>]\n%slet inline private (|%s|_|) input =\n%s    if %s input then ValueSome input else ValueNone"
+                                            indent
                                             patternName
+                                            indent
                                             fnText
-
-                                    let indent = String(' ', decl.Range.StartColumn)
 
                                     let insertAt = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
 
@@ -139,10 +146,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                     suggestions.Add
                                         { PatternName = patternName
                                           InsertRange = insertAt
-                                          InsertText = binding + "\n" + indent
+                                          InsertText = $"{binding}\n{indent}"
                                           ClauseRange = clauseRange
                                           OriginalClauseText = textOfRange source clauseRange
-                                          ClauseText = patternName + " " + var.idText }
+                                          ClauseText = $"{patternName} {var.idText}" }
                             | _ -> ()
                 | _ -> () }
 

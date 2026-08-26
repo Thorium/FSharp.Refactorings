@@ -5,11 +5,21 @@
 ///         if n % 2 = 0 then Some n else None  let (|Even|_|) n =
 ///                                                 if n % 2 = 0 then ValueSome n else ValueNone
 ///
-/// Call sites are unchanged — the attribute only changes the representation —
-/// which is what makes this rewrite provably safe. Requires F# 6+.
+/// Pattern-MATCH sites are unchanged — the attribute only changes the
+/// representation — which is what makes this rewrite safe for the ordinary
+/// use of an active pattern. Requires F# 6+.
+///
+/// It is not free for every other use: an explicit invocation
+/// (`match (|Even|_| ) 4 with Some v -> ...`) or a first-class one
+/// (`List.choose (|Even|_|) xs`) sees `voption` instead of `option`. Inside
+/// the assembly the compiler catches that immediately; outside it, nothing
+/// does — so the pattern must be invisible outside this assembly, unless
+/// the caller opted in with `--api-changes` (see Visibility.isInScope).
 ///
 /// Safety rules:
 ///   - module-level, single-binding partial active pattern `(|P|_|)`
+///   - private/internal, or nested in a private/internal module, unless
+///     API changes were allowed
 ///   - no existing attributes on the binding and no return-type annotation
 ///     (an `option` annotation would need to become `voption`)
 ///   - every result position in the body must be a literal `Some e` or `None`
@@ -76,19 +86,31 @@ let private isPartialActivePatternName (name: string) = Regex.IsMatch(name, @"^\
 
 /// Find trivial partial active patterns that can get [<return: Struct>].
 /// Requires typed check results for the Some/None gate.
-let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
+let find
+    (allowApiChanges: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (check: FSharpCheckFileResults)
+    : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
 
     let collector =
         { new SyntaxCollectorBase() with
-            override _.WalkSynModuleDecl(_path, decl) =
+            override _.WalkSynModuleDecl(path, decl) =
                 match decl with
                 | SynModuleDecl.Let(
                     bindings = [ SynBinding(
                                      attributes = []
                                      returnInfo = None
-                                     headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ nameIdent ]))
-                                     expr = body) ]) when isPartialActivePatternName nameIdent.idText ->
+                                     accessibility = bindingAccess
+                                     headPat = SynPat.LongIdent(
+                                         longDotId = SynLongIdent(id = [ nameIdent ]); accessibility = patAccess)
+                                     expr = body) ]) when
+                    isPartialActivePatternName nameIdent.idText
+                    // `let private (|P|_|)` parses its modifier onto the
+                    // pattern, not the binding — check both
+                    && Visibility.isInScope allowApiChanges path [ bindingAccess; patAccess ]
+                    ->
                     let results = ResizeArray<range * string>()
 
                     if collectResults results body && results.Count > 0 then

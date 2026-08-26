@@ -7,8 +7,8 @@ open FSharp.Refactorings.Tests.Parsing
 // ---- FR0042 SprintfInterpolation ----
 
 let private sprintfIn (source: string) =
-    let tree, sourceText = parse source
-    SprintfInterpolation.find tree sourceText
+    let tree, sourceText, checkResults = parseAndCheck source
+    SprintfInterpolation.find tree sourceText checkResults
 
 let private assertSprintfFix (source: string) (expectedReplacement: string) =
     match sprintfIn source with

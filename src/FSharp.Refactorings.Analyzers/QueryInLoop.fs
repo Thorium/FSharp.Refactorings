@@ -34,17 +34,10 @@ type Suggestion =
 let private isQueryableName (name: string) =
     name.StartsWith "System.Linq.IQueryable"
 
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
-
 /// Is the type (after abbreviations) IQueryable or an implementation of it?
 let private isQueryableType (t: FSharpType) =
     try
-        let t = stripAbbreviations t
+        let t = OptionModule.stripAbbreviations t
 
         t.HasTypeDefinition
         && (t.TypeDefinition.TryFullName |> Option.exists isQueryableName

@@ -151,4 +151,6 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 | _ -> ()
         | _ -> ()
 
-    List.ofSeq suggestions
+    suggestions
+    |> Seq.filter (fun s -> not (spansDirective source s.Range))
+    |> List.ofSeq

@@ -35,6 +35,14 @@ type CtorCallSuggestion =
         OriginalText: string
     }
 
+/// FR0054 (CA1065): a raise inside a member callers never expect to throw.
+type RaiseInSpecialSuggestion =
+    {
+        /// "Equals", "GetHashCode", "ToString", or "Dispose".
+        MemberName: string
+        Range: range
+    }
+
 /// The member name bound by a `member`/`override` definition, with its range.
 let private memberName (SynBinding(headPat = headPat)) =
     match headPat with
@@ -134,10 +142,40 @@ let rec private selfRefsLoop
 
         selfRefsLoop self names acc next
 
-/// Find Equals-without-GetHashCode and ctor-time abstract calls.
-let find (parseTree: ParsedInput) (source: ISourceText) : EqualsSuggestion list * CtorCallSuggestion list =
+/// Members that hash containers, debuggers, and finalization call
+/// implicitly — an exception thrown there surfaces far from its cause.
+let private specialMembers = set [ "Equals"; "GetHashCode"; "ToString"; "Dispose" ]
+
+/// Raising functions from FSharp.Core.
+let private raisingFunctions =
+    set
+        [ "raise"
+          "failwith"
+          "failwithf"
+          "invalidOp"
+          "invalidArg"
+          "nullArg"
+          "notImplemented" ]
+
+/// Find Equals-without-GetHashCode, ctor-time abstract calls, and raises in
+/// members that are never expected to throw.
+let find
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    : EqualsSuggestion list * CtorCallSuggestion list * RaiseInSpecialSuggestion list =
     let equalsSuggestions = ResizeArray<EqualsSuggestion>()
     let ctorSuggestions = ResizeArray<CtorCallSuggestion>()
+    let raiseSuggestions = ResizeArray<RaiseInSpecialSuggestion>()
+    let index = AstIndex.ofTree parseTree
+
+    // raise-like applications, for range-containment checks
+    let raiseSites =
+        index.Exprs
+        |> Array.choose (fun (_, e) ->
+            match e with
+            | SynExpr.App(isInfix = false; funcExpr = SingleIdent fn) when raisingFunctions.Contains fn.idText ->
+                Some(fn.idText, e.Range)
+            | _ -> None)
 
     let collector =
         { new SyntaxCollectorBase() with
@@ -163,6 +201,30 @@ let find (parseTree: ParsedInput) (source: ISourceText) : EqualsSuggestion list 
                                   OriginalText = textOfRange source ident.idRange }
                         | _ -> ()
 
+                        // rule 3 (FR0054): raises inside members callers never
+                        // expect to throw (excluding ones inside a try-with,
+                        // which the member handles itself)
+                        for binding in memberBindings typeDefn |> List.filter isOverride do
+                            match memberName binding, binding with
+                            | Some nameId, SynBinding(expr = body) when specialMembers.Contains nameId.idText ->
+                                let handledRanges =
+                                    index.Exprs
+                                    |> Array.choose (fun (_, e) ->
+                                        match e with
+                                        | SynExpr.TryWith(tryExpr = t) when Range.rangeContainsRange body.Range e.Range ->
+                                            Some t.Range
+                                        | _ -> None)
+
+                                for _, siteRange in
+                                    raiseSites
+                                    |> Array.filter (fun (_, r) ->
+                                        Range.rangeContainsRange body.Range r
+                                        && not (handledRanges |> Array.exists (fun h -> Range.rangeContainsRange h r))) do
+                                    raiseSuggestions.Add
+                                        { MemberName = nameId.idText
+                                          Range = siteRange }
+                            | _ -> ()
+
                         // rule 2: abstract members referenced during construction
                         let abstracts = abstractSlotNames typeDefn
 
@@ -180,4 +242,4 @@ let find (parseTree: ParsedInput) (source: ISourceText) : EqualsSuggestion list 
                 | _ -> () }
 
     AstIndex.replay collector parseTree
-    List.ofSeq equalsSuggestions, List.ofSeq ctorSuggestions
+    List.ofSeq equalsSuggestions, List.ofSeq ctorSuggestions, List.ofSeq raiseSuggestions

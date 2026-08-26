@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -43,7 +43,9 @@ jobs:
           --report self-analysis.sarif
 
       - name: Pack
-        run: dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
+        run: |
+          dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
+          dotnet pack src/FSharp.Refactorings.Apply -c Release -o artifacts
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -64,7 +66,9 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Pack
-        run: dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
+        run: |
+          dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
+          dotnet pack src/FSharp.Refactorings.Apply -c Release -o artifacts
 
       - name: Push to NuGet
         run: >

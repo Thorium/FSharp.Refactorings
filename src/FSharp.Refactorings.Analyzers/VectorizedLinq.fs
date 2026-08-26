@@ -24,6 +24,8 @@ open FSharp.Refactorings.Text
 type Suggestion =
     {
         Range: range
+        /// "Array" or "Seq" — the module used at the call site.
+        ModuleName: string
         /// "sum", "average", "min", "max" — for the message.
         FunctionName: string
         /// The array value's name, for the message.
@@ -32,31 +34,29 @@ type Suggestion =
 
 let private vectorizedFunctions = set [ "sum"; "average"; "min"; "max" ]
 
+/// `Seq.sum` over an array is the same scalar loop as `Array.sum`; both
+/// modules are matched, and the typed gate below requires the VALUE to be
+/// an array (a Seq.sum over a list never fires).
+let private aggregationModules = set [ "Array"; "Seq" ]
+
 /// Element types whose LINQ aggregations are vectorized with clean
 /// semantics (floats excluded: NaN handling differs between the worlds).
 let private vectorizedElements = set [ "System.Int32"; "System.Int64" ]
 
-/// `Array.<fn> arr` / `arr |> Array.<fn>` for an aggregation function.
+/// `<m>.<fn> arr` / `arr |> <m>.<fn>` for an aggregation function.
 [<return: Struct>]
 let private (|ArrayAggregation|_|) (e: SynExpr) =
     match e with
     | SynExpr.App(
         isInfix = false
         funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))
-        argExpr = SynExpr.Ident arr) when m.idText = "Array" && vectorizedFunctions.Contains f.idText ->
-        ValueSome(f.idText, arr)
+        argExpr = SynExpr.Ident arr) when aggregationModules.Contains m.idText && vectorizedFunctions.Contains f.idText ->
+        ValueSome(m.idText, f.idText, arr)
     | PipeApp(SynExpr.Ident arr, SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))) when
-        m.idText = "Array" && vectorizedFunctions.Contains f.idText
+        aggregationModules.Contains m.idText && vectorizedFunctions.Contains f.idText
         ->
-        ValueSome(f.idText, arr)
+        ValueSome(m.idText, f.idText, arr)
     | _ -> ValueNone
-
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
 
 /// Does the identifier resolve to an int[]/int64[]?
 let private resolvesToVectorizableArray (check: FSharpCheckFileResults) (source: ISourceText) (ident: Ident) =
@@ -68,12 +68,12 @@ let private resolvesToVectorizableArray (check: FSharpCheckFileResults) (source:
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
             try
-                let t = stripAbbreviations value.FullType
+                let t = OptionModule.stripAbbreviations value.FullType
 
                 t.HasTypeDefinition
                 && t.TypeDefinition.IsArrayType
                 && t.GenericArguments.Count = 1
-                && (stripAbbreviations t.GenericArguments.[0]).TypeDefinition.TryFullName
+                && (OptionModule.stripAbbreviations t.GenericArguments.[0]).TypeDefinition.TryFullName
                    |> Option.exists vectorizedElements.Contains
             with _ ->
                 false
@@ -90,8 +90,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
         [ for _, expr in index.Exprs do
               match expr with
-              | ArrayAggregation(fn, arr) when resolvesToVectorizableArray check source arr ->
+              | ArrayAggregation(m, fn, arr) when resolvesToVectorizableArray check source arr ->
                   { Range = expr.Range
+                    ModuleName = m
                     FunctionName = fn
                     ArrayName = arr.idText }
               | _ -> () ]

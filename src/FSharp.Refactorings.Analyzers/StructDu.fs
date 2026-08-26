@@ -6,9 +6,18 @@
 ///         | Square of side: float            | Circle of radius: float
 ///                                            | Square of side: float
 ///
+/// A struct union is a different kind of value from a class union: it is
+/// copied rather than referenced and can never be null. Consumers inside
+/// the assembly get compiler errors if that matters to them; consumers
+/// outside get silently different semantics. So — like its record sibling
+/// FR0070 — this fires only on unions invisible outside the assembly,
+/// unless the caller opted in with `--api-changes`.
+///
 /// Safety rules (struct DUs have real language constraints, so only clearly
 /// safe unions are suggested):
 ///   - module-level, attribute-free type definition with 2–3 cases
+///   - private/internal, or nested in a private/internal module, unless
+///     API changes were allowed
 ///   - every case field's type is a whitelisted small immutable value type
 ///     (int, float, bool, char, byte, int64, decimal, Guid, DateTime, ...)
 ///     written as a plain identifier — no strings (reference type is fine in
@@ -69,25 +78,33 @@ let private isSmallValueType (t: SynType) =
     | _ -> false
 
 /// Find small module-level unions that can carry [<Struct>].
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
 
     let collector =
         { new SyntaxCollectorBase() with
-            override _.WalkSynModuleDecl(_path, decl) =
+            override _.WalkSynModuleDecl(path, decl) =
                 match decl with
                 | SynModuleDecl.Types(
                     typeDefns = [ SynTypeDefn(
-                                      typeInfo = SynComponentInfo(attributes = []; longId = [ typeName ])
+                                      typeInfo = SynComponentInfo(
+                                          attributes = []; longId = [ typeName ]; accessibility = typeAccess)
                                       typeRepr = SynTypeDefnRepr.Simple(
                                           simpleRepr = SynTypeDefnSimpleRepr.Union(unionCases = cases); range = _)
-                                      members = []) ]) when cases.Length >= 2 && cases.Length <= 3 ->
+                                      members = []) ]) when
+                    cases.Length >= 2
+                    && cases.Length <= 3
+                    // only the TYPE's own visibility counts: a private
+                    // representation still leaves a public class-vs-struct
+                    // type visible to consumers
+                    && Visibility.isInScope allowApiChanges path [ typeAccess ]
+                    ->
                     let caseFields =
                         cases
                         |> List.map (fun (SynUnionCase(caseType = caseType)) ->
                             match caseType with
                             | SynUnionCaseKind.Fields fields -> Some fields
-                            | _ -> None)
+                            | SynUnionCaseKind.FullType _ -> None)
 
                     match List.fold (fun acc f -> Option.map2 (fun a b -> b :: a) acc f) (Some []) caseFields with
                     | None -> ()

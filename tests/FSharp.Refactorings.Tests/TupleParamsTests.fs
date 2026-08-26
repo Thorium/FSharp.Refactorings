@@ -55,6 +55,12 @@ let ``call without space keeps valid syntax`` () =
         "let private add a b = a + b\nlet total = add 1 2"
 
 [<Fact>]
+let ``a call nested inside another call's tuple suppresses the suggestion`` () =
+    // the inner `(1, 2)` edit sits inside the outer call-tuple edit, so the
+    // two range edits cannot apply together atomically
+    assertNoSuggestion "let private add (a, b) = a + b\nlet total = add (add (1, 2), 3)"
+
+[<Fact>]
 let ``recursive self-call is rewritten too`` () =
     assertSingleSuggestion
         "let rec private count (n, acc) =\n    if n = 0 then acc else count (n - 1, acc + 1)\nlet c = count (10, 0)"

@@ -64,14 +64,7 @@ let private resolvesToListAdd (check: FSharpCheckFileResults) (source: ISourceTe
     | Some symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
-            (try
-                value.ApparentEnclosingEntity
-                |> Option.bind (fun e -> e.TryFullName)
-                |> Option.defaultValue ""
-             with _ ->
-                 "")
-                .StartsWith
-                "System.Collections.Generic.List`"
+            (OptionModule.enclosingFullName value).StartsWith "System.Collections.Generic.List`"
         | _ -> false
     | None -> false
 
@@ -82,9 +75,9 @@ let private lambdaPatText (source: ISourceText) (pat: SynPat) =
     match pat with
     | SynPat.Named _
     | SynPat.Wild _
-    | SynPat.Paren _ -> Some text
-    | SynPat.Tuple _ -> Some($"({text})")
-    | _ -> None
+    | SynPat.Paren _ -> ValueSome text
+    | SynPat.Tuple _ -> ValueSome($"({text})")
+    | _ -> ValueNone
 
 /// Find accumulate-only loops over List<'T>. Requires typed check results.
 let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
@@ -116,7 +109,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               Some(receiverText + ".AddRange " + argumentText source enumExpr)
                           | _ ->
                               match lambdaPatText source pat with
-                              | Some patText when isSafeInline element && isSingleLine pat.Range ->
+                              | ValueSome patText when isSafeInline element && isSingleLine pat.Range ->
                                   Some(
                                       receiverText
                                       + ".AddRange("
@@ -137,3 +130,4 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       | None -> ()
                   | _ -> ()
               | _ -> () ]
+    |> List.filter (fun s -> not (spansDirective source s.Range))

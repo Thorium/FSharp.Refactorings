@@ -86,7 +86,27 @@ let ``curried continuation still parses after removal`` () =
     assertPatched "module Test\nlet r = List.map(id) [ 1; 2 ]" "module Test\nlet r = List.map id [ 1; 2 ]"
 
 [<Fact>]
+let ``static method call keeps its parens`` () =
+    // real-world corpus regression: File.ReadAllText(path)-style .NET calls
+    // are method calls, and the style guide parenthesizes those
+    assertNoSuggestion "module Test\nlet t (p: string) = System.IO.Path.GetFileName(p)"
+
+[<Fact>]
+let ``constructor call keeps its parens`` () =
+    // StringValues("x")-style constructors read as .NET interop, not F#
+    // function application
+    assertNoSuggestion "module Test\ntype W(x: int) =\n    member _.V = x\nlet w (i: int) = W(i)"
+
+[<Fact>]
+let ``qualified constructor call keeps its parens`` () =
+    assertNoSuggestion "module Test\nlet b (s: string) = System.Text.StringBuilder(s)"
+
+[<Fact>]
 let ``doubly parenthesized operator reference keeps one paren pair`` () =
     // the operator reference's own parens are part of its range, so only the
     // redundant outer pair is removed
     assertPatched "module Test\nlet r = List.map((+)) [ 1 ]" "module Test\nlet r = List.map (+) [ 1 ]"
+
+[<Fact>]
+let ``operator method call keeps its parens`` () =
+    assertNoSuggestion "module Test\nlet f (x: float32) = TorchSharp.Scalar.op_Implicit(x)"

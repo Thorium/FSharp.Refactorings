@@ -51,13 +51,6 @@ let private integerTypes =
           "System.UInt32"
           "System.UInt64" ]
 
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
-
 /// The provably ToString-identical specifier for the fill's type.
 let private specifierFor (check: FSharpCheckFileResults) (source: ISourceText) (ident: Ident) =
     let r = ident.idRange
@@ -80,7 +73,7 @@ let private specifierFor (check: FSharpCheckFileResults) (source: ISourceText) (
         fillType
         |> Option.bind (fun t ->
             try
-                let t = stripAbbreviations t
+                let t = OptionModule.stripAbbreviations t
 
                 if not t.HasTypeDefinition then
                     None
@@ -90,7 +83,7 @@ let private specifierFor (check: FSharpCheckFileResults) (source: ISourceText) (
                     | Some "System.Char" -> Some "%c"
                     | Some name when integerTypes.Contains name -> Some "%d"
                     | _ -> None
-            with _ ->
+            with OptionModule.FcsSymbolFailure ->
                 None)
     | None -> None
 

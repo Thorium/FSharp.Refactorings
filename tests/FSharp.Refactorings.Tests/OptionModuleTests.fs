@@ -72,14 +72,14 @@ let ``unit none-branch becomes Option iter`` () =
 let ``transformed body with default becomes map and defaultValue`` () =
     assertSingleSuggestion
         "let f (x: int option) = match x with | Some v -> v * 2 | None -> 0"
-        "Option.map"
+        "Option.map + Option.defaultValue"
         "x |> Option.map (fun v -> v * 2) |> Option.defaultValue 0"
 
 [<Fact>]
 let ``transformed body with effectful default becomes map and defaultWith`` () =
     assertSingleSuggestion
         "let compute () = 42\nlet f (x: int option) = match x with | Some v -> v * 2 | None -> compute ()"
-        "Option.map"
+        "Option.map + Option.defaultWith"
         "x |> Option.map (fun v -> v * 2) |> Option.defaultWith (fun () -> compute ())"
 
 [<Fact>]

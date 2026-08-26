@@ -16,6 +16,7 @@
 module FSharp.Refactorings.SprintfInterpolation
 
 open System.Text.RegularExpressions
+open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Refactorings.Text
@@ -33,13 +34,14 @@ let private specifierRegex =
 /// take function arguments and `*` widths take an extra argument.
 let private isValueSpecifier (c: char) = "sdiuxXobcfFeEgGMAO".Contains c
 
-/// The sprintf application spine: format literal and argument list.
+/// The sprintf application spine: the sprintf identifier and the
+/// argument list.
 [<TailCall>]
 let rec private collectSpine (args: SynExpr list) (e: SynExpr) =
     match e with
     | SynExpr.App(isInfix = false; funcExpr = f; argExpr = a) -> collectSpine (a :: args) f
-    | IdentName "sprintf" -> Some args
-    | _ -> None
+    | SingleIdent id when id.idText = "sprintf" -> ValueSome(id, args)
+    | _ -> ValueNone
 
 /// A simple argument that reads well inside `{...}` and cannot contain
 /// braces or nested quotes.
@@ -51,16 +53,19 @@ let private simpleArg (e: SynExpr) =
     | SynExpr.Const _ -> true
     | _ -> false
 
-/// Find fully applied simple sprintf calls.
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+/// Find fully applied simple sprintf calls. Requires typed check results
+/// (`sprintf` itself must resolve to FSharp.Core, not a shadow).
+let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
     let index = AstIndex.ofTree parseTree
 
     [ for _, expr in index.Exprs do
           match expr with
           | SynExpr.App(isInfix = false) when isSingleLine expr.Range ->
               match collectSpine [] expr with
-              | Some(SynExpr.Const(SynConst.String(_, SynStringKind.Regular, _), _) as fmtExpr :: args) when
-                  not args.IsEmpty && args |> List.forall simpleArg
+              | ValueSome(sprintfId, (SynExpr.Const(SynConst.String(_, SynStringKind.Regular, _), _) as fmtExpr :: args)) when
+                  not args.IsEmpty
+                  && args |> List.forall simpleArg
+                  && OptionModule.resolvesToCoreOperator check source sprintfId
                   ->
                   let fmtSource = textOfRange source fmtExpr.Range
                   let fmt = fmtSource.Substring(1, fmtSource.Length - 2)

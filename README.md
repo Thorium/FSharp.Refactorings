@@ -16,12 +16,14 @@ The analyzers ship as [`FSharp.Refactorings.Analyzers`](https://www.nuget.org/pa
 The package is a development dependency: it only produces hints and quick
 fixes — nothing from it flows into your compiled output.
 
+NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT PATH (BIN) AND WILL NOT BE PART OF YOUR PROJECT.
+
 ### VS Code / Ionide
 
 Reference the package from the project you want analyzed:
 
 ```xml
-<PackageReference Include="FSharp.Refactorings.Analyzers" Version="0.1.0" PrivateAssets="all" />
+<PackageReference Include="FSharp.Refactorings.Analyzers" Version="0.2.0" PrivateAssets="all" />
 ```
 
 then point Ionide at the restored analyzers in `.vscode/settings.json`:
@@ -30,7 +32,7 @@ then point Ionide at the restored analyzers in `.vscode/settings.json`:
 {
   "FSharp.enableAnalyzers": true,
   "FSharp.analyzersPath": [
-    "~/.nuget/packages/fsharp.refactorings.analyzers/0.1.0/analyzers/dotnet/fs"
+    "~/.nuget/packages/fsharp.refactorings.analyzers/0.2.0/analyzers/dotnet/fs"
   ]
 }
 ```
@@ -44,14 +46,41 @@ appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 dotnet tool install fsharp-analyzers
 dotnet fsharp-analyzers \
   --project src/YourProject.fsproj \
-  --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.1.0/analyzers/dotnet/fs \
+  --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.2.0/analyzers/dotnet/fs \
   --report analysis.sarif
 ```
 
 The CLI reports the same hints (SARIF output works in GitHub code scanning);
-applying fixes is editor-side. Individual rules can be turned off per
-repository with a `fsharprefactorings.json` — see
+the stock `fsharp-analyzers` tool cannot apply fixes. Individual rules can be
+turned off per repository with a `fsharprefactorings.json` — see
 [Configuration](#configuration) below.
+
+### Applying fixes from the command line
+
+The [`fsharp-refactorings-apply`](https://www.nuget.org/packages/fsharp-refactorings-apply)
+dotnet tool applies the quick fixes directly to your files:
+
+```bash
+dotnet tool install --global fsharp-refactorings-apply
+fsharp-refactor --project Your.fsproj [--dry-run] [--codes FR0002,FR0031] [--api-changes] [--max-passes 5]
+```
+
+(or from this repository:
+`dotnet run --project src/FSharp.Refactorings.Apply -c Release -- --project Your.fsproj ...`)
+
+It reads the exact compiler arguments from MSBuild, runs every analyzer,
+applies non-overlapping fixes bottom-up, and re-analyzes until a pass applies
+nothing (a fix can enable further fixes). The run refuses projects that
+already have errors, and fails loudly if applying ever introduces one.
+`--dry-run` lists what would change; `--codes` restricts to chosen rules.
+`--api-changes` additionally applies cross-file fixes that change internal or
+public signatures — currying a tupled function (FR0090), reordering its
+parameters data-last (FR0091) — rewriting every call site in the project.
+Without the flag those are held back and only counted. These rules also
+widen the scope of the contained-type hints (FR0022, FR0069, FR0070, FR0093) to
+public types. Consumers outside the project are the reason this is opt-in:
+their call sites cannot be rewritten, so each rule only fires where a
+missed one would fail to compile rather than change behaviour silently.
 
 ## Design principles
 
@@ -111,7 +140,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0031 | String `+` chains mixing literals and string values → interpolated string (`"Hello " + name + "!"` → `$"Hello {name}!"`); every operand must be a literal or typed-`string` identifier/path and the `+` itself must resolve to FSharp.Core, so a custom `(+)` never rewrites; literals containing `{`/`}`/`%` leave the chain alone | |
 | FR0032 | A type that creates a disposable field (`let stream = new FileStream(...)`) without implementing `IDisposable` is noted (no fix); injected constructor parameters don't count — the injector owns them | |
 | FR0033 | An instance member touching no instance state — no self identifier, instance `let` field, primary-constructor parameter, or `base` — can be `static member` (note only: call sites change) | |
-| FR0034 | `if x.IsSome then x.Value + 1 else e` → `match x with \| Some v -> v + 1 \| None -> e` (`.Value` throws when misused; the match cannot); handles the `IsNone`/negated forms, else-less unit `if`, `x.Value.P` prefixes, and spells `ValueSome`/`ValueNone` when the receiver is a voption (typed-gated, so custom `IsSome`/`Value` members never match) | |
+| FR0034 | `if x.IsSome then x.Value + 1 else e` → `match x with \| Some v -> v + 1 \| None -> e` (`.Value` throws when misused; the match cannot); handles the `IsNone`/negated forms, else-less unit `if`, `x.Value.P` prefixes, and spells `ValueSome`/`ValueNone` when the receiver is a voption (typed-gated, so custom `IsSome`/`Value` members never match); boolean combos rewrite to combinators — `x.IsSome && p x.Value` → `Option.exists`, `x.IsNone \|\| p x.Value` → `Option.forall`, chains join inside the lambda | |
 | FR0035 | `List/Array/Seq.contains x ys` inside a loop — or inside a callback given to a collection function — scans `ys` linearly per iteration; note suggests building a Set once outside (probing the loop variable itself never fires) | |
 | FR0036 | Fragile runtime type comparisons (notes): `GetType().Name = "..."` breaks silently on renames/namespaces — compare types instead; `x.GetType() = typeof<T>` is exact-type equality — `x :? T` if subtypes are fine | |
 | FR0037 | Build-once types constructed inside a loop: `ConcurrentDictionary`, `JsonSerializerOptions` (CA1869), `SearchValues.Create` (CA1870) — all expensive by design; note suggests hoisting out or making static | |
@@ -121,8 +150,56 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0041 | `Array.sum/average/min/max` on `int[]`/`int64[]` is a scalar loop; on .NET 8+ System.Linq's `Sum()`/`Average()`/`Min()`/`Max()` are SIMD-vectorized (note only: LINQ `Sum` throws on overflow where `Array.sum` wraps; floats excluded — NaN semantics differ) | |
 | FR0042 | Fully applied `sprintf` → typed interpolated string (`sprintf "asdf %s" x` → `$"asdf %s{x}"`); specifiers are kept verbatim so the output is byte-identical; guards: regular literal with no `{`/`}`, simple arguments only, no `%a`/`%t`/`*`-widths, partial applications never match | |
 | FR0043 | In an interpolated string that *already* has a typed hole, the remaining plain holes gain specifiers (`$"%s{name} is {age}"` → `$"%s{name} is %d{age}"`) — free compile-time type pinning since the string is on the printf path anyway; specifier-free strings are left on the F# 8 `String.Concat` fast path, and only ToString-identical specifiers are used (`%s`/`%d`/`%c`; never `%b` or `%f`) | |
-| — | Tupled → curried for public functions (cross-file) | needs FSAC codefix infra |
-| — | Reorder parameters (cross-file) | needs FSAC codefix infra |
+| FR0044 | `raise ex` in a `with` handler resets the stack trace → `reraise ()` (CA2200, fix); skipped inside lambdas/CEs/nested trys where `reraise` would not compile or would mean a different exception | |
+| FR0045 | `x = nan` / `x <> Double.NaN` never holds (IEEE 754) → `System.Double.IsNaN x` / negated (CA2242, fix); `Single.NaN` uses `Single.IsNaN` | |
+| FR0046 | `lock "str"` / `lock typeof<T>` / `lock (x.GetType())` — weak-identity objects are process-wide singletons, so the monitor is shared with strangers (CA2002, note): use a dedicated `let lockObj = obj ()` | |
+| FR0047 | A type implementing `IDisposable` whose `Dispose` never touches one of its `new`-constructed disposable fields (CA2213, note) — the mirror of FR0032 | |
+| FR0048 | `String.Format("{0} of {1}", x)` — a placeholder without an argument throws `FormatException` at runtime (CA2241, note); `{{` escapes handled, culture-first overload ignored | |
+| FR0049 | Sync-over-async (CA1849/VSTHRD): `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, `Async.RunSynchronously`, `Thread.Sleep` **inside** `async`/`task { }` invite thread-pool starvation and deadlocks (typed-gated receivers; `Thread.Sleep n` gets a `do! Async.Sleep n` / `do! Task.Delay n` fix in statement position); `.Result`/`.Wait()`/`GetResult()` **outside** CEs get the boundary note — wrap in `task { }` or use the sync API (`Async.RunSynchronously` outside a CE is F#'s intended sync boundary and stays quiet) | |
+| FR0050 | `let mutable total = 0` + `for x in xs do total <- total + x` → `let total = xs \|> Seq.sum` (fix); projections → `sumBy`, general combines → `Seq.fold (fun acc x -> ...) init` — same expression, same bindings, no mutable | |
+| FR0051 | `acc <- acc @ [x]` / `acc <- Array.append acc [\|x\|]` inside a loop copies the accumulator per iteration — O(n²) (note): use a ResizeArray, or cons and `List.rev` | |
+| FR0052 | `q.Count = 0` on `ConcurrentQueue`/`Stack`/`Bag` → `q.IsEmpty` (CA1836, fix): their `Count` walks segments, `IsEmpty` peeks | |
+| FR0053 | `BitConverter.ToString(bytes).Replace("-", "")` → `System.Convert.ToHexString bytes` (CA1872, fix) | |
+| FR0054 | `raise`/`failwith` inside `Equals`/`GetHashCode`/`ToString`/`Dispose` overrides (CA1065, note): implicit callers (hash containers, debuggers, formatting, finalization) never expect them to throw; raises inside the member's own `try` stay quiet | |
+| FR0055 | `try ... with _ -> ()` (or `:? Exception -> ()`) swallows every exception including cancellation, and `with _ -> ""` / `0` / `Unchecked.defaultof` / `None` / `null` / `[]` additionally disguises the failure as a result (note): log or `reraise ()`, and catch the specific type; deliberately ignoring a *specific* exception stays quiet, as does the `try ...; true with _ -> false` probe idiom | |
+| FR0057 | XML doc drift (note): a doc comment with `<param>` tags that misses some actual parameters — the compiler warns about *unknown* names (FS3390) but not *missing* ones; fully undocumented functions are a style choice and stay quiet | |
+| FR0058 | A `let rec` re-entering itself through `seq`/`taskSeq`/`asyncSeq { }` builds a fresh enumerator per recursion level — every element pays O(depth) `MoveNext`s (note): walk with an explicit `Stack`/queue inside a single builder | |
+| FR0059 | A `private` function returning `Some`/`None` moves to `ValueSome`/`ValueNone` (fix): definition constructors and every match site rewritten together — no heap allocation per call; any use where `option` is load-bearing (`List.tryPick f`, `Option.*` pipelines, `let`-bound results, explicit annotations) suppresses the whole suggestion | |
+| FR0060 | Consecutive attribute brackets merge: `[<Attr1>] [<Attr2>]` (stacked or same-line) → `[<Attr1; Attr2>]` (fix); comments between brackets and `[<assembly: ...>]` targets suppress it | |
+| FR0061 | `invalidArg "facotr" ...` / `ArgumentException("msg", "wrongName")` — the parameter-name string must name a real parameter of the enclosing function (CA2208, note); `nameof` keeps it honest | |
+| FR0062 | Non-private module-level `let mutable` is visible global mutable state (CA2211, note); private mutables and private/internal modules stay quiet | |
+| FR0063 | `raise`/`failwith` inside `finally` replaces any exception already in flight (CA2219, note); raises the finally itself catches stay quiet | |
+| FR0064 | Raising runtime-reserved exceptions (`OutOfMemoryException`, `StackOverflowException`, `IndexOutOfRangeException`, `NullReferenceException`, ...) misleads catchers and debuggers (CA2201, note) | |
+| FR0065 | Weak cryptography (CA5350/5351, note): MD5/SHA1/DES/TripleDES/RC2 construction, plus TLS certificate-validation bypass via `ServerCertificateValidationCallback` | |
+| FR0066 | SQL assembled from strings (CA2100, note): interpolation holes, `+` chains or `sprintf` flowing into `CommandText` or a `*Command` constructor — parameterize instead | |
+| FR0067 | `DateTime.Parse s` / `Double.Parse s` without a culture reads differently per server culture (CA1305, note); integer parses are low-risk and stay quiet | |
+| FR0068 | Duplicate enum literal values (`Red = 1 ... Crimson = 1`) silently conflate cases (CA1069, note) | |
+| FR0069 | A private/internal record field `X: int option` / `DateTime option` / `Guid option` boxes the struct payload; `voption` keeps it flat — contained visibility keeps the migration contained (note) | |
+| FR0070 | A private/internal record of at most four small struct fields can be `[<Struct>]`, removing a heap allocation per instance (note) | |
+| FR0093 | A private/internal record field `X: int * int` is a reference tuple — one heap object per value — where `struct (int * int)` stores it inline. At most four elements, since a struct tuple is copied by value. Note only: every construction and destructuring of the field needs the `struct` keyword too | |
+| FR0071 | A pure binding inside a `for`/`while`/collection lambda that depends on nothing the loop changes is re-evaluated every iteration; the fix hoists it above the loop | |
+| FR0072 | A DU match wildcard standing in for only 1-2 concrete cases is an open else; the fix expands them (`_` → `D`), so future union growth raises incomplete-match warnings | |
+| FR0073 | `let! x = comp` whose binder exists only to be matched collapses to `match! comp with` (F# 4.5+) | |
+| FR0074 | Nested record copy-and-update flattens to F# 8 path syntax: `{ r with X = { r.X with Y = v } }` → `{ r with X.Y = v }` (LangVersion-gated; fields named after their type stay nested — the flattened path would resolve as the type) | |
+| FR0075 | A locally constructed disposable bound with `let` is never disposed: fix to `use` when every mention stays in scope, advice when it escapes; manual `Dispose()` calls exempt | |
+| FR0076 | `List/Array.map f \|> ignore` allocates a discarded list — fix to `iter (f >> ignore)`; `Seq.map f \|> ignore` is lazy and runs NOTHING (advice, the FR0017 family) | |
+| FR0077 | An object expression missing interface members (FS0366) gets `NotImplementedException` stubs for every missing method/property, inherited interfaces in their own `interface X with` sections — the only rule that runs on non-compiling code, which is its point | |
+| FR0078 | The three-part mutable-condition loop idiom (`let! first` / `let mutable go` / rebind at loop end) collapses to F# 8 `while!` — a lone stale-bool `while` never matches, `while!` re-evaluates per iteration | |
+| FR0079 | `Task.WhenAll [\| t \|]` / `Task.WaitAll` / `Async.Parallel [ c ]` over a single-element literal adds indirection for nothing (CA1842/CA1843, note — the direct form changes the result type, so the author picks the landing shape) | |
+| FR0080 | Leading TABs (FS1161 — pasted code often brings them) expand to four spaces per tab, every affected line in one fix; files with triple-quoted/verbatim strings are skipped (a tab could be string content) | |
+| FR0081 | Path fragments joined with a hard-coded `/` or `\` separator → `Path.Combine` advice; `\` fires alone, `/` needs positive path evidence (path-ish names, rooted/extension literals, or a literal existing on disk) and URL-smelling chains never fire | |
+| FR0082 | `[<FooAttribute>]` → `[<Foo>]` — the compiler resolves the short form | |
+| FR0083 | `[<Foo()>]` → `[<Foo>]` — an empty attribute argument list says nothing | |
+| FR0084 | ` ``name`` ` backticks around a plain non-keyword identifier do nothing; stripped per site | |
+| FR0085 | `new` on a non-IDisposable construction is noise — F# convention reserves `new` for disposables (the compiler warns the inverse as FS0760); typed-gated | |
+| FR0086 | `$"no holes"` → `"no holes"` — hole-free interpolation; skipped when escaped braces would need unescaping | |
+| FR0087 | The pattern `x :: []` → `[ x ]` | |
+| FR0088 | `Case(_, _)` → `Case _` when every field is a wildcard (typed-gated to real union cases; survives field-count changes) | |
+| FR0089 | `[ 1, 2 ]` is a SINGLE-tuple list — `,` builds a tuple, `;` separates elements (note; the classic paste trap, single-tuple lists are sometimes intended) | |
+| FR0092 | A constant `failwith "Error"` gains the enclosing function's arguments — `failwith $"Error, calling mymethod with x: {x}"` — so the log says which call failed, not just which line. Static messages only; an already-interpolated one was written deliberately, as was one that already names a parameter | ✓ |
+FR0012's hint corpus also gained the one-element-of-transformed family: `tryHead ∘ filter` → `tryFind`, `head ∘ sort[By][Descending]` → `min`/`minBy`/`max`/`maxBy`, `head ∘ rev` → `last`, `item 0` → `head` (List/Array/Seq) — each also a perf fix (no full sort or scan for one element).
+| FR0090 | Tupled → curried for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0008) | ✓ |
+| FR0091 | Data-last parameter reorder for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0023). The two parameters must have different concrete types, so that a call site outside the project — which we can neither see nor fix — fails to compile rather than silently swapping two interchangeable arguments | ✓ |
 | — | DU case payload → named record (cross-file) | needs FSAC codefix infra |
 
 ## Configuration
@@ -213,3 +290,4 @@ the host FsAutoComplete. This project currently pins FSharp.Analyzers.SDK 0.37.2
 dotnet tool install --global fsharp-analyzers
 fsharp-analyzers --project YourProject.fsproj --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Debug/net8.0 --code-root .
 ```
+

@@ -68,6 +68,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         && isSafeInline scrutinee
                         && isSafeInline thenBody
                         && isSafeInline elseBody
+                        && not (spansDirective source m)
                         ->
                         let replacement =
                             sprintf

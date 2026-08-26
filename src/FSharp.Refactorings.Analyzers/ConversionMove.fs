@@ -2,7 +2,7 @@
 /// pipeline, or drop it when the operation consumes the collection.
 ///
 ///     xs |> Seq.toList |> List.map f      →  xs |> Seq.map f |> Seq.toList
-///     xs |> List.toArray |> Array.filter f →  xs |> List.filter f |> List.toArray
+///     xs |> Array.toList |> List.filter f →  xs |> Array.filter f |> Array.toList
 ///     xs |> Seq.toList |> List.length     →  xs |> Seq.length
 ///     xs |> Seq.toList |> List.iter f     →  xs |> Seq.iter f
 ///
@@ -10,7 +10,8 @@
 /// type-correct by construction: the conversion's input type tells us which
 /// module's operation accepts the original value, and the trailing conversion
 /// (or consuming operation) keeps the overall evaluation eager. Conversions
-/// *toward* seq are never moved — that would turn eager code lazy.
+/// *toward* seq are never moved — that would turn eager code lazy — and an
+/// operation is never moved INTO the List module (see worthMovingInto).
 ///
 /// Known (pathological) caveat shared with all such rewrites: if the mapped
 /// function mutates the source collection while it is being enumerated, the
@@ -128,6 +129,25 @@ let private opAllowedForModules (opFunc: string) (sourceModule: string) (targetM
     else
         true
 
+/// Is MOVING an operation into `sourceModule` actually cheaper?
+///
+/// Into Seq, yes: the pipeline goes lazy and the intermediate collection
+/// stops existing until the trailing conversion forces it. Into Array, yes:
+/// a contiguous block replaces a chain of cons cells.
+///
+/// Into List, no. `xs |> List.toArray |> Array.filter f` builds one array
+/// and filters it in a tight loop; `xs |> List.filter f |> List.toArray`
+/// allocates a cons cell per surviving element — around 32 bytes each
+/// against 8 for an array slot — and then chases those pointers to build
+/// the array anyway. That only breaks even if the filter discards most of
+/// its input, and for the length-preserving operations (map, rev, indexed)
+/// it is always a loss, so the move is not offered at all.
+///
+/// Dropping a conversion outright (a consuming operation) stays worthwhile
+/// in every direction: there the intermediate really does disappear, so
+/// this gate does not apply to it.
+let private worthMovingInto (sourceModule: string) = sourceModule <> "List"
+
 [<return: Struct>]
 let private (|ModuleFunc|_|) (e: SynExpr) =
     match e with
@@ -139,10 +159,10 @@ let private (|ModuleFunc|_|) (e: SynExpr) =
 [<TailCall>]
 let rec private headModuleFunc (e: SynExpr) =
     match e with
-    | ModuleFunc(m, f, r) -> Some(m, f, r)
+    | ModuleFunc(m, f, r) -> ValueSome(m, f, r)
     | SynExpr.App(isInfix = false; funcExpr = funcExpr) -> headModuleFunc funcExpr
     | SynExpr.TypeApp(expr = inner) -> headModuleFunc inner
-    | _ -> None
+    | _ -> ValueNone
 
 /// Find pipeline segments `conv |> Module.op args` that can be rewritten.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
@@ -155,13 +175,14 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 | PipeApp(PipeApp(_, (ModuleFunc(convModule, convFunc, _) as convStage)), opStage) when
                     isSingleLine convStage.Range && isSingleLine opStage.Range
                     ->
-                    let convKey = convModule + "." + convFunc
+                    let convKey = $"{convModule}.{convFunc}"
 
                     match conversions.TryGetValue convKey with
                     | true, (sourceModule, targetModule) ->
                         match headModuleFunc opStage with
-                        | Some(opModule, opFunc, headRange) when opModule = targetModule ->
-                            let movable = movableOps.Contains opFunc
+                        | ValueSome(opModule, opFunc, headRange) when opModule = targetModule ->
+                            let movable = movableOps.Contains opFunc && worthMovingInto sourceModule
+
                             let consuming = consumingOps.Contains opFunc
 
                             if (movable || consuming) && opAllowedForModules opFunc sourceModule targetModule then
@@ -170,7 +191,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                         source
                                         (Range.mkRange opStage.Range.FileName headRange.End opStage.Range.End)
 
-                                let rewrittenOp = sourceModule + "." + opFunc + argsText
+                                let rewrittenOp = $"{sourceModule}.{opFunc}{argsText}"
 
                                 let replacement =
                                     if consuming then

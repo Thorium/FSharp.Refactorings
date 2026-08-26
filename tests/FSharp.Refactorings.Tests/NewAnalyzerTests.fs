@@ -117,48 +117,86 @@ let ``instance regex call outside a loop is not flagged`` () =
 
 let private structDuIn (source: string) =
     let tree, sourceText = parse source
-    StructDu.find tree sourceText
+    StructDu.find false tree sourceText
 
-let private assertStructDu (source: string) (expectedPatched: string) =
-    match structDuIn source with
+/// The same scan with API changes allowed, as `fsharp-refactor
+/// --api-changes` runs it.
+let private structDuWithApiChangesIn (source: string) =
+    let tree, sourceText = parse source
+    StructDu.find true tree sourceText
+
+let private assertPatchedStructDu (suggestions: StructDu.Suggestion list) (source: string) (expectedPatched: string) =
+    match suggestions with
     | [ s ] ->
         let patched = applyEdit source s.InsertRange s.InsertText
         Assert.Equal(expectedPatched, patched)
         Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
     | other -> failwithf "Expected exactly one struct-DU suggestion, got %d: %A" (List.length other) other
 
+let private assertStructDu (source: string) (expectedPatched: string) =
+    assertPatchedStructDu (structDuIn source) source expectedPatched
+
 [<Fact>]
 let ``small named-field union gains the attribute`` () =
     assertStructDu
-        "module Test\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float"
-        "module Test\n[<Struct>]\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float"
+        "module Test\ntype private Shape =\n    | Circle of radius: float\n    | Square of side: float"
+        "module Test\n[<Struct>]\ntype private Shape =\n    | Circle of radius: float\n    | Square of side: float"
 
 [<Fact>]
 let ``single fielded case may be unnamed`` () =
     assertStructDu
-        "module Test\ntype Id =\n    | Id of int\n    | Missing"
-        "module Test\n[<Struct>]\ntype Id =\n    | Id of int\n    | Missing"
+        "module Test\ntype private Id =\n    | Id of int\n    | Missing"
+        "module Test\n[<Struct>]\ntype private Id =\n    | Id of int\n    | Missing"
+
+[<Fact>]
+let ``a public union is left alone`` () =
+    // struct-vs-class is a semantic change consumers outside the assembly
+    // see without any compiler error
+    Assert.Empty(structDuIn "module Test\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float")
+
+[<Fact>]
+let ``a union in an internal module is contained`` () =
+    assertStructDu
+        "module internal Test\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float"
+        "module internal Test\n[<Struct>]\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float"
+
+[<Fact>]
+let ``a public union is offered under api changes`` () =
+    let source =
+        "module Test\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float"
+
+    assertPatchedStructDu
+        (structDuWithApiChangesIn source)
+        source
+        "module Test\n[<Struct>]\ntype Shape =\n    | Circle of radius: float\n    | Square of side: float"
+
+[<Fact>]
+let ``a private representation does not make a public union contained`` () =
+    // the cases are hidden but the type itself is still public
+    Assert.Empty(
+        structDuIn "module Test\ntype Shape =\n    private\n    | Circle of radius: float\n    | Square of side: float"
+    )
 
 [<Fact>]
 let ``string fields are not small value types`` () =
-    Assert.Empty(structDuIn "module Test\ntype T =\n    | A of string\n    | B of int")
+    Assert.Empty(structDuIn "module Test\ntype private T =\n    | A of string\n    | B of int")
 
 [<Fact>]
 let ``recursive union is excluded by the whitelist`` () =
-    Assert.Empty(structDuIn "module Test\ntype Tree =\n    | Leaf of int\n    | Node of Tree")
+    Assert.Empty(structDuIn "module Test\ntype private Tree =\n    | Leaf of int\n    | Node of Tree")
 
 [<Fact>]
 let ``two cases with unnamed fields are excluded`` () =
     // compiled ItemN names would collide in a struct union
-    Assert.Empty(structDuIn "module Test\ntype T =\n    | A of int\n    | B of float")
+    Assert.Empty(structDuIn "module Test\ntype private T =\n    | A of int\n    | B of float")
 
 [<Fact>]
 let ``existing attributes are left alone`` () =
-    Assert.Empty(structDuIn "module Test\n[<Struct>]\ntype T =\n    | A of a: int\n    | B of b: float")
+    Assert.Empty(structDuIn "module Test\n[<Struct>]\ntype private T =\n    | A of a: int\n    | B of b: float")
 
 [<Fact>]
 let ``all-nullary union is not suggested`` () =
-    Assert.Empty(structDuIn "module Test\ntype T =\n    | A\n    | B")
+    Assert.Empty(structDuIn "module Test\ntype private T =\n    | A\n    | B")
 
 // ---- FR0017 AsyncIgnore ----
 

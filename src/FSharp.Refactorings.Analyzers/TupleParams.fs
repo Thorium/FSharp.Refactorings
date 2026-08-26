@@ -79,8 +79,9 @@ type private Candidate =
       ParenPatRange: range
       Elements: SynPat list }
 
-let private findCandidates (parseTree: ParsedInput) : Candidate list =
+let private findCandidatesIn (scope: Visibility.Scope) (parseTree: ParsedInput) : Candidate list =
     let candidates = ResizeArray<Candidate>()
+    let scopeMatches = Visibility.scopeMatches scope
 
     let collector =
         { new SyntaxCollectorBase() with
@@ -91,9 +92,9 @@ let private findCandidates (parseTree: ParsedInput) : Candidate list =
                         match headPat with
                         | SynPat.LongIdent(
                             longDotId = SynLongIdent(id = [ ident ])
-                            accessibility = Some(SynAccess.Private _)
+                            accessibility = accessibility
                             argPats = SynArgPats.Pats [ SynPat.Paren(pat = SynPat.Tuple(elementPats = elements)) as paren ]) when
-                            elements.Length >= 2 && isSingleLine paren.Range
+                            elements.Length >= 2 && isSingleLine paren.Range && scopeMatches accessibility
                             ->
                             candidates.Add
                                 { Ident = ident
@@ -104,6 +105,9 @@ let private findCandidates (parseTree: ParsedInput) : Candidate list =
 
     AstIndex.replay collector parseTree
     List.ofSeq candidates
+
+let private findCandidates (parseTree: ParsedInput) : Candidate list =
+    findCandidatesIn Visibility.Scope.Private parseTree
 
 /// Every application node `f args` in the file, for matching against symbol
 /// uses (the function expression's end position coincides with the use's).
@@ -166,6 +170,101 @@ let private callEdit
         | _ -> None
     | false, _ -> None
 
+/// True when any two edits of one suggestion nest (`add (add (1, 2), 3)`:
+/// the inner call tuple sits inside the outer's). Such a suggestion cannot
+/// be applied atomically as independent range edits, so it is suppressed.
+let private editsNest (edits: Edit list) = rangesNest (edits |> List.map _.Range)
+
+/// The PROJECT-WIDE (API-changing) variant: internal/public tupled
+/// functions defined in `defFile`, with call-site edits wherever the
+/// project uses them — each edit's range names its own file. Driven only
+/// by the apply tool under --api-changes; the same all-or-nothing rule
+/// applies across the whole project, and any use in a file the caller
+/// cannot supply suppresses the suggestion.
+let findApiChanges
+    (defFile: FileContext)
+    (check: FSharpCheckFileResults)
+    (project: FSharpCheckProjectResults)
+    (fileLookup: string -> FileContext option)
+    : Suggestion list =
+    let hasErrors =
+        check.Diagnostics
+        |> Array.exists (fun d -> d.Severity = FSharpDiagnosticSeverity.Error)
+
+    if hasErrors then
+        []
+    else
+        match findCandidatesIn Visibility.Scope.NonPrivate defFile.ParseTree with
+        | [] -> []
+        | candidates ->
+            // per-file application indexes, built lazily as uses arrive
+            let appsByFile =
+                System.Collections.Generic.Dictionary<
+                    string,
+                    (System.Collections.Generic.Dictionary<int * int, SynExpr * SynExpr * bool> * ISourceText) option
+                 >()
+
+            let appsFor (fileName: string) =
+                match appsByFile.TryGetValue fileName with
+                | true, cached -> cached
+                | false, _ ->
+                    let built =
+                        fileLookup fileName
+                        |> Option.map (fun ctx -> collectApplications ctx.ParseTree, ctx.Source)
+
+                    appsByFile.[fileName] <- built
+                    built
+
+            candidates
+            |> List.choose (fun candidate ->
+                let paramTexts = candidate.Elements |> List.map (renderParam defFile.Source)
+
+                if paramTexts |> List.exists Option.isNone then
+                    None
+                else
+                    let r = candidate.Ident.idRange
+                    let lineText = defFile.Source.GetLineString(r.EndLine - 1)
+
+                    match
+                        check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ candidate.Ident.idText ])
+                    with
+                    | None -> None
+                    | Some symbolUse ->
+                        let uses =
+                            project.GetUsesOfSymbol symbolUse.Symbol
+                            |> Array.filter (fun u -> not u.IsFromDefinition)
+
+                        let callEdits =
+                            uses
+                            |> Array.map (fun u ->
+                                appsFor u.Range.FileName
+                                |> Option.bind (fun (apps, useSource) ->
+                                    callEdit useSource apps candidate.Elements.Length u.Range))
+
+                        if callEdits |> Array.exists Option.isNone then
+                            None
+                        else
+                            let curriedParams = paramTexts |> List.map Option.get |> String.concat " "
+
+                            let defEdit =
+                                { Range = candidate.ParenPatRange
+                                  Original = textOfRange defFile.Source candidate.ParenPatRange
+                                  Replacement =
+                                    if candidate.Ident.idRange.End = candidate.ParenPatRange.Start then
+                                        $" {curriedParams}"
+                                    else
+                                        curriedParams }
+
+                            let edits = defEdit :: (callEdits |> Array.map Option.get |> Array.toList)
+
+                            if editsNest edits then
+                                None
+                            else
+                                Some
+                                    { FunctionName = candidate.Ident.idText
+                                      DefRange = candidate.ParenPatRange
+                                      Edits = edits })
+
 /// Find private tupled functions whose every use is a direct call, and build
 /// the definition + call-site edits. Requires typed check results.
 let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
@@ -221,7 +320,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                     else
                                         curriedParams }
 
-                            Some
-                                { FunctionName = candidate.Ident.idText
-                                  DefRange = candidate.ParenPatRange
-                                  Edits = defEdit :: (callEdits |> Array.map Option.get |> Array.toList) })
+                            let edits = defEdit :: (callEdits |> Array.map Option.get |> Array.toList)
+
+                            if editsNest edits then
+                                None
+                            else
+                                Some
+                                    { FunctionName = candidate.Ident.idText
+                                      DefRange = candidate.ParenPatRange
+                                      Edits = edits })

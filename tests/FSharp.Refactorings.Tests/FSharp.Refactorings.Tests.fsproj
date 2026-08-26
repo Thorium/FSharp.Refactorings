@@ -40,6 +40,15 @@
     <Compile Include="VectorizedLinqTests.fs" />
     <Compile Include="SprintfInterpolationTests.fs" />
     <Compile Include="CriticalReviewTests.fs" />
+    <Compile Include="CorrectnessRulesTests.fs" />
+    <Compile Include="AsyncPerfRulesTests.fs" />
+    <Compile Include="StructOptionTests.fs" />
+    <Compile Include="AttributeMergeTests.fs" />
+    <Compile Include="QualityRulesTests.fs" />
+    <Compile Include="PerfTests.fs" />
+    <Compile Include="ModernizationTests.fs" />
+    <Compile Include="ApiChangesTests.fs" />
+    <Compile Include="CorpusValidation.fs" />
 
   </ItemGroup>
 
@@ -52,7 +61,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\FSharp.Refactorings.Analyzers\FSharp.Refactorings.Analyzers.fsproj" />
+    <ProjectReference Include="..\..\src\FSharp.Refactorings.Apply\FSharp.Refactorings.Apply.fsproj" />
   </ItemGroup>
 
 </Project>
+
+
 

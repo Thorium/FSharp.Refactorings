@@ -97,29 +97,12 @@ let rec private walkPatsLoop (record: string -> Observation -> unit) (pending: S
 
 let private walkPat record pat = walkPatsLoop record [ pat ]
 
-/// Is an accessibility modifier one that hides the type outside the assembly?
-let private isNonPublic (acc: SynAccess option) =
-    match acc with
-    | Some(SynAccess.Private _)
-    | Some(SynAccess.Internal _) -> true
-    | _ -> false
-
-/// The compiled field names are invisible outside the assembly: the type or
-/// its representation is private/internal, or an enclosing module is.
-let private isConfined (path: SyntaxNode list) (typeAcc: SynAccess option) (reprAcc: SynAccess option) =
-    isNonPublic typeAcc
-    || isNonPublic reprAcc
-    || path
-       |> List.exists (fun node ->
-           match node with
-           | SyntaxNode.SynModule(SynModuleDecl.NestedModule(moduleInfo = SynComponentInfo(accessibility = acc))) ->
-               isNonPublic acc
-           | SyntaxNode.SynModuleOrNamespace(SynModuleOrNamespace(accessibility = acc)) -> isNonPublic acc
-           | _ -> false)
-
 /// Find non-public union cases whose unnamed fields can take the names their
-/// match sites already bind.
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+/// match sites already bind. Under `--api-changes` public unions qualify
+/// too; the names then come from whatever destructuring sites this file
+/// happens to hold, which is partial evidence but never an unsafe edit —
+/// naming fields leaves positional patterns working everywhere.
+let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree
 
     // every union case name in the file, to detect ambiguous attribution
@@ -134,7 +117,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 match repr with
                 | SynTypeDefnRepr.Simple(
                     simpleRepr = SynTypeDefnSimpleRepr.Union(accessibility = reprAcc; unionCases = cases)) ->
-                    let confined = isConfined path typeAcc reprAcc
+                    let confined = Visibility.isInScope allowApiChanges path [ typeAcc; reprAcc ]
 
                     for SynUnionCase(ident = SynIdent(ident = caseId); caseType = kind; range = caseRange) in cases do
                         caseNameCounts.[caseId.idText] <-

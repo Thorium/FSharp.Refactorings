@@ -121,9 +121,12 @@ let private rewrite
     | _, (OkApp _ | ErrorApp _) -> None
     | body, defaultBody ->
         let bodyText = textOfRange source (stripParens body).Range
-        let call, _ = defaultCall source errorVar defaultBody
+        let call, target = defaultCall source errorVar defaultBody
 
-        Some(sprintf "%s |> Result.map (fun %s -> %s) |> %s" pipeSource (lambdaParam okVar) bodyText call, "Result.map")
+        Some(
+            sprintf "%s |> Result.map (fun %s -> %s) |> %s" pipeSource (lambdaParam okVar) bodyText call,
+            $"Result.map + {target}"
+        )
 
 /// A candidate found syntactically; the case idents still need resolving
 /// against the typed results before the suggestion is emitted.
@@ -174,7 +177,7 @@ let private findCandidates (parseTree: ParsedInput) (source: ISourceText) : Cand
                                     inOperandPosition
                                     && not (System.Text.RegularExpressions.Regex.IsMatch(replacement, @"^[\w.]+$"))
                                 then
-                                    "(" + replacement + ")"
+                                    $"({replacement})"
                                 else
                                     replacement
 
@@ -199,7 +202,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         findCandidates parseTree source
         |> List.filter (fun c ->
-            OptionModule.resolvesToCoreCase check source "Microsoft.FSharp.Core.Result<" c.OkIdent
+            not (spansDirective source c.MatchRange)
+            && OptionModule.resolvesToCoreCase check source "Microsoft.FSharp.Core.Result<" c.OkIdent
             && OptionModule.resolvesToCoreCase check source "Microsoft.FSharp.Core.Result<" c.ErrorIdent)
         |> List.map (fun c ->
             { Range = c.MatchRange

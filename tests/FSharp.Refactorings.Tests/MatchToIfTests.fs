@@ -106,3 +106,10 @@ let ``two independent matches produce two suggestions`` () =
 
     let suggestions = findIn source
     Assert.Equal(2, List.length suggestions)
+
+[<Fact>]
+let ``a match spanning conditional compilation stays`` () =
+    // corpus regression: the tree only sees the active #if branch; the fix
+    // would splice out the directives and break the inactive branch
+    assertNoSuggestion
+        "module Test\nlet f (p: string) =\n#if SOMEDEFINE\n    match p.Length > 0 with\n#else\n    match p.Length > 1 with\n#endif\n    | true -> p\n    | false -> \"\""

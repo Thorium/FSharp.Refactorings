@@ -161,9 +161,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     add expr.Range (atomicText source returned) StripKind.WithRunner
                 // async { return! comp } / async { let! v = comp in return v }
                 | AsyncCe body ->
-                    match forwardedComputation body with
-                    | Some comp -> add expr.Range (textOfRange source comp.Range) StripKind.Forwarded
-                    | None -> ()
+                    forwardedComputation body
+                    |> Option.iter (fun comp -> add expr.Range (textOfRange source comp.Range) StripKind.Forwarded)
                 // task { return x }
                 | TaskCe(SynExpr.YieldOrReturn(expr = NonThrowing returned)) when
                     opens.Contains "System.Threading.Tasks"
@@ -175,4 +174,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 | _ -> () }
 
     AstIndex.replay collector parseTree
-    List.ofSeq suggestions
+
+    suggestions
+    |> Seq.filter (fun s -> not (spansDirective source s.Range))
+    |> List.ofSeq

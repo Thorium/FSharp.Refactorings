@@ -293,6 +293,27 @@ let defaultRules =
       "List.concat (List.map f x) ===> List.collect f x"
       "Array.concat (Array.map f x) ===> Array.collect f x"
       "Seq.concat (Seq.map f x) ===> Seq.collect f x"
+      // one-element-of-transformed shapes: same result, no full scan/sort.
+      // head-of-filter → find is deliberately absent: the empty-input
+      // exception types differ (ArgumentException vs KeyNotFoundException)
+      "List.tryHead (List.filter f x) ===> List.tryFind f x"
+      "Array.tryHead (Array.filter f x) ===> Array.tryFind f x"
+      "Seq.tryHead (Seq.filter f x) ===> Seq.tryFind f x"
+      "List.head (List.sort x) ===> List.min x"
+      "Array.head (Array.sort x) ===> Array.min x"
+      "Seq.head (Seq.sort x) ===> Seq.min x"
+      "List.head (List.sortBy f x) ===> List.minBy f x"
+      "Array.head (Array.sortBy f x) ===> Array.minBy f x"
+      "Seq.head (Seq.sortBy f x) ===> Seq.minBy f x"
+      "List.head (List.sortDescending x) ===> List.max x"
+      "Array.head (Array.sortDescending x) ===> Array.max x"
+      "List.head (List.sortByDescending f x) ===> List.maxBy f x"
+      "Array.head (Array.sortByDescending f x) ===> Array.maxBy f x"
+      "List.head (List.rev x) ===> List.last x"
+      "Array.head (Array.rev x) ===> Array.last x"
+      "List.item 0 x ===> List.head x"
+      "Seq.item 0 x ===> Seq.head x"
+      "Array.item 0 x ===> Array.head x"
       "List.isEmpty (List.filter f x) ===> not (List.exists f x)"
       "Array.isEmpty (Array.filter f x) ===> not (Array.exists f x)"
       "Seq.isEmpty (Seq.filter f x) ===> not (Seq.exists f x)"
@@ -417,17 +438,12 @@ let find (extraRules: string list) (parseTree: ParsedInput) (source: ISourceText
                             | _ -> false)
 
                     if isSingleLine expr.Range && not insideQuotation then
-                        match index.TryFind(headKey expr) with
-                        | Some hints -> tryRules path expr hints
-                        | None -> ()
+                        index.TryFind(headKey expr) |> Option.iter (tryRules path expr)
 
                         // a pipelined expression can also match rules indexed
                         // under the pipe's right side (pipe normalization)
                         match expr with
-                        | PipeApp(_, rhs) ->
-                            match index.TryFind(headKey rhs) with
-                            | Some hints -> tryRules path expr hints
-                            | None -> ()
+                        | PipeApp(_, rhs) -> index.TryFind(headKey rhs) |> Option.iter (tryRules path expr)
                         | _ -> () }
 
     AstIndex.replay collector parseTree

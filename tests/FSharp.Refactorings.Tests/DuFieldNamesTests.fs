@@ -6,7 +6,13 @@ open FSharp.Refactorings.Tests.Parsing
 
 let private fieldNamesIn (source: string) =
     let tree, sourceText = parse source
-    DuFieldNames.find tree sourceText
+    DuFieldNames.find false tree sourceText
+
+/// The same scan with API changes allowed, as `fsharp-refactor
+/// --api-changes` runs it.
+let private fieldNamesWithApiChangesIn (source: string) =
+    let tree, sourceText = parse source
+    DuFieldNames.find true tree sourceText
 
 /// Apply a suggestion's edits bottom-up and verify the patched text.
 let private assertFieldNames (source: string) (expectedPatched: string) =
@@ -55,6 +61,13 @@ let ``internal top-level module is accepted`` () =
 let ``public type is left alone`` () =
     Assert.Empty(
         fieldNamesIn
+            "module Test\ntype Order =\n    | Line of int * decimal\nlet f (o: Order) =\n    match o with\n    | Line(qty, price) -> decimal qty * price"
+    )
+
+[<Fact>]
+let ``public type is offered under api changes`` () =
+    Assert.NotEmpty(
+        fieldNamesWithApiChangesIn
             "module Test\ntype Order =\n    | Line of int * decimal\nlet f (o: Order) =\n    match o with\n    | Line(qty, price) -> decimal qty * price"
     )
 

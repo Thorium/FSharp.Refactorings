@@ -29,13 +29,6 @@ type Suggestion =
         Name: string
     }
 
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
-
 [<Literal>]
 let private AsyncTypeName = "Microsoft.FSharp.Control.FSharpAsync`1"
 
@@ -59,7 +52,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         | Some symbolUse ->
             match symbolUse.Symbol with
             | :? FSharpMemberOrFunctionOrValue as value ->
-                let t = stripAbbreviations value.FullType
+                let t = OptionModule.stripAbbreviations value.FullType
 
                 t.HasTypeDefinition && t.TypeDefinition.TryFullName = Some AsyncTypeName
             | _ -> false

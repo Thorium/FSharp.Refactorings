@@ -8,9 +8,10 @@
 ///   - the argument must be a single atom: an identifier, a dotted path, a
 ///     non-negative constant, or a collection literal — never a tuple (those
 ///     parens are a method-call argument list) and never an application
-///   - the callee must be a plain identifier or an uppercase-headed dotted
-///     path (module functions and static members); instance-method calls
-///     keep their parens per the F# style guide
+///   - the callee must be an F# function — a lowercase identifier, a core
+///     Option/Result case, or a module-qualified lowercase path; method and
+///     constructor calls (uppercase-final: `File.ReadAllText(path)`,
+///     `StringValues("x")`) keep their parens per the F# style guide
 ///   - calls continued by a projection (`f(x).Length`, `f(x).[0]`) are left
 ///     alone — the parens make the application atomic there
 module FSharp.Refactorings.RedundantParens
@@ -30,14 +31,39 @@ type Suggestion =
         ReplacementText: string
     }
 
-/// A callee we are confident is a function or static member, not an instance
-/// method: a bare identifier, or a dotted path whose head is uppercase.
+/// Option/Result cases whose parenthesized payload is idiomatically bare.
+let private coreCaseNames =
+    set
+        [ "Some"
+          "ValueSome"
+          "Ok"
+          "Error"
+          "Choice1Of2"
+          "Choice2Of2"
+          "Choice1Of3"
+          "Choice2Of3"
+          "Choice3Of3" ]
+
+/// A callee we are confident is an F# function (or core wrapper case), not a
+/// .NET method or constructor: a lowercase bare identifier, a core Option or
+/// Result case, or a dotted path headed by an uppercase module whose LAST
+/// segment is lowercase (module functions). Uppercase-final paths —
+/// `File.ReadAllText(path)`, `StringValues("x")`, constructors — keep their
+/// parens per the F# style guide for method calls.
 [<return: Struct>]
 let private (|FunctionCallee|_|) (e: SynExpr) =
+    let lowercaseInitial (id: Ident) =
+        id.idText.Length > 0
+        && not (Char.IsUpper id.idText.[0])
+        // op_Implicit and friends are .NET operator methods, not functions
+        && not (id.idText.StartsWith "op_")
+
     match e with
-    | SynExpr.Ident _ -> ValueSome()
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = head :: _)) when
-        head.idText.Length > 0 && Char.IsUpper head.idText.[0]
+    | SynExpr.Ident id when lowercaseInitial id || coreCaseNames.Contains id.idText -> ValueSome()
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = head :: (_ :: _ as rest))) when
+        head.idText.Length > 0
+        && Char.IsUpper head.idText.[0]
+        && lowercaseInitial (List.last rest)
         ->
         ValueSome()
     | _ -> ValueNone

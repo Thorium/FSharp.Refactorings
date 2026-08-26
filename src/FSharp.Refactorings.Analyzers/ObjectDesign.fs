@@ -26,19 +26,18 @@ type DisposableFieldSuggestion =
 
 type StaticMemberSuggestion = { MemberName: string; Range: range }
 
-let private isDisposableName (name: string) = name = "System.IDisposable"
+/// FR0047 (CA2213): a disposable field the type's Dispose never touches.
+type UndisposedFieldSuggestion =
+    { TypeName: string
+      FieldName: string
+      Range: range }
 
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
+let private isDisposableName (name: string) = name = "System.IDisposable"
 
 /// Is the type (after abbreviations) IDisposable or an implementation?
 let private isDisposableType (t: FSharpType) =
     try
-        let t = stripAbbreviations t
+        let t = OptionModule.stripAbbreviations t
 
         t.HasTypeDefinition
         && (t.TypeDefinition.TryFullName |> Option.exists isDisposableName
@@ -49,7 +48,9 @@ let private isDisposableType (t: FSharpType) =
     with _ ->
         false
 
-let private resolvesToDisposable (check: FSharpCheckFileResults) (source: ISourceText) (ident: Ident) =
+/// Does the binder at this location resolve to an IDisposable-implementing
+/// type? Shared with the use-binding rule.
+let resolvesToDisposable (check: FSharpCheckFileResults) (source: ISourceText) (ident: Ident) =
     let r = ident.idRange
     let lineText = source.GetLineString(r.EndLine - 1)
 
@@ -86,13 +87,26 @@ let find
     (parseTree: ParsedInput)
     (source: ISourceText)
     (check: FSharpCheckFileResults)
-    : DisposableFieldSuggestion list * StaticMemberSuggestion list =
+    : DisposableFieldSuggestion list * StaticMemberSuggestion list * UndisposedFieldSuggestion list =
     let index = AstIndex.ofTree parseTree
     let disposables = ResizeArray<DisposableFieldSuggestion>()
     let statics = ResizeArray<StaticMemberSuggestion>()
+    let undisposed = ResizeArray<UndisposedFieldSuggestion>()
 
     // does any expression inside `r` read or assign one of `names`?
     let mentions (names: Set<string>) (r: range) =
+        // the walker does not descend into a record copy-and-update's source
+        // (`{ state with ... }`), so read it off the Record node itself
+        let copySource (e: SynExpr) =
+            match e with
+            | SynExpr.Record(copyInfo = Some(copyExpr, _))
+            | SynExpr.AnonRecd(copyInfo = Some(copyExpr, _)) ->
+                match copyExpr with
+                | SynExpr.Ident id -> Some id
+                | SynExpr.LongIdent(longDotId = SynLongIdent(id = firstId :: _)) -> Some firstId
+                | _ -> None
+            | _ -> None
+
         not names.IsEmpty
         && index.Exprs
            |> Array.exists (fun (_, e) ->
@@ -102,7 +116,10 @@ let find
                    Range.rangeContainsRange r firstId.idRange
                | SynExpr.LongIdentSet(SynLongIdent(id = firstId :: _), _, _) when names.Contains firstId.idText ->
                    Range.rangeContainsRange r e.Range
-               | _ -> false)
+               | _ ->
+                   match copySource e with
+                   | Some id when names.Contains id.idText -> Range.rangeContainsRange r id.idRange
+                   | _ -> false)
 
     for _, decl in index.Decls do
         match decl with
@@ -144,26 +161,65 @@ let find
                             | _ -> [])
                         |> Set.ofList
 
-                    // FR0032: new-constructed disposable instance fields
-                    if not implementsDisposable then
-                        for m in members do
+                    // new-constructed disposable instance fields
+                    let newDisposableFields =
+                        members
+                        |> List.collect (fun m ->
                             match m with
                             | SynMemberDefn.LetBindings(isStatic = false; bindings = bindings) ->
-                                for binding in bindings do
+                                bindings
+                                |> List.choose (fun binding ->
                                     match binding with
                                     | SynBinding(
                                         headPat = SynPat.Named(ident = SynIdent(ident = var)); expr = SynExpr.New _) when
                                         resolvesToDisposable check source var
                                         ->
-                                        disposables.Add
-                                            { TypeName = typeName
-                                              FieldName = var.idText
-                                              Range = binding.RangeOfBindingWithRhs }
-                                    | _ -> ()
-                            | _ -> ()
+                                        Some(var.idText, binding.RangeOfBindingWithRhs)
+                                    | _ -> None)
+                            | _ -> [])
 
-                    // FR0033: instance members touching no instance state
-                    for m in members do
+                    // the bodies of Dispose members inside `interface ... with`
+                    let disposeBodies =
+                        members
+                        |> List.collect (fun m ->
+                            match m with
+                            | SynMemberDefn.Interface(members = Some interfaceMembers) ->
+                                interfaceMembers
+                                |> List.choose (fun im ->
+                                    match im with
+                                    | SynMemberDefn.Member(
+                                        memberDefn = SynBinding(
+                                            headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = ids))
+                                            expr = body)) when not ids.IsEmpty && (List.last ids).idText = "Dispose" ->
+                                        Some body.Range
+                                    | _ -> None)
+                            | _ -> [])
+
+                    if not implementsDisposable then
+                        // FR0032: owns a disposable but is not disposable
+                        for fieldName, fieldRange in newDisposableFields do
+                            disposables.Add
+                                { TypeName = typeName
+                                  FieldName = fieldName
+                                  Range = fieldRange }
+                    else
+                        // FR0047 (CA2213): disposable, but the field is
+                        // never touched by any Dispose body
+                        for fieldName, fieldRange in newDisposableFields do
+                            let touched =
+                                disposeBodies
+                                |> List.exists (fun body -> mentions (Set.singleton fieldName) body)
+
+                            if not (disposeBodies.IsEmpty || touched) then
+                                undisposed.Add
+                                    { TypeName = typeName
+                                      FieldName = fieldName
+                                      Range = fieldRange }
+
+                    // FR0033: instance members touching no instance state —
+                    // except where instance-ness is a contract (CE builders,
+                    // framework-dispatched subclass members)
+                    for m in (if instanceIsContract members then [] else members) do
                         match m with
                         | SynMemberDefn.Member(
                             memberDefn = SynBinding(
@@ -192,4 +248,4 @@ let find
                 | _ -> ()
         | _ -> ()
 
-    List.ofSeq disposables, List.ofSeq statics
+    List.ofSeq disposables, List.ofSeq statics, List.ofSeq undisposed

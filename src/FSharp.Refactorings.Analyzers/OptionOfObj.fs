@@ -76,12 +76,12 @@ let private (|SomeOfIdent|_|) (e: SynExpr) =
         ValueSome(someId, arg)
     | _ -> ValueNone
 
-/// The matching pair of case names, or None for a Some/None mix-up.
+/// The matching pair of case names, or ValueNone for a Some/None mix-up.
 let private pairModule (someId: Ident) (noneId: Ident) =
     match someId.idText, noneId.idText with
-    | "Some", "None" -> Some("Option", OptionModule.optionConfig.CoreFullNamePrefix)
-    | "ValueSome", "ValueNone" -> Some("ValueOption", OptionModule.valueOptionConfig.CoreFullNamePrefix)
-    | _ -> None
+    | "Some", "None" -> ValueSome("Option", OptionModule.optionConfig.CoreFullNamePrefix)
+    | "ValueSome", "ValueNone" -> ValueSome("ValueOption", OptionModule.valueOptionConfig.CoreFullNamePrefix)
+    | _ -> ValueNone
 
 /// An untyped candidate: (whole expression, tested ident, Some, None).
 /// TestIdent is the isNull/operator identifier, None for the match form
@@ -146,7 +146,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         findCandidates parseTree
         |> List.choose (fun c ->
             match pairModule c.SomeIdent c.NoneIdent with
-            | Some(moduleName, corePrefix) when
+            | ValueSome(moduleName, corePrefix) when
                 OptionModule.resolvesToCoreCase check source corePrefix c.SomeIdent
                 && OptionModule.resolvesToCoreCase check source corePrefix c.NoneIdent
                 // a shadowed isNull / (=) can have arbitrary semantics

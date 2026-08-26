@@ -23,6 +23,18 @@ let ``piped Array max on an int64 array is noted`` () =
     | other -> failwithf "Expected exactly one piped note, got %A" other
 
 [<Fact>]
+let ``Seq sum over an int array is the same scalar loop`` () =
+    match vectorizedIn "let f (values: int[]) = values |> Seq.sum" with
+    | [ s ] ->
+        Assert.Equal("Seq", s.ModuleName)
+        Assert.Equal("sum", s.FunctionName)
+    | other -> failwithf "Expected exactly one Seq-over-array note, got %A" other
+
+[<Fact>]
+let ``Seq sum over a list has no vectorized sibling`` () =
+    Assert.Empty(vectorizedIn "let f (values: int list) = values |> Seq.sum")
+
+[<Fact>]
 let ``float arrays are excluded for NaN semantics`` () =
     Assert.Empty(vectorizedIn "let f (values: float[]) = Array.sum values")
 

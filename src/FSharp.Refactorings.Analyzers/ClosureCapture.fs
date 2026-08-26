@@ -67,19 +67,9 @@ let private resolvesToSink (check: FSharpCheckFileResults) (source: ISourceText)
     | Some symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
-            let enclosing =
-                try
-                    value.ApparentEnclosingEntity
-                    |> Option.bind (fun e -> e.TryFullName)
-                    |> Option.defaultValue ""
-                with _ ->
-                    ""
+            let enclosing = OptionModule.enclosingFullName value
 
-            let fullName =
-                try
-                    value.FullName
-                with _ ->
-                    ""
+            let fullName = OptionModule.fullNameOf value
 
             sinkEntityPrefixes |> List.exists enclosing.StartsWith
             || sinkFunctionPrefixes |> List.exists fullName.StartsWith

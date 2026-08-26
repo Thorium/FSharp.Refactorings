@@ -12,7 +12,7 @@ let private findIn (source: string) =
 
 [<Fact>]
 let ``Equals override without GetHashCode is flagged`` () =
-    let equalsSuggestions, _ =
+    let equalsSuggestions, _, _ =
         findIn
             "module Test\ntype C(v: int) =\n    member _.V = v\n    override this.Equals(o) = match o with | :? C as c -> c.V = v | _ -> false"
 
@@ -22,7 +22,7 @@ let ``Equals override without GetHashCode is flagged`` () =
 
 [<Fact>]
 let ``Equals with GetHashCode is fine`` () =
-    let equalsSuggestions, _ =
+    let equalsSuggestions, _, _ =
         findIn
             "module Test\ntype C(v: int) =\n    member _.V = v\n    override this.Equals(o) = match o with | :? C as c -> c.V = v | _ -> false\n    override this.GetHashCode() = v"
 
@@ -30,7 +30,7 @@ let ``Equals with GetHashCode is fine`` () =
 
 [<Fact>]
 let ``non-override Equals member is not flagged`` () =
-    let equalsSuggestions, _ =
+    let equalsSuggestions, _, _ =
         findIn "module Test\ntype C(v: int) =\n    member _.Equals(other: C) = other = Unchecked.defaultof<C>"
 
     Assert.Empty equalsSuggestions
@@ -39,7 +39,7 @@ let ``non-override Equals member is not flagged`` () =
 
 [<Fact>]
 let ``abstract member called during construction is flagged`` () =
-    let _, ctorSuggestions =
+    let _, ctorSuggestions, _ =
         findIn
             "module Test\n[<AbstractClass>]\ntype Base() as this =\n    let initial = this.Compute()\n    member _.Initial = initial\n    abstract Compute: unit -> int"
 
@@ -49,7 +49,7 @@ let ``abstract member called during construction is flagged`` () =
 
 [<Fact>]
 let ``abstract property read during construction is flagged`` () =
-    let _, ctorSuggestions =
+    let _, ctorSuggestions, _ =
         findIn
             "module Test\n[<AbstractClass>]\ntype Base() as this =\n    do printfn \"%d\" this.Size\n    abstract Size: int"
 
@@ -59,7 +59,7 @@ let ``abstract property read during construction is flagged`` () =
 
 [<Fact>]
 let ``abstract member called from an ordinary member is fine`` () =
-    let _, ctorSuggestions =
+    let _, ctorSuggestions, _ =
         findIn
             "module Test\n[<AbstractClass>]\ntype Base() =\n    abstract Compute: unit -> int\n    member this.Run() = this.Compute()"
 
@@ -67,7 +67,7 @@ let ``abstract member called from an ordinary member is fine`` () =
 
 [<Fact>]
 let ``non-abstract self call during construction is fine`` () =
-    let _, ctorSuggestions =
+    let _, ctorSuggestions, _ =
         findIn
             "module Test\ntype C() as this =\n    let v = this.Fixed()\n    member _.Fixed() = 42\n    member _.V = v"
 

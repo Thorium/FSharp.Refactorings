@@ -63,13 +63,7 @@ let private resolvesToStringMethod (check: FSharpCheckFileResults) (source: ISou
     | Some symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
-            let enclosing =
-                try
-                    value.ApparentEnclosingEntity
-                    |> Option.bind (fun e -> e.TryFullName)
-                    |> Option.defaultValue ""
-                with _ ->
-                    ""
+            let enclosing = OptionModule.enclosingFullName value
 
             enclosing = "System.String"
         | _ -> false

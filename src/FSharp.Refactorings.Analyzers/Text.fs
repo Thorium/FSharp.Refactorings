@@ -24,6 +24,30 @@ let textOfRange (source: ISourceText) (r: range) : string =
 
 let isSingleLine (r: range) = r.StartLine = r.EndLine
 
+/// One project file's parse artifacts, for the project-wide (API-changing)
+/// rule variants: they read call sites out of files other than the one the
+/// definition lives in.
+type FileContext =
+    { FileName: string
+      Source: ISourceText
+      ParseTree: ParsedInput }
+
+/// True when any two of these ranges nest or coincide within one file.
+///
+/// A multi-edit suggestion is atomic — its definition edit and every
+/// call-site edit apply together or not at all — so nested ranges make it
+/// unappliable: splicing the outer one destroys or duplicates the inner.
+/// `f (f (1, 2), 3)` is the shape that produces them.
+let rangesNest (ranges: range list) =
+    ranges
+    |> List.indexed
+    |> List.exists (fun (i, r) ->
+        ranges
+        |> List.skip (i + 1)
+        |> List.exists (fun other ->
+            r.FileName.Equals(other.FileName, System.StringComparison.OrdinalIgnoreCase)
+            && (Range.rangeContainsRange r other || Range.rangeContainsRange other r)))
+
 /// Strip redundant outer parens from an expression whose new context makes
 /// them unnecessary (e.g. a lambda body inside our own parenthesized template).
 [<TailCall>]
@@ -217,3 +241,89 @@ let rec isSafeInline (e: SynExpr) : bool =
         | _ -> isSafeInline (List.last exprs)
     | SynExpr.Typed(expr = inner) -> isSafeInline inner
     | _ -> true
+
+/// Does an attribute list carry an attribute with this (short) name?
+/// Matches both `[<CustomOperation ...>]` and `[<CustomOperationAttribute ...>]`.
+let hasAttributeNamed (name: string) (attrs: SynAttributes) =
+    attrs
+    |> List.exists (fun attrList ->
+        attrList.Attributes
+        |> List.exists (fun a ->
+            match a.TypeName with
+            | SynLongIdent(id = ids) when not ids.IsEmpty ->
+                let t = (List.last ids).idText
+                t = name || t = name + "Attribute"
+            | _ -> false))
+
+/// Member names of the computation-expression builder protocol. A type
+/// carrying two or more of these is a CE builder, and F# requires builder
+/// members to be instance members (the builder is a value).
+let ceProtocolNames =
+    set
+        [ "Bind"
+          "Return"
+          "ReturnFrom"
+          "Yield"
+          "YieldFrom"
+          "Zero"
+          "Combine"
+          "Delay"
+          "Run"
+          "For"
+          "While"
+          "TryWith"
+          "TryFinally"
+          "Using"
+          "Source"
+          "MergeSources"
+          "BindReturn" ]
+
+/// The name of a `member this.Name ...` definition, if that is its shape.
+let memberDefnName (m: SynMemberDefn) =
+    match m with
+    | SynMemberDefn.Member(memberDefn = SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = ids)))) when
+        not ids.IsEmpty
+        ->
+        Some (List.last ids).idText
+    | _ -> None
+
+/// Types whose instance-ness is a contract rather than a choice: CE builders
+/// (two or more protocol members, or any [<CustomOperation>]), and subclasses
+/// (`inherit ...`), whose members frameworks like SignalR dispatch on
+/// instances by name.
+let instanceIsContract (members: SynMemberDefn list) =
+    let ceMembers =
+        members
+        |> List.choose memberDefnName
+        |> List.filter ceProtocolNames.Contains
+        |> List.distinct
+
+    ceMembers.Length >= 2
+    || members
+       |> List.exists (fun m ->
+           match m with
+           | SynMemberDefn.ImplicitInherit _
+           | SynMemberDefn.Inherit _ -> true
+           | SynMemberDefn.Member(memberDefn = SynBinding(attributes = attrs)) ->
+               hasAttributeNamed "CustomOperation" attrs
+           | _ -> false)
+
+/// Does the range cover a line carrying a compiler directive
+/// (#if/#else/#endif)? The parse tree only sees the active branch, so a fix
+/// replacing such a range would splice the directive structure apart and
+/// leave code that no longer compiles under the other defines.
+let spansDirective (source: ISourceText) (r: range) =
+    seq { r.StartLine .. r.EndLine }
+    |> Seq.exists (fun line ->
+        let text = (source.GetLineString(line - 1)).TrimStart()
+
+        text.StartsWith "#if" || text.StartsWith "#else" || text.StartsWith "#endif")
+
+/// Total line accessor: a stale or synthetic FCS range can point outside the
+/// current source snapshot. Out-of-bounds yields "" via a bounds check —
+/// nothing is caught, so real failures still propagate.
+let lineTextAt (source: ISourceText) (zeroBasedLine: int) =
+    if zeroBasedLine < 0 || zeroBasedLine >= source.GetLineCount() then
+        ""
+    else
+        source.GetLineString zeroBasedLine

@@ -58,8 +58,9 @@ let parse (json: string) : Map<string, bool> =
 
             enabled |> Option.map (fun e -> property.Name.ToLowerInvariant(), e))
         |> Map.ofSeq
-    with _ ->
-        Map.empty
+    with
+    | :? JsonException
+    | :? InvalidOperationException -> Map.empty
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins over
 /// a name entry; absent rules are enabled.
@@ -112,8 +113,9 @@ let parseHints (json: string) : string list =
                 |> List.ofSeq
             | _ -> []
         | _ -> []
-    with _ ->
-        []
+    with
+    | :? JsonException
+    | :? InvalidOperationException -> []
 
 /// The parsed content of one config file.
 type ConfigData =
@@ -129,10 +131,12 @@ let private parseCache = ConcurrentDictionary<string, DateTime * ConfigData>()
 /// content is reloaded when the config file's timestamp changes.
 let configFor (analyzedFile: string) : ConfigData =
     let directory =
+        // invalid path characters mean no config directory to search
         try
             Path.GetDirectoryName(analyzedFile: string)
-        with _ ->
-            null
+        with
+        | :? ArgumentException
+        | :? PathTooLongException -> null
 
     if String.IsNullOrEmpty directory then
         emptyConfig
@@ -151,18 +155,24 @@ let configFor (analyzedFile: string) : ConfigData =
         match configPath with
         | None -> emptyConfig
         | Some path ->
+            // a vanished or unreadable config reads as never-written, which
+            // forces a re-read attempt on the next call
             let lastWrite =
                 try
                     File.GetLastWriteTimeUtc path
-                with _ ->
-                    DateTime.MinValue
+                with
+                | :? IOException
+                | :? UnauthorizedAccessException
+                | :? ArgumentException -> DateTime.MinValue
 
             let readCurrent (p: string) =
+                // a config deleted or locked mid-read means no config
                 let content =
                     try
                         File.ReadAllText p
-                    with _ ->
-                        ""
+                    with
+                    | :? IOException
+                    | :? UnauthorizedAccessException -> ""
 
                 lastWrite,
                 { Rules = parse content
@@ -188,5 +198,11 @@ let rulesFor (analyzedFile: string) : Map<string, bool> = (configFor analyzedFil
 let hintsFor (analyzedFile: string) : string list = (configFor analyzedFile).Hints
 
 /// The single entry point the analyzers use: is this rule enabled for this file?
+/// Build-generated sources (AssemblyInfo.fs, AssemblyAttributes.fs under
+/// obj/) are not the user's code; no rule has business flagging them.
+let isGeneratedFile (analyzedFile: string) =
+    analyzedFile.Contains @"\obj\" || analyzedFile.Contains "/obj/"
+
 let isRuleEnabled (analyzedFile: string) (code: string) (analyzerName: string) : bool =
-    isEnabledIn (rulesFor analyzedFile) code analyzerName
+    not (isGeneratedFile analyzedFile)
+    && isEnabledIn (rulesFor analyzedFile) code analyzerName

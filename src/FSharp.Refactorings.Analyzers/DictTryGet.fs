@@ -60,13 +60,6 @@ let private FSharpMapType = "Microsoft.FSharp.Collections.FSharpMap`2"
 let private ConcurrentDictionaryType =
     "System.Collections.Concurrent.ConcurrentDictionary`2"
 
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
-
 /// `<container>.ContainsKey <key>` — returns the container segments and the
 /// key expression (parens stripped).
 [<return: Struct>]
@@ -185,7 +178,7 @@ let private containerTypeName (source: ISourceText) (check: FSharpCheckFileResul
     let lineText = source.GetLineString(r.EndLine - 1)
 
     let fullNameOf (t: FSharpType) =
-        let t = stripAbbreviations t
+        let t = OptionModule.stripAbbreviations t
 
         if t.HasTypeDefinition then
             t.TypeDefinition.TryFullName

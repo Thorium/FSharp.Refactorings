@@ -83,7 +83,7 @@ let ``unit error-branch becomes Result iter`` () =
 let ``transformed body with default becomes map and defaultValue`` () =
     assertSingleSuggestion
         "let f (r: Result<int, string>) = match r with | Ok v -> v * 2 | Error _ -> 0"
-        "Result.map"
+        "Result.map + Result.defaultValue"
         "r |> Result.map (fun v -> v * 2) |> Result.defaultValue 0"
 
 [<Fact>]

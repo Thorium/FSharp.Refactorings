@@ -1,4 +1,4 @@
-﻿/// Refactoring: remove `mutable` from a local binding that is never mutated.
+/// Refactoring: remove `mutable` from a local binding that is never mutated.
 ///
 ///     let mutable x = 0        →     let x = 0
 ///     printfn "%d" x                 printfn "%d" x
@@ -65,17 +65,10 @@ let private immutableValueTypes =
           "System.TimeSpan"
           "System.Guid" ]
 
-[<TailCall>]
-let rec private stripAbbreviations (t: FSharpType) =
-    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
-        stripAbbreviations t.TypeDefinition.AbbreviatedType
-    else
-        t
-
 /// True when the local's type is safe to bind immutably: reference types,
 /// enums, and whitelisted immutable structs.
 let private typeAllowsRemoval (t: FSharpType) =
-    let t = stripAbbreviations t
+    let t = OptionModule.stripAbbreviations t
 
     if not t.HasTypeDefinition then
         // type parameters, tuples, functions: could be instantiated to a
@@ -104,7 +97,7 @@ let private mayMutate (bodyText: string) (name: string) =
 /// textually between the start of the let-binding and its head pattern.
 let private mutableKeywordRange (source: ISourceText) (letStart: pos) (patStart: pos) (fileName: string) =
     if letStart.Line <> patStart.Line then
-        None
+        ValueNone
     else
         let line = source.GetLineString(letStart.Line - 1)
         let segment = line.Substring(letStart.Column, patStart.Column - letStart.Column)
@@ -113,14 +106,14 @@ let private mutableKeywordRange (source: ISourceText) (letStart: pos) (patStart:
         if m.Success then
             let startCol = letStart.Column + m.Index
 
-            Some(
+            ValueSome(
                 Range.mkRange
                     fileName
                     (Position.mkPos letStart.Line startCol)
                     (Position.mkPos letStart.Line (startCol + m.Length))
             )
         else
-            None
+            ValueNone
 
 /// Find local `let mutable` bindings that are never mutated. Requires typed
 /// check results for the struct-safety gate.
@@ -142,19 +135,19 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         { new SyntaxCollectorBase() with
             override _.WalkExpr(_path, expr) =
                 match expr with
-                | SynExpr.LetOrUse lou when not lou.IsBang && not lou.IsUse ->
+                | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
                     match lou.Bindings with
                     | [ SynBinding(isMutable = true; headPat = SynPat.Named(ident = SynIdent(ident = var)) as pat) ] when
                         not (mayMutate (textOfRange source lou.Body.Range) var.idText)
                         && resolvesToSafeType var
                         ->
                         match mutableKeywordRange source expr.Range.Start pat.Range.Start expr.Range.FileName with
-                        | Some keywordRange ->
+                        | ValueSome keywordRange ->
                             suggestions.Add
                                 { Range = keywordRange
                                   OriginalText = textOfRange source keywordRange
                                   Name = var.idText }
-                        | None -> ()
+                        | ValueNone -> ()
                     | _ -> ()
                 | _ -> ()
 
@@ -183,12 +176,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                             pat.Range.Start
                                             memberDefn.Range.FileName
                                     with
-                                    | Some keywordRange ->
+                                    | ValueSome keywordRange ->
                                         suggestions.Add
                                             { Range = keywordRange
                                               OriginalText = textOfRange source keywordRange
                                               Name = var.idText }
-                                    | None -> ()
+                                    | ValueNone -> ()
                                 | _ -> ()
                         | _ -> ()
                 | _ -> () }

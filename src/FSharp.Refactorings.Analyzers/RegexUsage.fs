@@ -218,7 +218,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                 if callReplacement = "" then
                                     []
                                 else
-                                    [ insertAt, "", binding + "\n" + indent
+                                    [ insertAt, "", $"{binding}\n{indent}"
                                       expr.Range, textOfRange source expr.Range, callReplacement ]
                             | _ -> []
 

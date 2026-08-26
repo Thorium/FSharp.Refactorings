@@ -25,13 +25,13 @@ let private assertNoSuggestion (source: string) = Assert.Empty(findIn source)
 let ``dotted guard function becomes an active pattern`` () =
     assertSingleSuggestion
         "module Test\nlet describe (s: string) =\n    match s with\n    | s when System.String.IsNullOrEmpty s -> \"empty\"\n    | s -> s"
-        "module Test\nlet private (|IsNullOrEmpty|_|) input = if System.String.IsNullOrEmpty input then Some input else None\nlet describe (s: string) =\n    match s with\n    | IsNullOrEmpty s -> \"empty\"\n    | s -> s"
+        "module Test\n[<return: Struct>]\nlet inline private (|IsNullOrEmpty|_|) input =\n    if System.String.IsNullOrEmpty input then ValueSome input else ValueNone\nlet describe (s: string) =\n    match s with\n    | IsNullOrEmpty s -> \"empty\"\n    | s -> s"
 
 [<Fact>]
 let ``module-level guard function becomes an active pattern`` () =
     assertSingleSuggestion
         "module Test\nlet isEven (n: int) = n % 2 = 0\nlet f x =\n    match x with\n    | n when isEven n -> n\n    | n -> 0"
-        "module Test\nlet isEven (n: int) = n % 2 = 0\nlet private (|IsEven|_|) input = if isEven input then Some input else None\nlet f x =\n    match x with\n    | IsEven n -> n\n    | n -> 0"
+        "module Test\nlet isEven (n: int) = n % 2 = 0\n[<return: Struct>]\nlet inline private (|IsEven|_|) input =\n    if isEven input then ValueSome input else ValueNone\nlet f x =\n    match x with\n    | IsEven n -> n\n    | n -> 0"
 
 [<Fact>]
 let ``locally defined guard function is not extracted`` () =

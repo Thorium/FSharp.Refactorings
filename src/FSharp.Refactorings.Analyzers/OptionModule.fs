@@ -168,9 +168,12 @@ let private rewrite
     | _, (SomeApp _ | NoneIdent) -> None
     | body, defaultBody ->
         let bodyText = textOfRange source (stripParens body).Range
-        let call, _ = defaultCall cfg source defaultBody
+        let call, target = defaultCall cfg source defaultBody
 
-        Some(sprintf "%s |> %s.map (fun %s -> %s) |> %s" pipeSource m (lambdaParam boundVar) bodyText call, $"{m}.map")
+        Some(
+            sprintf "%s |> %s.map (fun %s -> %s) |> %s" pipeSource m (lambdaParam boundVar) bodyText call,
+            $"{m}.map + {target}"
+        )
 
 let private findCandidates (cfg: WrapperConfig) (parseTree: ParsedInput) (source: ISourceText) : Candidate list =
     let candidates = ResizeArray<Candidate>()
@@ -210,7 +213,7 @@ let private findCandidates (cfg: WrapperConfig) (parseTree: ParsedInput) (source
                         | Some(replacement, target) ->
                             let replacement =
                                 if inOperandPosition && not (Regex.IsMatch(replacement, @"^[\w.]+$")) then
-                                    "(" + replacement + ")"
+                                    $"({replacement})"
                                 else
                                     replacement
 
@@ -227,6 +230,34 @@ let private findCandidates (cfg: WrapperConfig) (parseTree: ParsedInput) (source
     AstIndex.replay collector parseTree
     List.ofSeq candidates
 
+/// The exceptions FCS symbol properties (FullName, ApparentEnclosingEntity,
+/// member metadata) raise for compiler-internal symbols without a stable
+/// answer. Anything else is a programming error and propagates.
+[<return: Struct>]
+let (|FcsSymbolFailure|_|) (e: exn) =
+    match e with
+    | :? System.InvalidOperationException
+    | :? System.NotSupportedException
+    | :? System.ArgumentException
+    | :? System.Collections.Generic.KeyNotFoundException -> ValueSome()
+    | _ -> ValueNone
+
+/// Follow F# type abbreviations (`string` → System.String) to the real
+/// definition. Shared by every typed rule that compares type names.
+[<TailCall>]
+let rec stripAbbreviations (t: FSharpType) =
+    if t.HasTypeDefinition && t.TypeDefinition.IsFSharpAbbreviation then
+        stripAbbreviations t.TypeDefinition.AbbreviatedType
+    else
+        t
+
+/// The symbol's FullName, or "" where FCS has none to give.
+let fullNameOf (symbol: FSharpSymbol) =
+    try
+        symbol.FullName
+    with FcsSymbolFailure ->
+        ""
+
 /// True when the ident at this location resolves to a union case whose
 /// FullName starts with the given FSharp.Core prefix. Shared with other
 /// analyzers that must prove an ident is really e.g. option's None.
@@ -239,18 +270,23 @@ let resolvesToCoreCase (check: FSharpCheckFileResults) (source: ISourceText) (pr
         match symbolUse.Symbol with
         | :? FSharpUnionCase as unionCase ->
             // e.g. "Microsoft.FSharp.Core.Option<_>.Some"
-            (try
-                unionCase.FullName
-             with _ ->
-                 "")
-                .StartsWith
-                prefix
+            (fullNameOf unionCase).StartsWith prefix
         | _ -> false
     | None -> false
 
-/// True when the identifier resolves into FSharp.Core's Operators module —
+/// The full name of a member's apparent enclosing entity, or "".
+let enclosingFullName (value: FSharpMemberOrFunctionOrValue) =
+    try
+        value.ApparentEnclosingEntity
+        |> Option.bind (fun e -> e.TryFullName)
+        |> Option.defaultValue ""
+    with FcsSymbolFailure ->
+        ""
+
+/// True when the identifier resolves into FSharp.Core's operator modules —
 /// guards rules that pattern-match on names like `isNull`, `sprintf`, or
-/// `(+)` against user-defined shadowing.
+/// `(+)` against user-defined shadowing. `sprintf` and friends live in
+/// ExtraTopLevelOperators rather than Operators.
 let resolvesToCoreOperator (check: FSharpCheckFileResults) (source: ISourceText) (ident: Ident) =
     let r = ident.idRange
     let lineText = source.GetLineString(r.EndLine - 1)
@@ -259,12 +295,10 @@ let resolvesToCoreOperator (check: FSharpCheckFileResults) (source: ISourceText)
     | Some symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as value ->
-            (try
-                value.FullName
-             with _ ->
-                 "")
-                .StartsWith
-                "Microsoft.FSharp.Core.Operators"
+            let fullName = fullNameOf value
+
+            fullName.StartsWith "Microsoft.FSharp.Core.Operators"
+            || fullName.StartsWith "Microsoft.FSharp.Core.ExtraTopLevelOperators"
         | _ -> false
     | None -> false
 
@@ -282,7 +316,8 @@ let findWith (cfg: WrapperConfig) (parseTree: ParsedInput) (source: ISourceText)
     else
         findCandidates cfg parseTree source
         |> List.filter (fun c ->
-            resolvesToCoreCase check source cfg.CoreFullNamePrefix c.SomeIdent
+            not (spansDirective source c.MatchRange)
+            && resolvesToCoreCase check source cfg.CoreFullNamePrefix c.SomeIdent
             && resolvesToCoreCase check source cfg.CoreFullNamePrefix c.NoneIdent)
         |> List.map (fun c ->
             { Range = c.MatchRange
