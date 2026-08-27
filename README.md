@@ -45,8 +45,7 @@ Point it at whatever you have — the kind is read off the path:
 
 ## What it changes
 
-A spread of what the 90-odd rules do — the full list is in
-[Refactorings](#refactorings):
+Examples:
 
 | | Before | After |
 |---|---|---|
@@ -58,6 +57,9 @@ A spread of what the 90-odd rules do — the full list is in
 | Redundancy | `new StringBuilder()` | `StringBuilder()` |
 | Redundancy | `[<SerializableAttribute>]` | `[<Serializable>]` |
 | Diagnostics | `failwith "Error"` | `failwith $"Error, calling f with x: {x}"` |
+
+A spread of what the 90-odd rules do — the full list is in
+[Refactorings](#refactorings):
 
 ## Editor and CI setup
 
@@ -401,4 +403,22 @@ deliberately-shaped source fragments the tests exercise.
    (`if ↔ match`, tupled ↔ curried) belong in FsAutoComplete's codefix
    infrastructure as user-invoked `refactor.rewrite` actions, and should be
    contributed there rather than here.
+
+## Our Vision, and Other projects in the same field
+
+AI Agent compatibility: This project does distinct the F# code from generated Python smell. Meanwhile, some past rules (like function length and cyclomatic complexity) are expected to gains less attention in the future.
+This project has focus on idiomatic F#, code performance and best practices, and less interest on code structure/naming/maintainability.
+
+This project aims to be compatible with other products, so you won't end-up having oscillation/fight between suggested changes.
+
+| Tool | Duplicate rules | Status |
+|---|---|---|
+| FxCop and [MS Code Analysis](https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/) | Many | We have implemented the MinimumRecommendedRules, and some performance etc. rules relevant to F# |
+| [FSharpLint](https://fsprojects.github.io/FSharpLint/) | Many | Instead of just listing, we have quick-fixes and auto-fix. Rules are compatible with this project. |
+| [Resharper F#](https://github.com/JetBrains/resharper-fsharp) | Many | Have many same features, meanwhile using totally different AST. |
+| [Resharper C#](https://www.jetbrains.com/resharper/features/) | Partial | Resharper has heavy focus on OO meanwhile we focus on FP. Many C# issues don't exist in F# at all (like clojure captures, etc.). |
+| [Linq.Expression.Optimizer](https://thorium.github.io/Linq.Expression.Optimizer/) | Some | We optimize compile-time, meanwhile this tool optimize runtime-code |
+| [G-Research FSharp Analyzers](https://g-research.github.io/fsharp-analyzers/) | Not really | Good rules to focus maintainability. Different focus. Should work well together. |
+| [Fantomas](https://fsprojects.github.io/fantomas/) | None | Different focus: Fantomas is a code layout tool. We are compatible so you can use both. |
+| [FSharp.Analyzers.SDK](https://ionide.io/FSharp.Analyzers.SDK/) | None | We use this tool under hood. |
 
