@@ -54,7 +54,8 @@ let private isAtomicArg (e: SynExpr) =
     | SynExpr.Const _
     | SynExpr.Paren _
     | SynExpr.DotGet _ -> true
-    | SynExpr.App(flag = ExprAtomicFlag.Atomic) -> true
+    // a high-precedence application still needs parens as an argument:
+    // `add f(1) 2` is error FS0597 (see Text.isAtomic)
     | _ -> false
 
 let private argText (source: ISourceText) (e: SynExpr) =

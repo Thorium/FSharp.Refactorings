@@ -9,7 +9,8 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>fsharp-refactor</ToolCommandName>
     <PackageId>fsharp-refactorings-apply</PackageId>
-    <Description>Applies FSharp.Refactorings quick fixes to F# projects from the command line.</Description>
+    <Description>Applies FSharp.Refactorings quick fixes to F# code from the command line. Point it at a project, a script, a solution, a directory or a glob; --dry-run reports without editing.</Description>
+    <PackageReleaseNotes>0.3.0: takes a bare path and infers the kind — .fsproj, a single .fs, .fsx, .sln/.slnx, a directory or a glob. Scripts skip MSBuild entirely. Multi-targeted and strong-named projects now work. Files are typechecked in parallel (--jobs, default 4). New rules FR0090-FR0093; several false positives fixed.</PackageReleaseNotes>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/FSharp.Refactorings</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/FSharp.Refactorings</RepositoryUrl>

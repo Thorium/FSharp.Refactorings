@@ -28,12 +28,54 @@ let ``corpus fixes still parse`` () : unit =
         let failures = ResizeArray<string>()
         let mutable applied = 0
         let mutable filesSeen = 0
+        let mutable unparseable = 0
 
+        // per-rule hit counts, plus a few real example sites each: a count
+        // alone says a rule fires a lot, the samples say whether it should
+        let hits = Collections.Generic.Dictionary<string, int>()
+        let samples = Collections.Generic.Dictionary<string, ResizeArray<string>>()
+
+        let countHit (code: string) (where: string) =
+            hits.[code] <-
+                (match hits.TryGetValue code with
+                 | true, n -> n
+                 | false, _ -> 0)
+                + 1
+
+            match samples.TryGetValue code with
+            | true, existing ->
+                if existing.Count < 4 then
+                    existing.Add where
+            | false, _ ->
+                let fresh = ResizeArray()
+                fresh.Add where
+                samples.[code] <- fresh
+
+        /// file(line,col) plus the source line, so a sample can be judged
+        /// without opening the file
+        let siteOf (file: string) (source: string) (r: FSharp.Compiler.Text.range) =
+            let lines = source.Replace("\r\n", "\n").Split('\n')
+
+            let text =
+                if r.StartLine >= 1 && r.StartLine <= lines.Length then
+                    lines.[r.StartLine - 1].Trim()
+                else
+                    ""
+
+            $"{file}({r.StartLine},{r.StartColumn}): {text}"
+
+        // A plain file walk: project and solution membership are irrelevant,
+        // because the rules here are parse-only. Scripts count too — a
+        // parse-only rule applies to an .fsx exactly as it does to an .fs,
+        // and scripts are where a lot of real-world F# actually lives.
         let files =
             roots.Split(';')
             |> Seq.collect (fun root ->
                 if Directory.Exists root then
-                    Directory.EnumerateFiles(root, "*.fs", SearchOption.AllDirectories)
+                    seq {
+                        yield! Directory.EnumerateFiles(root, "*.fs", SearchOption.AllDirectories)
+                        yield! Directory.EnumerateFiles(root, "*.fsx", SearchOption.AllDirectories)
+                    }
                 else
                     Seq.empty)
             |> Seq.filter (fun f -> not (f.Contains @"\obj\" || f.Contains @"\bin\" || f.Contains @"\packages\"))
@@ -41,9 +83,24 @@ let ``corpus fixes still parse`` () : unit =
         for file in files do
             let source = File.ReadAllText file
 
+            let asName =
+                if file.EndsWith(".fsx", StringComparison.OrdinalIgnoreCase) then
+                    "Test.fsx"
+                else
+                    "Test.fs"
+
             try
-                let tree, sourceText = parse source
+                // A file that does not parse is not ours to fix — plenty of
+                // real repositories carry deliberately-broken fixtures. What
+                // matters is that no rule THROWS on the recovered tree, so
+                // the rules still run; only the patch validation below is
+                // skipped, being meaningless when the input was already
+                // unparseable.
+                let tree, hadParseErrors, sourceText = tryParseNamed asName source
                 filesSeen <- filesSeen + 1
+
+                if hadParseErrors then
+                    unparseable <- unparseable + 1
 
                 let suggestions =
                     [ for s in RedundantParens.find tree sourceText -> s.Range, s.ReplacementText, "FR0013"
@@ -52,19 +109,44 @@ let ``corpus fixes still parse`` () : unit =
                       for s in AttributeMerge.find tree sourceText -> s.Range, s.ReplacementText, "FR0060"
                       for s in HintEngine.find [] tree sourceText -> s.Range, s.ReplacementText, "FR0011/12"
                       for s in Simplification.find tree sourceText None -> s.Range, s.ReplacementText, "FR0010"
+                      for s in ConversionMove.find tree sourceText -> s.Range, s.ReplacementText, "FR0004"
+                      for s in StructDu.find (Visibility.apiChangesAllowed ()) tree sourceText ->
+                          s.InsertRange, s.InsertText, "FR0016"
+                      for s in RedundantSyntax.find tree sourceText -> s.Range, s.ReplacementText, $"FR008x/{s.Kind}"
                       for s in MatchBangRule.find tree sourceText do
                           for range, _, replacement in s.Edits -> range, replacement, "FR0073"
                       for s in MatchBangRule.findWhileBang tree sourceText do
                           for range, _, replacement in s.Edits -> range, replacement, "FR0078" ]
+
+                // note-only rules: nothing to patch, but count them so a rule
+                // that fires wildly on real code shows up here
+                let voptions, structs, structTuples =
+                    StructHints.find (Visibility.apiChangesAllowed ()) tree sourceText
+
+                for s in voptions do
+                    countHit "FR0069" (siteOf file source s.Range)
+
+                for s in structs do
+                    countHit "FR0070" (siteOf file source s.Range)
+
+                for s in structTuples do
+                    countHit "FR0093" (siteOf file source s.Range)
+
+                for s in PathSeparator.find tree sourceText do
+                    countHit "FR0081" (siteOf file source s.Range)
+
+                for s in DuFieldNames.find (Visibility.apiChangesAllowed ()) tree sourceText do
+                    countHit "FR0022" (siteOf file source s.Range)
 
                 // multi-edit rules (FR0073/FR0078) must apply as a set;
                 // single edits verify individually
                 for range, replacement, code in suggestions do
                     if code <> "FR0073" && code <> "FR0078" then
                         applied <- applied + 1
+                        countHit code (siteOf file source range)
                         let patched = applyEdit source range replacement
 
-                        if not (parsesCleanly patched) then
+                        if not hadParseErrors && not (parsesCleanlyNamed asName patched) then
                             failures.Add $"{code} {file}({range.StartLine},{range.StartColumn}): -> {replacement}"
 
                 let multiEditSets =
@@ -79,13 +161,30 @@ let ``corpus fixes still parse`` () : unit =
                         |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
                         |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
 
-                    if not (parsesCleanly patched) then
+                    if not hadParseErrors && not (parsesCleanlyNamed asName patched) then
                         failures.Add $"multi-edit {file}: {edits.Length} edits"
             with ex ->
-                failures.Add $"CRASH {file}: {ex.Message}"
+                // a rule THREW: that is a catastrophic failure, unlike a
+                // file that simply does not parse
+                failures.Add $"THREW {file}: {ex.Message}"
+
+        let byRule =
+            hits
+            |> Seq.sortByDescending (fun kv -> kv.Value)
+            |> Seq.map (fun kv ->
+                let examples =
+                    match samples.TryGetValue kv.Key with
+                    | true, xs -> xs |> Seq.map (fun s -> "\n           " + s) |> String.concat ""
+                    | false, _ -> ""
+
+                $"  {kv.Value, 6}  {kv.Key}{examples}")
+            |> String.concat "\n"
 
         let report =
-            $"files: {filesSeen}, fixes applied: {applied}, failures: {failures.Count}\n"
+            $"files: {filesSeen} ({unparseable} did not parse), fixes applied: {applied}, rules threw: {failures.Count}\n"
+            + "\nper rule:\n"
+            + byRule
+            + "\n\nfailures:\n"
             + String.concat "\n" failures
 
         File.WriteAllText(Path.Combine(Path.GetTempPath(), "fsref-corpus-validation.txt"), report)

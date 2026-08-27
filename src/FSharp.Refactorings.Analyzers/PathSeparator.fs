@@ -119,7 +119,30 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) -> Some text
                       | _ -> None)
 
-              let separators = literalTexts |> List.choose separatorOf |> List.distinct
+              // A separator only JOINS when the chain has something on both
+              // sides of it. `Path.GetFileName d + "/"` appends a trailing
+              // marker and `"/" + name` prefixes a root — neither is a
+              // Path.Combine, and Path.Combine cannot even express the
+              // first. An inner literal always joins; an outer one has to
+              // carry text on the far side of its separator, so
+              // `dir + "/file.txt"` still counts and `dir + "/"` does not.
+              let separators =
+                  let total = List.length operands
+
+                  operands
+                  |> List.indexed
+                  |> List.choose (fun (i, o) ->
+                      match o with
+                      | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) ->
+                          separatorOf text
+                          |> Option.filter (fun sep ->
+                              let sepChar = sep.[0]
+
+                              if i > 0 && i < total - 1 then true
+                              elif i = total - 1 then text.TrimEnd sepChar <> ""
+                              else text.TrimStart sepChar <> "")
+                      | _ -> None)
+                  |> List.distinct
 
               // an inner separator literal joining non-literal parts,
               // nothing URL-ish anywhere in the chain
@@ -137,15 +160,36 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       | SynExpr.Const _ -> false
                       | _ -> true)
 
-              // '\' joins are path-ish on their own; '/' joins also serve
-              // prose ("cats / dogs") and URLs, so they need positive
-              // evidence: path-flavored names, a rooted or
-              // extension-bearing literal, or a literal existing on disk
-              let hasPathEvidence (separator: string) =
-                  separator = "\\"
-                  || pathSmell.IsMatch(textOfRange source expr.Range)
-                  || literalTexts
-                     |> List.exists (fun t -> rootedLiteral.IsMatch t || extensionLiteral.IsMatch t || existsOnDisk t)
+              // BOTH separators need positive evidence. A lone backslash
+              // used to read as path-ish on its own, but a corpus run over
+              // FsAutoComplete showed where that goes wrong: escape-sequence
+              // building (`result <- result + "\\" + string c`) is full of
+              // backslash literals and has nothing to do with paths.
+              // Evidence is path-flavored names, a rooted or
+              // extension-bearing literal, or a literal existing on disk.
+              // evidence that this is a FILESYSTEM path, not just something
+              // path-shaped: a rooted or extension-bearing literal, or one
+              // that actually exists on this machine
+              let hasStrongEvidence =
+                  literalTexts
+                  |> List.exists (fun t -> rootedLiteral.IsMatch t || extensionLiteral.IsMatch t || existsOnDisk t)
+
+              // A chain opening with a forward-slash literal is as likely a
+              // URL path as a filesystem one — `"/img/userimages/" + fileId`
+              // is a web route, and Path.Combine would turn it into
+              // backslashes. A path-flavored NAME is too weak to tell those
+              // apart (`fileId` matches "file"), so the leading-slash case
+              // wants the stronger evidence.
+              let opensWithSlashLiteral =
+                  match operands with
+                  | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) :: _ -> text.StartsWith '/'
+                  | _ -> false
+
+              let hasPathEvidence (_separator: string) =
+                  if opensWithSlashLiteral then
+                      hasStrongEvidence
+                  else
+                      pathSmell.IsMatch(textOfRange source expr.Range) || hasStrongEvidence
 
               match separators with
               | [ separator ] when

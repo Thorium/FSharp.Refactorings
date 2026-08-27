@@ -24,6 +24,31 @@ let textOfRange (source: ISourceText) (r: range) : string =
 
 let isSingleLine (r: range) = r.StartLine = r.EndLine
 
+/// Where a new attribute belongs on a declaration.
+///
+/// A declaration's range starts at its XML doc, so inserting at the range
+/// start puts `[<Struct>]` ABOVE the `///` lines. That compiles, but the
+/// attribute belongs against the thing it decorates, so skip the doc first.
+/// Returns the position, whose column is also the indent to line up with.
+let attributeInsertPos (source: ISourceText) (declRange: range) : pos =
+    let isDocLine (n: int) =
+        n <= source.GetLineCount()
+        && (source.GetLineString(n - 1)).TrimStart().StartsWith "///"
+
+    let mutable line = declRange.StartLine
+
+    while isDocLine line do
+        line <- line + 1
+
+    let column =
+        if line <= source.GetLineCount() then
+            let text = source.GetLineString(line - 1)
+            text.Length - text.TrimStart().Length
+        else
+            declRange.StartColumn
+
+    Position.mkPos line column
+
 /// One project file's parse artifacts, for the project-wide (API-changing)
 /// rule variants: they read call sites out of files other than the one the
 /// definition lives in.
@@ -65,13 +90,37 @@ let isAtomic (e: SynExpr) =
     | SynExpr.Const _
     | SynExpr.Paren _
     | SynExpr.DotGet _ -> true
-    | SynExpr.App(flag = ExprAtomicFlag.Atomic) -> true
+    // NOT a high-precedence application. `f(x)` and `X.Y(x)` carry
+    // ExprAtomicFlag.Atomic, but F# still rejects them unparenthesised in
+    // argument position: `isNull Environment.GetEnvironmentVariable("CI")`
+    // is error FS0597, "this argument expression needs parentheses". A
+    // corpus run over FSharp.Data caught FR0012 emitting exactly that.
+    // Parenthesising is always semantically safe, so treat them as needing
+    // it rather than trying to tell argument position from pipe source.
     | _ -> false
 
 /// The expression's text, parenthesized unless it is atomic.
+///
+/// A call written in .NET style needs the parentheses moved rather than
+/// added: F# brackets the whole application, so `f(x)` becomes `(f x)`
+/// and not `(f(x))`. Only single, already-atomic arguments are moved —
+/// a tuple `Path.Combine(a, b)` is the argument list and must keep its
+/// parentheses, and `f (a + b)` would change meaning without them.
 let atomicText (source: ISourceText) (e: SynExpr) =
     let text = textOfRange source e.Range
-    if isAtomic e then text else $"({text})"
+
+    if isAtomic e then
+        text
+    else
+        match e with
+        | SynExpr.App(flag = ExprAtomicFlag.Atomic; funcExpr = func; argExpr = SynExpr.Paren(expr = inner)) when
+            isAtomic inner
+            && (match inner with
+                | SynExpr.Tuple _ -> false
+                | _ -> true)
+            ->
+            $"({textOfRange source func.Range} {textOfRange source inner.Range})"
+        | _ -> $"({text})"
 
 /// The expression's text as a function argument: parenthesized unless atomic,
 /// and always parenthesized when it starts with `-` (it would parse as
@@ -82,7 +131,8 @@ let argumentText (source: ISourceText) (e: SynExpr) =
     if isAtomic e && not (text.StartsWith '-') then
         text
     else
-        $"({text})"
+        // shares atomicText's bracket placement: `f(x)` reads as `(f x)`
+        atomicText source e
 
 /// Pure atoms whose evaluation cannot run user code — safe to evaluate
 /// eagerly where the original code evaluated them lazily. Empty collection

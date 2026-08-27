@@ -114,10 +114,13 @@ let find
                     let results = ResizeArray<range * string>()
 
                     if collectResults results body && results.Count > 0 then
-                        let indent = String(' ', decl.Range.StartColumn)
+                        // below any XML doc, so the attribute sits against
+                        // the binding it marks
+                        let insertPos = attributeInsertPos source decl.Range
+                        let indent = String(' ', insertPos.Column)
 
                         let insertEdit =
-                            { Range = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
+                            { Range = Range.mkRange decl.Range.FileName insertPos insertPos
                               Original = ""
                               Replacement = "[<return: Struct>]\n" + indent }
 

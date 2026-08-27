@@ -7,7 +7,8 @@
     <IsPackable>true</IsPackable>
     <BuildOutputTargetFolder>analyzers/dotnet/fs</BuildOutputTargetFolder>
     <PackageId>FSharp.Refactorings.Analyzers</PackageId>
-    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK.</Description>
+    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK. Around 90 rules covering correctness, performance, idiom and redundancy; every one is Hint severity, so they never gate a build.</Description>
+    <PackageReleaseNotes>0.3.0: new rules FR0090-FR0093 (project-wide tupled-to-curried and parameter reorder under --api-changes, static failwith messages gaining their arguments, reference-tuple fields). Fixes a case where a substituted method call lost needed parentheses, and three FR0081 false positives found by sweeping 3684 files of real F#.</PackageReleaseNotes>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/FSharp.Refactorings</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/FSharp.Refactorings</RepositoryUrl>

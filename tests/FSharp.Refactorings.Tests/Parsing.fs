@@ -9,17 +9,19 @@ open FSharp.Compiler.Text
 
 let private checker = FSharpChecker.Create()
 
-/// Parse a standalone source string; fails the test on parse errors so a
-/// broken test input is caught immediately.
-let parse (source: string) : ParsedInput * ISourceText =
+/// Parse under a chosen file name. A `.fsx` name makes FCS parse the text
+/// as a script, which needs no leading namespace or module — parsing script
+/// content as `.fs` fails with "Files in libraries or multiple-file
+/// applications must begin with a namespace or module declaration".
+let parseNamed (fileName: string) (source: string) : ParsedInput * ISourceText =
     let sourceText = SourceText.ofString source
 
     let parsingOptions =
         { FSharpParsingOptions.Default with
-            SourceFiles = [| "Test.fs" |] }
+            SourceFiles = [| fileName |] }
 
     let result =
-        checker.ParseFile("Test.fs", sourceText, parsingOptions)
+        checker.ParseFile(fileName, sourceText, parsingOptions)
         |> Async.RunSynchronously
 
     if result.ParseHadErrors then
@@ -27,19 +29,43 @@ let parse (source: string) : ParsedInput * ISourceText =
 
     result.ParseTree, sourceText
 
-/// True when the source string parses without errors.
-let parsesCleanly (source: string) : bool =
+/// Parse without failing on errors: returns the recovered tree and whether
+/// the parser complained. Malformed input still yields a partial tree —
+/// which is exactly what analyzers see in an editor mid-keystroke, so the
+/// rules must survive it rather than throw.
+let tryParseNamed (fileName: string) (source: string) : ParsedInput * bool * ISourceText =
     let sourceText = SourceText.ofString source
 
     let parsingOptions =
         { FSharpParsingOptions.Default with
-            SourceFiles = [| "Test.fs" |] }
+            SourceFiles = [| fileName |] }
 
     let result =
-        checker.ParseFile("Test.fs", sourceText, parsingOptions)
+        checker.ParseFile(fileName, sourceText, parsingOptions)
+        |> Async.RunSynchronously
+
+    result.ParseTree, result.ParseHadErrors, sourceText
+
+/// True when the source string parses without errors under a chosen file name.
+let parsesCleanlyNamed (fileName: string) (source: string) : bool =
+    let sourceText = SourceText.ofString source
+
+    let parsingOptions =
+        { FSharpParsingOptions.Default with
+            SourceFiles = [| fileName |] }
+
+    let result =
+        checker.ParseFile(fileName, sourceText, parsingOptions)
         |> Async.RunSynchronously
 
     not result.ParseHadErrors
+
+/// Parse a standalone source string; fails the test on parse errors so a
+/// broken test input is caught immediately.
+let parse (source: string) : ParsedInput * ISourceText = parseNamed "Test.fs" source
+
+/// True when the source string parses without errors.
+let parsesCleanly (source: string) : bool = parsesCleanlyNamed "Test.fs" source
 
 /// Parse and fully typecheck a source string as a script. Returns the parse
 /// tree, source text, and check results (which may contain error diagnostics —

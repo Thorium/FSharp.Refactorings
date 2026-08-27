@@ -124,11 +124,14 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                         let namingOk = casesWithFields <= 1 || allNamed
 
                         if not fields.IsEmpty && allSmall && namingOk then
-                            let indent = String(' ', decl.Range.StartColumn)
+                            // below any XML doc, so the attribute sits
+                            // against the type it marks
+                            let insertPos = attributeInsertPos source decl.Range
+                            let indent = String(' ', insertPos.Column)
 
                             suggestions.Add
                                 { TypeName = typeName.idText
-                                  InsertRange = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
+                                  InsertRange = Range.mkRange decl.Range.FileName insertPos insertPos
                                   InsertText = "[<Struct>]\n" + indent }
                 | _ -> () }
 

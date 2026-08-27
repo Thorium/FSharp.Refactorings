@@ -18,23 +18,34 @@ change, and only edits when you tell it to:
 
 ```bash
 dotnet tool install --global fsharp-refactorings-apply
-fsharp-refactor --project Your.fsproj --dry-run
+fsharp-refactor Your.fsproj --dry-run
 ```
 
 That prints every fix it would make, with file and position, and writes
 nothing. When the list looks right, drop the flag to apply them:
 
 ```bash
-fsharp-refactor --project Your.fsproj
+fsharp-refactor Your.fsproj
 ```
 
-It refuses a project that does not already build, and fails loudly if applying
+It refuses a compilation that does not already build, and fails loudly if applying
 ever introduces an error. For light bulbs while you type, see
 [VS Code / Ionide](#vs-code--ionide) below.
 
+Point it at whatever you have — the kind is read off the path:
+
+| | |
+|---|---|
+| `Your.fsproj` | one project |
+| `Thing.fs` | one source file — its project is found and analysed, but only that file is edited |
+| `build.fsx` | one script — no MSBuild step at all, so it starts instantly |
+| `Your.sln`, `Your.slnx` | every F# project the solution lists |
+| `src/` | the solution in that directory, or the projects beneath it |
+| `"src/**/*.fsproj"` | everything the glob matches |
+
 ## What it changes
 
-A spread of what the ~93 rules do — the full list is in
+A spread of what the 90-odd rules do — the full list is in
 [Refactorings](#refactorings):
 
 | | Before | After |
@@ -61,7 +72,7 @@ NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT 
 Reference the package from the project you want analyzed:
 
 ```xml
-<PackageReference Include="FSharp.Refactorings.Analyzers" Version="0.2.0" PrivateAssets="all" />
+<PackageReference Include="FSharp.Refactorings.Analyzers" Version="0.3.0" PrivateAssets="all" />
 ```
 
 then point Ionide at the restored analyzers in `.vscode/settings.json`:
@@ -70,7 +81,7 @@ then point Ionide at the restored analyzers in `.vscode/settings.json`:
 {
   "FSharp.enableAnalyzers": true,
   "FSharp.analyzersPath": [
-    "~/.nuget/packages/fsharp.refactorings.analyzers/0.2.0/analyzers/dotnet/fs"
+    "~/.nuget/packages/fsharp.refactorings.analyzers/0.3.0/analyzers/dotnet/fs"
   ]
 }
 ```
@@ -82,7 +93,7 @@ appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 
 ```bash
 dotnet tool install --global fsharp-analyzers
-fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.2.0/analyzers/dotnet/fs --code-root . --report analysis.sarif
+fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactorings.analyzers/0.3.0/analyzers/dotnet/fs --code-root . --report analysis.sarif
 ```
 
 `fsharp-analyzers` is the analyzer HOST, and it is the dotnet tool you
@@ -106,28 +117,37 @@ dotnet tool applies the quick fixes directly to your files:
 
 ```bash
 dotnet tool install --global fsharp-refactorings-apply
-fsharp-refactor --project Your.fsproj [--dry-run] [--codes FR0002,FR0031] [--api-changes] [--max-passes 5]
+fsharp-refactor Your.fsproj [--dry-run] [--codes FR0002,FR0031] [--api-changes] [--jobs 4] [--max-passes 5]
 ```
 
 (or from this repository:
-`dotnet run --project src/FSharp.Refactorings.Apply -c Release -- --project Your.fsproj ...`)
+`dotnet run --project src/FSharp.Refactorings.Apply -c Release -- Your.fsproj ...`)
 
-It reads the exact compiler arguments from MSBuild, runs every analyzer,
-applies non-overlapping fixes bottom-up, and re-analyzes until a pass applies
-nothing (a fix can enable further fixes). The run refuses projects that
-already have errors, and fails loudly if applying ever introduces one.
-`--dry-run` is the report-only mode: it lists every fix it would make, with
-file and position, and writes nothing — the same view the `fsharp-analyzers`
-CLI above gives you, but from this tool. Rewriting is never implicit; drop
-`--dry-run` to let it edit. `--codes` restricts a run to chosen rules.
-`--api-changes` additionally applies cross-file fixes that change internal or
-public signatures — currying a tupled function (FR0090), reordering its
+For a project it takes the exact compiler arguments from MSBuild; for a
+script FCS resolves the references itself and MSBuild never runs. Either
+way it then runs every analyzer, applies non-overlapping fixes bottom-up,
+and re-analyzes until a pass applies nothing — a fix can enable further
+fixes. It refuses a compilation that already has errors, and fails loudly
+if applying ever introduces one.
+
+| Flag | |
+|---|---|
+| `--dry-run` | Report only: lists every fix it would make, with file and position, and writes nothing. Rewriting is never implicit — drop the flag to let it edit. |
+| `--codes FR0002,FR0031` | Restrict the run to chosen rules. |
+| `--jobs <n>` | Typecheck that many files at once (default 4, clamped to 2–4 by core count). Trades CPU for wall clock; because FCS reuses each file's prefix within one incremental build, the gain peaks around 4 and reverses if pushed higher. `--jobs 1` is the sequential sweep. |
+| `--max-passes <n>` | Fix-then-reanalyze iterations (default 5). |
+| `--api-changes` | Also apply the cross-file fixes described below. |
+
+`--api-changes` opts into rewrites that change internal or public
+signatures — currying a tupled function (FR0090) and reordering its
 parameters data-last (FR0091) — rewriting every call site in the project.
-Without the flag those are held back and only counted. These rules also
-widen the scope of the contained-type hints (FR0022, FR0069, FR0070, FR0093) to
-public types. Consumers outside the project are the reason this is opt-in:
-their call sites cannot be rewritten, so each rule only fires where a
-missed one would fail to compile rather than change behaviour silently.
+Without it those are held back and only counted. It also widens the
+contained-type hints (FR0022, FR0069, FR0070, FR0093) to public types.
+Consumers outside the project are why this is opt-in: their call sites
+cannot be rewritten, so each rule only fires where a missed one would fail
+to compile rather than change behaviour silently. Naming a single source
+file skips these entirely — asking for one file and getting edits in its
+callers would be a surprise.
 
 ## Refactorings
 
