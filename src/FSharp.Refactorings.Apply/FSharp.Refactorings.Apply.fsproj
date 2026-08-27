@@ -16,12 +16,14 @@
     <RepositoryUrl>https://github.com/Thorium/FSharp.Refactorings</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>fsharp;analyzers;refactoring;codefix;dotnet-tool</PackageTags>
+    <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>Unlicense</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>

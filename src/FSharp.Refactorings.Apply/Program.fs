@@ -48,6 +48,14 @@
 ///                              give that reuse up, so the gain peaks around
 ///                              4 and reverses if pushed higher. --jobs 1
 ///                              restores the sequential sweep
+///     --framework <tfm>        analyze against just this target framework.
+///                              By default a multi-targeted project is worked
+///                              through framework by framework, narrowest
+///                              first: each activates its own #if branches,
+///                              and code behind another one's is not in the
+///                              parse tree at all. Every pass ends by building
+///                              all the frameworks, so a fix that suits one
+///                              but not the others fails loudly
 ///     --max-passes <n>         fix-then-reanalyze iterations (default 5)
 module FSharp.Refactorings.Apply.Program
 
@@ -62,12 +70,56 @@ open FSharp.Compiler.Text
 open FSharp.Refactorings
 
 type private Options =
-    { Target: string
-      Codes: Set<string> option
-      DryRun: bool
-      ApiChanges: bool
-      MaxPasses: int
-      Jobs: int }
+    {
+        Target: string
+        ShowHelp: bool
+        Codes: Set<string> option
+        DryRun: bool
+        ApiChanges: bool
+        MaxPasses: int
+        Jobs: int
+        /// Overrides the automatic narrowest-framework choice, so the code
+        /// behind another framework's #if can be reached.
+        Framework: string
+    }
+
+let private helpText =
+    """fsharp-refactor — applies FSharp.Refactorings quick fixes to F# code.
+
+USAGE
+  fsharp-refactor <what> [options]
+
+WHAT TO FIX — the kind is read off the path, no flag needed:
+  Your.fsproj           one project
+  Thing.fs              one source file; its project is found and analysed,
+                        but only that file is edited
+  build.fsx             one script; no MSBuild step at all, so it starts at once
+  Your.sln, Your.slnx   every F# project the solution lists
+  src/                  the solution in that directory, or the projects beneath
+  "src/**/*.fsproj"     everything the glob matches
+
+OPTIONS
+  --dry-run             report every fix, change nothing. Rewriting is never
+                        implicit: without this it edits, with it it does not
+  --codes FR0002,FR0031 only these rules
+  --jobs <n>            files typechecked at once (default 4, clamped to 2-4 by
+                        core count). --jobs 1 is the sequential sweep
+  --framework <tfm>     analyse only this target framework. By default a
+                        multi-targeted project is worked through framework by
+                        framework, narrowest first, because code behind another
+                        framework's #if is not in the parse tree at all
+  --api-changes         also apply cross-file fixes that change internal or
+                        public signatures, rewriting call sites project-wide.
+                        Held back and merely counted without this
+  --max-passes <n>      fix-then-reanalyse iterations (default 5)
+  --help, -h, /?        this text
+
+A run refuses a compilation that already has errors, and fails loudly if
+applying introduces one. For a multi-targeted project every framework is built
+before it reports success.
+
+Rules can be turned off per repository with a fsharprefactorings.json.
+Full documentation: https://github.com/Thorium/FSharp.Refactorings"""
 
 [<TailCall>]
 let rec private parseArgsLoop opts args =
@@ -83,8 +135,13 @@ let rec private parseArgsLoop opts args =
             { opts with
                 Codes = Some(codes.Split(',') |> Array.map _.Trim() |> Set.ofArray) }
             rest
+    | "--help" :: _
+    | "-h" :: _
+    | "/?" :: _
+    | "-?" :: _ -> Ok { opts with ShowHelp = true }
     | "--dry-run" :: rest -> parseArgsLoop { opts with DryRun = true } rest
     | "--api-changes" :: rest -> parseArgsLoop { opts with ApiChanges = true } rest
+    | "--framework" :: tfm :: rest -> parseArgsLoop { opts with Framework = tfm } rest
     | "--jobs" :: n :: rest ->
         match Int32.TryParse n with
         | true, jobs when jobs > 0 -> parseArgsLoop { opts with Jobs = jobs } rest
@@ -100,6 +157,7 @@ let rec private parseArgsLoop opts args =
 let private parseArgs (argv: string[]) =
     parseArgsLoop
         { Target = ""
+          ShowHelp = false
           Codes = None
           DryRun = false
           ApiChanges = false
@@ -110,8 +168,56 @@ let private parseArgs (argv: string[]) =
           // job, 53 s at four, and back up to 61 s at eleven. Clamped to
           // 2..4 — a small machine is not oversubscribed, and even a
           // single-core one still overlaps a check with an analyzer pass.
-          Jobs = min 4 (max 2 Environment.ProcessorCount) }
+          Jobs = min 4 (max 2 Environment.ProcessorCount)
+          Framework = "" }
         (List.ofArray argv)
+
+/// No child process gets to hang the tool.
+///
+/// Three ways that happens, and all three have. Draining one pipe to
+/// completion before the other deadlocks as soon as the child fills the one
+/// nobody is reading. An inherited stdin lets a child that decides to prompt
+/// — NuGet asking for feed credentials is the usual one — wait forever on a
+/// console that may not even be attached. And a child that simply never
+/// finishes takes us with it, silently, which is the worst of the three
+/// because there is nothing on screen to explain it.
+let private runProcess (timeout: TimeSpan) (fileName: string) (arguments: string) =
+    let psi =
+        ProcessStartInfo(
+            FileName = fileName,
+            Arguments = arguments,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        )
+
+    use p = Process.Start psi
+
+    // a prompt now reads end-of-input and gives up, instead of waiting
+    p.StandardInput.Close()
+
+    let stdoutRead = p.StandardOutput.ReadToEndAsync()
+    let stderrRead = p.StandardError.ReadToEndAsync()
+
+    if p.WaitForExit(int timeout.TotalMilliseconds) then
+        p.ExitCode, stdoutRead.Result, stderrRead.Result
+    else
+        try
+            // the whole tree: MSBuild leaves worker nodes behind
+            p.Kill true
+        with
+        | :? InvalidOperationException
+        | :? NotSupportedException
+        | :? System.ComponentModel.Win32Exception -> ()
+
+        let minutes = timeout.TotalMinutes
+
+        -1, "", $"'{fileName} {arguments}' had not finished after {minutes} minutes, so it was stopped."
+
+/// Long enough for a real build of a large project, short enough that a
+/// stuck one is reported rather than waited on forever.
+let private processTimeout = TimeSpan.FromMinutes 15.0
 
 /// Visual Studio's MSBuild.exe, for old-style (non-SDK) projects whose
 /// imports only evaluate under it. Located via vswhere.
@@ -127,17 +233,11 @@ let private vsMsBuildPath =
                 )
 
             if File.Exists vswhere then
-                let psi =
-                    ProcessStartInfo(
-                        FileName = vswhere,
-                        Arguments = "-latest -requires Microsoft.Component.MSBuild -find MSBuild\\**\\Bin\\MSBuild.exe",
-                        RedirectStandardOutput = true,
-                        UseShellExecute = false
-                    )
-
-                use p = Process.Start psi
-                let out = p.StandardOutput.ReadToEnd()
-                p.WaitForExit()
+                let _, out, _ =
+                    runProcess
+                        (TimeSpan.FromMinutes 1.0)
+                        vswhere
+                        "-latest -requires Microsoft.Component.MSBuild -find MSBuild\\**\\Bin\\MSBuild.exe"
 
                 out.Split('\n') |> Array.map _.Trim() |> Array.tryFind File.Exists
             else
@@ -150,10 +250,31 @@ let private vsMsBuildPath =
          | :? IOException
          | :? UnauthorizedAccessException -> None)
 
+/// How narrow a target framework's API surface is; lower sorts first.
+///
+/// netstandard is the smallest common denominator, then .NET Framework,
+/// then .NET Core, then modern .NET by version. Within a family the lower
+/// version is narrower, so netstandard2.0 sorts ahead of netstandard2.1.
+/// Framework monikers have no dot (net48, net481) where modern ones do
+/// (net8.0, net10.0), which is what separates the two.
+let private tfmRank (tfm: string) =
+    let t = tfm.ToLowerInvariant()
+    let digits = String(t |> Seq.filter Char.IsDigit |> Seq.toArray)
+
+    let version =
+        match Int32.TryParse digits with
+        | true, v -> v
+        | false, _ -> 0
+
+    if t.StartsWith "netstandard" then 0, version
+    elif t.StartsWith "netcoreapp" then 2, version
+    elif t.StartsWith "net" && t.Contains '.' then 3, version
+    else 1, version
+
 /// The project's fsc arguments, straight from MSBuild. SDK-style projects
 /// go through `dotnet`; old-style (net48-era) projects need Visual
 /// Studio's MSBuild, whose imports do not evaluate under the SDK's.
-let private fscArgs (projectPath: string) =
+let private fscArgs (chosenFramework: string) (projectPath: string) =
     let projectText =
         try
             File.ReadAllText projectPath
@@ -168,18 +289,27 @@ let private fscArgs (projectPath: string) =
     // the inner ones, so the outer query comes back empty. Pin a framework
     // to get an inner build.
     //
-    // The FIRST one listed, because that is what a project usually leads
-    // with and it is typically the most restrictive; analysing against the
-    // narrowest target keeps a fix valid for the others, where the reverse
-    // could offer an API the older targets do not have.
+    // The MOST RESTRICTIVE one, not the first listed. Which matters: a rule
+    // gated on what the target can resolve offers `s.Contains 'x'` under
+    // net8.0, where the char overload exists, and that does not compile for
+    // a netstandard2.0 target which lacks it. Analysing the narrowest
+    // surface keeps every fix valid for the wider ones. (Measured: a probe
+    // listing net8.0 first got exactly that break.)
+    //
+    // ...unless the caller named one. Code behind another framework's #if
+    // is invisible to the narrowest analysis — it is not in the parse tree
+    // at all — so reaching it means asking for that framework by name.
     let targetFramework =
         let m =
             Text.RegularExpressions.Regex.Match(projectText, "<TargetFrameworks>([^<]+)</TargetFrameworks>")
 
-        if m.Success then
+        if chosenFramework <> "" then
+            Some chosenFramework
+        elif m.Success then
             m.Groups.[1].Value.Split(';')
             |> Array.map _.Trim()
             |> Array.filter (fun tfm -> tfm <> "")
+            |> Array.sortBy tfmRank
             |> Array.tryHead
         else
             None
@@ -213,20 +343,7 @@ let private fscArgs (projectPath: string) =
             else
                 arguments
 
-        let psi =
-            ProcessStartInfo(
-                FileName = runner,
-                Arguments = finalArgs,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            )
-
-        use p = Process.Start psi
-        let stdout = p.StandardOutput.ReadToEnd()
-        let stderr = p.StandardError.ReadToEnd()
-        p.WaitForExit()
-        p.ExitCode, stdout, stderr
+        runProcess processTimeout runner finalArgs
 
     // a REAL build first: project references must exist on disk for the
     // args-only pass below (SkipCompilerExecution skips them too), and a
@@ -580,8 +697,6 @@ let private runPass
                        Messages = [] |}
         }
 
-    let sweepSw = Stopwatch.StartNew()
-
     // naming one source file means analyzing its project — the references
     // and the files before it are what give its names meaning — but
     // sweeping only that file
@@ -591,6 +706,10 @@ let private runPass
             options.SourceFiles
             |> Array.filter (fun f -> String.Equals(Path.GetFullPath f, only, StringComparison.OrdinalIgnoreCase))
         | None -> options.SourceFiles
+
+    printf $"sweeping {filesToSweep.Length} file(s)... "
+    Console.Out.Flush()
+    let sweepSw = Stopwatch.StartNew()
 
     let outcomes =
         filesToSweep
@@ -692,22 +811,45 @@ let private owningProject (sourceFile: string) =
         | :? IOException
         | :? UnauthorizedAccessException -> false
 
-    // Widen from the file outwards. Each level searches beneath itself too,
-    // because a project commonly compiles sources from a sibling folder
-    // (`<Compile Include="..\Code\Thing.fs" />`), so walking up through
-    // parent directories alone would miss it. Bounded, to avoid ending up
-    // scanning a whole drive.
-    let mutable dir = Path.GetDirectoryName full
-    let mutable found = None
-    let mutable levels = 0
-
-    while found.IsNone && not (String.IsNullOrEmpty dir) && levels < 6 do
-        found <-
+    // Enumeration walks into directories this process may not be allowed to
+    // read, and that throws part-way through rather than up front.
+    let projectsUnder dir =
+        try
             Directory.EnumerateFiles(dir, "*.fsproj", SearchOption.AllDirectories)
             |> Seq.filter (fun p -> not (p.Contains @"\obj\" || p.Contains @"\bin\"))
-            |> Seq.tryFind lists
+            |> List.ofSeq
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> []
 
-        dir <- Path.GetDirectoryName dir
+    // Widen from the file outwards, searching BENEATH each level too,
+    // because a project commonly compiles sources from a sibling folder
+    // (`<Compile Include="..\Code\Thing.fs" />`) that walking up alone
+    // would miss.
+    //
+    // Stopping matters more than widening. The repository root is the
+    // natural edge: above it lies the rest of the disk, and one level too
+    // far means recursively enumerating a whole drive — minutes of I/O for
+    // a file that was never going to be there. A level cap backstops the
+    // case where there is no repository at all.
+    let mutable dir = Path.GetDirectoryName full
+    let mutable found = None
+    let mutable atEdge = false
+    let mutable levels = 0
+
+    while found.IsNone && not atEdge && levels < 4 && not (String.IsNullOrEmpty dir) do
+        found <- projectsUnder dir |> List.tryFind lists
+
+        let parent = Path.GetDirectoryName dir
+
+        atEdge <-
+            Directory.Exists(Path.Combine(dir, ".git"))
+            || String.IsNullOrEmpty parent
+            // a drive root: Path.GetDirectoryName "C:\\" is null, but be
+            // explicit rather than relying on that
+            || parent = Path.GetPathRoot dir
+
+        dir <- parent
         levels <- levels + 1
 
     found
@@ -819,7 +961,7 @@ let private resolveTargets (raw: string) : Result<Target list, string> =
 /// get analyzed and fixed alongside the script itself. That also makes
 /// --script far quicker than --project, which spends its first half-minute
 /// in MSBuild before any analysis starts.
-let private optionsFor (checker: FSharpChecker) (target: Target) =
+let private optionsFor (checker: FSharpChecker) (chosenFramework: string) (target: Target) =
     match target with
     | Target.Script script ->
         let path = Path.GetFullPath script
@@ -837,10 +979,15 @@ let private optionsFor (checker: FSharpChecker) (target: Target) =
 
         Ok options
     | Target.Project(project, _) ->
+        // announced BEFORE it starts: this step can take a minute, and a
+        // line that only appears afterwards is no help while you are
+        // staring at a silent terminal wondering whether it is stuck
+        printf "building and reading compiler arguments... "
+        Console.Out.Flush()
         let argsSw = Stopwatch.StartNew()
-        let fscResult = fscArgs project
+        let fscResult = fscArgs chosenFramework project
         argsSw.Stop()
-        printfn $"msbuild (build + argument query): {argsSw.ElapsedMilliseconds} ms"
+        printfn $"{argsSw.ElapsedMilliseconds} ms"
 
         match fscResult with
         | Error message -> Error message
@@ -879,12 +1026,93 @@ let private optionsFor (checker: FSharpChecker) (target: Target) =
                 { checker.GetProjectOptionsFromCommandLineArgs(Path.GetFullPath project, otherArgs) with
                     SourceFiles = absoluteSources }
 
+/// Does this target carry frameworks beyond the one we analyze?
+let private isMultiTargeted (target: Target) =
+    match target with
+    | Target.Script _ -> false
+    | Target.Project(project, _) ->
+        try
+            (File.ReadAllText project).Contains "<TargetFrameworks>"
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> false
+
+/// Every framework a project targets, narrowest first.
+let private frameworksOf (target: Target) =
+    match target with
+    | Target.Script _ -> []
+    | Target.Project(project, _) ->
+        let text =
+            try
+                File.ReadAllText project
+            with
+            | :? IOException
+            | :? UnauthorizedAccessException -> ""
+
+        let m =
+            Text.RegularExpressions.Regex.Match(text, "<TargetFrameworks>([^<]+)</TargetFrameworks>")
+
+        if m.Success then
+            m.Groups.[1].Value.Split(';')
+            |> Array.map _.Trim()
+            |> Array.filter (fun tfm -> tfm <> "")
+            |> Array.sortBy tfmRank
+            |> List.ofArray
+        else
+            []
+
+/// Build every framework, so a fix that suits the one we analyzed but not
+/// the others cannot pass as success.
+let private buildAllFrameworks (project: string) =
+    let exitCode, stdout, stderr =
+        runProcess processTimeout "dotnet" $"build \"{project}\" --nologo -v q"
+
+    if exitCode = 0 then
+        Ok()
+    else
+        let lines =
+            (stdout + stderr).Split('\n')
+            |> Array.filter (fun l -> l.Contains "error")
+            |> Array.truncate 5
+
+        Error(String.concat "\n" lines)
+
+/// The source files as they stand, so one framework's pass can be undone
+/// if it turns out to have broken another's.
+let private takeSnapshot (files: string array) =
+    files
+    |> Array.choose (fun f ->
+        try
+            Some(f, File.ReadAllText f)
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> None)
+    |> Map.ofArray
+
+/// Put back every file that changed since the snapshot; returns how many.
+let private restoreSnapshot (snapshot: Map<string, string>) =
+    snapshot
+    |> Map.toSeq
+    |> Seq.sumBy (fun (path, original) ->
+        try
+            if File.ReadAllText path <> original then
+                File.WriteAllText(path, original)
+                1
+            else
+                0
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> 0)
+
 /// Analyze and fix one compilation; returns its exit code.
 let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
     let onlyFile =
         match target with
         | Target.Project(_, only) -> only
         | Target.Script _ -> None
+
+    // which framework this pass is for, when the project has several
+    let frameworkLabel = if opts.Framework = "" then "" else $" [{opts.Framework}]"
 
     if showHeader then
         let label =
@@ -893,12 +1121,12 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
             | Target.Project(p, None) -> Path.GetFileName p
             | Target.Script s -> Path.GetFileName s
 
-        printfn $"== {label} =="
+        printfn $"== {label}{frameworkLabel} =="
 
     // analyzers may read the typed tree, which needs assembly contents
     let checker = FSharpChecker.Create(keepAssemblyContents = true)
 
-    match optionsFor checker target with
+    match optionsFor checker opts.Framework target with
     | Error message ->
         eprintfn $"{message}"
         1
@@ -916,10 +1144,20 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
         // cheap here BECAUSE this call warmed FCS. One full project
         // typecheck is paid either way; this ordering at least reports
         // a broken project up front.
+        // before anything is written, so a framework pass that turns out to
+        // break another one can be undone rather than merely reported
+        let snapshot =
+            if opts.DryRun || not (isMultiTargeted target) then
+                Map.empty
+            else
+                takeSnapshot options.SourceFiles
+
+        printf "typechecking the project... "
+        Console.Out.Flush()
         let baselineSw = Stopwatch.StartNew()
         let baselineErrors = errorCount checker options
         baselineSw.Stop()
-        printfn $"baseline project check: {baselineSw.ElapsedMilliseconds} ms"
+        printfn $"{baselineSw.ElapsedMilliseconds} ms"
 
         if baselineErrors > 0 then
             eprintfn $"The project has {baselineErrors} error(s) before any fix; fix those first:"
@@ -979,6 +1217,36 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                     eprintfn $"Applying introduced {finalErrors - baselineErrors} error(s) — please review the diff."
 
                     1
+                // The check above only covers the framework we analysed. A
+                // multi-targeted project has others, and a fix valid for one
+                // can fail on another, so build the lot before claiming
+                // success.
+                elif isMultiTargeted target then
+                    match target with
+                    | Target.Project(project, _) ->
+                        printfn "verifying every target framework..."
+
+                        match buildAllFrameworks project with
+                        | Ok() ->
+                            printfn "done; every target framework still builds"
+                            0
+                        | Error output ->
+                            // This pass changed code the other frameworks
+                            // also compile — shared code, outside any #if —
+                            // and offered something only this framework can
+                            // resolve. Reporting is not enough: put the
+                            // files back, or the caller is left with a
+                            // project that does not build.
+                            let restored = restoreSnapshot snapshot
+
+                            eprintfn
+                                $"Applying broke a target framework this run did not analyze, so the {restored} file(s) it changed were put back:"
+
+                            eprintfn $"{output}"
+                            1
+                    | Target.Script _ ->
+                        printfn "done; project still checks clean"
+                        0
                 else
                     printfn "done; project still checks clean"
                     0
@@ -989,9 +1257,12 @@ let main argv =
     | Error message ->
         eprintfn $"{message}"
         2
+    | Ok opts when opts.ShowHelp ->
+        printfn $"{helpText}"
+        0
+    // no arguments at all is a question, not a mistake: show the help
     | Ok opts when opts.Target = "" ->
-        eprintfn "Pass what to fix: a .fsproj, a .fsx, a solution, a directory, or a glob."
-        eprintfn "  fsharp-refactor Your.fsproj --dry-run"
+        printfn $"{helpText}"
         2
     | Ok opts ->
         match resolveTargets opts.Target with
@@ -1004,7 +1275,21 @@ let main argv =
             if several then
                 printfn $"{targets.Length} compilations to work through"
 
-            // each target stands alone: one project that will not build
-            // must not hide the rest, so all of them run and the worst
-            // exit code wins
-            targets |> List.map (runTarget opts several) |> List.fold max 0
+            // A multi-targeted project is really several compilations: each
+            // framework activates its own #if branches, and code behind
+            // another framework's is not in the parse tree at all. So work
+            // through them rather than making the caller name each one —
+            // narrowest first, so the fixes valid everywhere land before any
+            // that only suit a wider surface. The final all-framework build
+            // is what catches a fix that does not generalise.
+            let runOne target =
+                match opts.Framework, frameworksOf target with
+                | "", (_ :: _ :: _ as frameworks) ->
+                    printfn $"{Path.GetFileName opts.Target}: {frameworks.Length} target frameworks"
+
+                    frameworks
+                    |> List.map (fun tfm -> runTarget { opts with Framework = tfm } true target)
+                    |> List.fold max 0
+                | _ -> runTarget opts several target
+
+            targets |> List.map runOne |> List.fold max 0

@@ -135,8 +135,40 @@ if applying ever introduces one.
 | `--dry-run` | Report only: lists every fix it would make, with file and position, and writes nothing. Rewriting is never implicit — drop the flag to let it edit. |
 | `--codes FR0002,FR0031` | Restrict the run to chosen rules. |
 | `--jobs <n>` | Typecheck that many files at once (default 4, clamped to 2–4 by core count). Trades CPU for wall clock; because FCS reuses each file's prefix within one incremental build, the gain peaks around 4 and reverses if pushed higher. `--jobs 1` is the sequential sweep. |
+| `--framework <tfm>` | Analyse against this target framework instead of the narrowest one — see below. |
 | `--max-passes <n>` | Fix-then-reanalyze iterations (default 5). |
+| `--help` | The same list, from the tool itself (`-h` and `/?` also work). |
 | `--api-changes` | Also apply the cross-file fixes described below. |
+
+### Multi-targeted projects
+
+Nothing extra to do: a multi-targeted project is worked through framework
+by framework, narrowest first.
+
+That is not busywork. A rule gated on what the target can resolve behaves
+differently per framework — `s.Contains 'x'` is offered under `net8.0`,
+where the char overload exists, and does not compile for a `netstandard2.0`
+target that lacks it. And each framework activates its own `#if` branches,
+so code behind another one's is not in the parse tree at all. One pass
+could only ever see part of the code.
+
+Narrowest first means the fixes valid everywhere land before any that suit
+only a wider surface, and every pass ends by building **all** the
+frameworks, so a fix that does not generalise fails loudly instead of
+passing as success.
+
+Given this, one plain `fsharp-refactor Your.fsproj` produces:
+
+```fsharp
+let has (s: string) =
+#if NETSTANDARD2_0
+    s.Contains("x")     // left alone: no char overload here
+#else
+    s.Contains('x')     // rewritten under the net8.0 pass
+#endif
+```
+
+`--framework <tfm>` restricts a run to one framework if you want it.
 
 `--api-changes` opts into rewrites that change internal or public
 signatures — currying a tupled function (FR0090) and reordering its
