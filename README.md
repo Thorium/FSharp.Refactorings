@@ -411,7 +411,7 @@ This project has focus on idiomatic F#, code performance and best practices, and
 
 This project aims to be compatible with other products, so you won't end-up having oscillation/fight between suggested changes.
 
-| Tool | Duplicate rules | Status |
+| Tool | Same rules | Status |
 |---|---|---|
 | FxCop and [MS Code Analysis](https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/) | Many | We have implemented the MinimumRecommendedRules, and some performance etc. rules relevant to F# |
 | [FSharpLint](https://fsprojects.github.io/FSharpLint/) | Many | Instead of just listing, we have quick-fixes and auto-fix. Rules are compatible with this project. |
