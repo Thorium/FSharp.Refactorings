@@ -506,10 +506,17 @@ let private fixKey (code: string) (file: string) (f: Fix) =
 /// Returns the number of fixes applied and the files they changed.
 /// `suppressed` holds fixes rolled back by an earlier pass's verification;
 /// re-applying one would only be rolled back again.
+///
+/// Edits carry a GROUP id — one per suggestion — and a group applies all
+/// or nothing within a file. A hoist is an insertion plus a deletion:
+/// dropping the insertion (say, to an overlap with another suggestion at
+/// the same point) while the deletion lands removes a binding its uses
+/// still need. Found live on Fuuga: two FR0071 hoists inserting at one
+/// point, half of the second applied, `startBlock` undefined.
 let private applyEditGroups
     (dryRun: bool)
     (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
-    (editsByFile: System.Collections.Generic.Dictionary<string, ResizeArray<string * Fix>>)
+    (editsByFile: System.Collections.Generic.Dictionary<string, ResizeArray<int * string * Fix>>)
     : int * AppliedFile list =
     let mutable applied = 0
     let appliedFiles = ResizeArray<AppliedFile>()
@@ -518,14 +525,19 @@ let private applyEditGroups
         let file = kv.Key
         let text = File.ReadAllText file
 
+        // bottom-up, so earlier splices never shift later ranges
         let edits =
             kv.Value
-            |> Seq.sortByDescending (fun (_, f) -> f.FromRange.StartLine, f.FromRange.StartColumn)
+            |> Seq.sortByDescending (fun (_, _, f) -> f.FromRange.StartLine, f.FromRange.StartColumn)
             |> List.ofSeq
+
+        let groupEdits =
+            kv.Value |> Seq.groupBy (fun (g, _, _) -> g) |> Map.ofSeq |> Map.map (fun _ es -> List.ofSeq es)
 
         let mutable current = text
         let mutable appliedRanges: Range list = []
         let mutable appliedHere: (string * Fix) list = []
+        let groupDecisions = System.Collections.Generic.Dictionary<int, bool>()
 
         let overlaps (r: Range) =
             appliedRanges
@@ -534,59 +546,92 @@ let private applyEditGroups
                 || Range.rangeContainsPos a r.End
                 || Range.rangeContainsRange r a)
 
-        for code, f in edits do
-            // An edit that replaces text with itself changes nothing, yet
-            // counting it as applied asks for another pass — and the next
-            // pass offers it again, until --max-passes runs out. A rule
-            // producing one is buggy, but the loop is ours to not spin.
+        // can this edit be spliced into `current` exactly as promised?
+        // (start/end computed against original coordinates, which stay
+        // valid above every already-applied splice in the bottom-up sweep)
+        let viable (f: Fix) =
+            let lines = current.Split '\n'
+
+            if f.FromRange.StartLine - 1 > lines.Length || f.FromRange.EndLine - 1 > lines.Length then
+                None
+            else
+                let startIndex =
+                    (lines
+                     |> Seq.take (f.FromRange.StartLine - 1)
+                     |> Seq.sumBy (fun l -> l.Length + 1))
+                    + f.FromRange.StartColumn
+
+                let endIndex =
+                    (lines |> Seq.take (f.FromRange.EndLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
+                    + f.FromRange.EndColumn
+
+                if
+                    startIndex <= current.Length
+                    && endIndex <= current.Length
+                    && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace(
+                        "\r",
+                        ""
+                    )
+                then
+                    Some(startIndex, endIndex)
+                else
+                    None
+
+        // decide a whole group the moment its bottom-most edit is reached:
+        // every member must be unsuppressed, non-overlapping and viable, or
+        // none of them applies. A self-identical edit is tolerated inside a
+        // group (it changes nothing either way) but sinks a group of one.
+        let decideGroup (groupId: int) =
+            let members = groupEdits.[groupId]
+
+            let ok =
+                members
+                |> List.forall (fun (_, code, f) ->
+                    not (suppressed.Contains(fixKey code file f))
+                    && not (overlaps f.FromRange)
+                    && (f.ToText.Replace("\r", "") = f.FromText.Replace("\r", "")
+                        || (viable f).IsSome))
+                && members
+                   |> List.exists (fun (_, _, f) -> f.ToText.Replace("\r", "") <> f.FromText.Replace("\r", ""))
+
+            if ok then
+                // reserve every member's range at once, so no other group
+                // can interleave between this one's edits
+                for _, _, f in members do
+                    appliedRanges <- f.FromRange :: appliedRanges
+            else if members.Length > 1 then
+                let _, code, f = List.head members
+
+                printfn
+                    $"  {code} {kindColumn code} {Path.GetFileName file}({f.FromRange.StartLine},{f.FromRange.StartColumn}): held back (its edits cannot all apply together)"
+
+            groupDecisions.[groupId] <- ok
+            ok
+
+        for groupId, code, f in edits do
+            let accepted =
+                match groupDecisions.TryGetValue groupId with
+                | true, decision -> decision
+                | false, _ -> decideGroup groupId
+
             let changesSomething = f.ToText.Replace("\r", "") <> f.FromText.Replace("\r", "")
 
-            if
-                changesSomething
-                && not (suppressed.Contains(fixKey code file f))
-                && not (overlaps f.FromRange)
-            then
-                let lines = current.Split '\n'
+            if accepted && changesSomething then
+                match viable f with
+                | Some(startIndex, endIndex) ->
+                    // splice in the file's own line-ending convention, so
+                    // an LF replacement does not seed a CRLF file with
+                    // mixed endings
+                    let eol = if current.Contains "\r\n" then "\r\n" else "\n"
+                    let toText = f.ToText.Replace("\r\n", "\n").Replace("\n", eol)
 
-                // a stale or buggy range pointing past the file must be
-                // skipped, not thrown on: Seq.take past the end raises,
-                // and an exception here aborts mid-apply with earlier
-                // files already written
-                if
-                    f.FromRange.StartLine - 1 <= lines.Length
-                    && f.FromRange.EndLine - 1 <= lines.Length
-                then
-                    let startIndex =
-                        (lines
-                         |> Seq.take (f.FromRange.StartLine - 1)
-                         |> Seq.sumBy (fun l -> l.Length + 1))
-                        + f.FromRange.StartColumn
+                    current <- current.Remove(startIndex, endIndex - startIndex).Insert(startIndex, toText)
+                    appliedHere <- (code, f) :: appliedHere
+                    applied <- applied + 1
 
-                    let endIndex =
-                        (lines |> Seq.take (f.FromRange.EndLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
-                        + f.FromRange.EndColumn
-
-                    if
-                        startIndex <= current.Length
-                        && endIndex <= current.Length
-                        && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace(
-                            "\r",
-                            ""
-                        )
-                    then
-                        // splice in the file's own line-ending convention,
-                        // so an LF replacement does not seed a CRLF file
-                        // with mixed endings
-                        let eol = if current.Contains "\r\n" then "\r\n" else "\n"
-                        let toText = f.ToText.Replace("\r\n", "\n").Replace("\n", eol)
-
-                        current <- current.Remove(startIndex, endIndex - startIndex).Insert(startIndex, toText)
-                        appliedRanges <- f.FromRange :: appliedRanges
-                        appliedHere <- (code, f) :: appliedHere
-                        applied <- applied + 1
-
-                        printfn
-                            $"  {code} {kindColumn code} {Path.GetFileName file}({f.FromRange.StartLine},{f.FromRange.StartColumn})"
+                    printfn
+                        $"  {code} {kindColumn code} {Path.GetFileName file}({f.FromRange.StartLine},{f.FromRange.StartColumn})"
+                | None -> ()
 
         if current <> text && not dryRun then
             writeSource file current
@@ -682,7 +727,13 @@ let private runApiPass
             | FSharpCheckFileAnswer.Aborted -> ()
 
         let editsByFile =
-            System.Collections.Generic.Dictionary<string, ResizeArray<string * Fix>>(StringComparer.OrdinalIgnoreCase)
+            System.Collections.Generic.Dictionary<string, ResizeArray<int * string * Fix>>(
+                StringComparer.OrdinalIgnoreCase
+            )
+
+        // one group per suggestion; within a FILE its edits then apply all
+        // or nothing (a cross-file suggestion still applies per file)
+        let mutable nextGroup = 0
 
         let acceptedRanges =
             System.Collections.Generic.Dictionary<string, ResizeArray<Range>>(StringComparer.OrdinalIgnoreCase)
@@ -704,6 +755,8 @@ let private runApiPass
             else
                 printfn $"  {s.Code} {kindColumn s.Code} {s.FunctionName}: {s.Edits.Length} edit(s) across the project"
 
+                nextGroup <- nextGroup + 1
+
                 for range, original, replacement in s.Edits do
                     let target = Path.GetFullPath range.FileName
 
@@ -713,10 +766,10 @@ let private runApiPass
                           ToText = replacement }
 
                     match editsByFile.TryGetValue target with
-                    | true, existing -> existing.Add(s.Code, fix)
+                    | true, existing -> existing.Add(nextGroup, s.Code, fix)
                     | false, _ ->
                         let fresh = ResizeArray()
-                        fresh.Add(s.Code, fix)
+                        fresh.Add(nextGroup, s.Code, fix)
                         editsByFile.[target] <- fresh
 
                     match acceptedRanges.TryGetValue target with
@@ -757,7 +810,10 @@ let private runPass
     // normalized full paths: two spellings of one file must land in ONE
     // group, or the second write would clobber the first group's edits.
     let editsByFile =
-        System.Collections.Generic.Dictionary<string, ResizeArray<string * Fix>>(StringComparer.OrdinalIgnoreCase)
+        System.Collections.Generic.Dictionary<string, ResizeArray<int * string * Fix>>(StringComparer.OrdinalIgnoreCase)
+
+    // one group per suggestion (message): its edits apply all or nothing
+    let mutable nextGroup = 0
 
     let mutable crossFileSkipped = 0
 
@@ -882,6 +938,8 @@ let private runPass
                 + ms
 
         for msg in outcome.Messages do
+            nextGroup <- nextGroup + 1
+
             for f in msg.Fixes do
                 let target =
                     Path.GetFullPath(
@@ -896,10 +954,10 @@ let private runPass
 
                 if sameFile || apiChanges then
                     match editsByFile.TryGetValue target with
-                    | true, existing -> existing.Add(msg.Code, f)
+                    | true, existing -> existing.Add(nextGroup, msg.Code, f)
                     | false, _ ->
                         let fresh = ResizeArray()
-                        fresh.Add(msg.Code, f)
+                        fresh.Add(nextGroup, msg.Code, f)
                         editsByFile.[target] <- fresh
                 else
                     crossFileSkipped <- crossFileSkipped + 1
@@ -1293,6 +1351,11 @@ let private verifyPass
 
         eprintfn "  this pass introduced type errors — its changes were rolled back and the offending fixes suppressed:"
 
+        // the errors themselves, or diagnosing WHICH fix broke means
+        // re-running the whole thing by hand
+        for d in errors |> Array.truncate 5 do
+            eprintfn $"    {Path.GetFileName d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}"
+
         for cf in rolledBack do
             for code, f in cf.Fixes do
                 eprintfn
@@ -1334,6 +1397,13 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
         // stay silent in editors and in default runs
         if opts.ApiChanges then
             Environment.SetEnvironmentVariable("FSREF_API_CHANGES", "1")
+
+        // an explicit --codes (or --categories expansion) outranks a rule's
+        // default-off status and a config disable — asking for FR0099 by
+        // name and getting silence would be a lie
+        match opts.Codes with
+        | Some codes -> Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", String.concat "," codes)
+        | None -> ()
 
         // Not worth skipping on a dry run: measured, the cost simply
         // moves to runPass's own ParseAndCheckProject, which is only
@@ -1523,8 +1593,9 @@ let main argv =
             try
                 targets |> List.map runOne |> List.fold max 0
             finally
-                // runTarget sets this for the cross-file rule variants; the
-                // corpus harness runs main IN-PROCESS, so a leaked flag
-                // would make later analyzer calls in the same process
-                // api-changes-scoped
+                // runTarget sets these for the rule variants; the corpus
+                // harness runs main IN-PROCESS, so a leaked flag would make
+                // later analyzer calls in the same process api-changes- or
+                // forced-code-scoped
                 Environment.SetEnvironmentVariable("FSREF_API_CHANGES", null)
+                Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", null)

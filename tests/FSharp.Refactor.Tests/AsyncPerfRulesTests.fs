@@ -84,19 +84,19 @@ let private assertFold (source: string) (expectedReplacement: string) =
 let ``sum accumulation becomes Seq sum`` () =
     assertFold
         "let f (xs: int list) =\n    let mutable total = 0\n    for x in xs do\n        total <- total + x\n    total * 2"
-        "let total = xs |> Seq.sum"
+        "let total = xs |> List.sum"
 
 [<Fact>]
 let ``projected sum becomes sumBy`` () =
     assertFold
         "let f (xs: int list) =\n    let mutable total = 0\n    for x in xs do\n        total <- total + x * x\n    total"
-        "let total = xs |> Seq.sumBy (fun x -> x * x)"
+        "let total = xs |> List.sumBy (fun x -> x * x)"
 
 [<Fact>]
 let ``general combine becomes a fold`` () =
     assertFold
         "let f (xs: int list) =\n    let mutable best = 1\n    for x in xs do\n        best <- max best (x % 7)\n    best"
-        "let best = xs |> Seq.fold (fun best x -> max best (x % 7)) 1"
+        "let best = xs |> List.fold (fun best x -> max best (x % 7)) 1"
 
 [<Fact>]
 let ``reassignment after the loop keeps the mutable`` () =
@@ -365,7 +365,7 @@ let ``a projected string accumulator maps then concats`` () =
             "module Test\nlet render (xs: int list) =\n    let mutable acc = \"\"\n    for x in xs do\n        acc <- acc + string x\n    acc"
 
     match folds with
-    | [ s ] -> Assert.Equal("let acc = xs |> Seq.map (fun x -> string x) |> String.concat \"\"", s.ReplacementText)
+    | [ s ] -> Assert.Equal("let acc = xs |> List.map (fun x -> string x) |> String.concat \"\"", s.ReplacementText)
     | other -> failwithf "Expected exactly one mapped string concat, got %A" other
 
 [<Fact>]

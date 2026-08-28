@@ -204,3 +204,21 @@ let ``a match pattern rebinding the index keeps the loop`` () =
         indexedLoopsIn
             "module Test\nlet f (xs: int[]) (q: int) =\n    for i in 0 .. xs.Length - 1 do\n        match q with\n        | i -> printfn \"%d\" xs.[i]"
     )
+
+[<Fact>]
+let ``an index used as a value inside an F#6 indexer-set is seen`` () =
+    // from Fuuga's EvalTests: the SDK walker skips BOTH sides of
+    // `logits[...] <- v` (SynExpr.Set), so `int64 pos` was invisible and
+    // the loop got rewritten with `pos` still referenced. The AstIndex
+    // graft now lifts Set's children.
+    Assert.Empty(
+        indexedLoopsIn
+            "module Test\nlet f (tokens: int[]) (logits: int64[,,]) =\n    for pos in 0 .. tokens.Length - 1 do\n        let nextToken = min 31 (tokens.[pos] + 1)\n        logits[0L, int64 pos, int64 nextToken] <- 100L"
+    )
+
+[<Fact>]
+let ``an F#6 element write needs the index too`` () =
+    Assert.Empty(
+        indexedLoopsIn
+            "module Test\nlet f (xs: int[]) =\n    for i in 0 .. xs.Length - 1 do\n        xs[i] <- xs[i] + 1"
+    )

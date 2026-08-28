@@ -152,6 +152,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     inBody e.Range
                     && (match e with
                         | SynExpr.DotIndexedSet(objectExpr = o) -> sameColl o
+                        // the F#6 spelling of the same element write
+                        | SynExpr.Set(targetExpr = t) ->
+                            (match stripParens t with
+                             | SynExpr.App(
+                                 flag = ExprAtomicFlag.Atomic; funcExpr = o; argExpr = SynExpr.ArrayOrListComputed _) ->
+                                 sameColl o
+                             | _ -> false)
                         | SynExpr.LongIdentSet(SynLongIdent(id = first :: _), _, _) ->
                             first.idText = collRoot || first.idText = i.idText
                         | _ -> false))

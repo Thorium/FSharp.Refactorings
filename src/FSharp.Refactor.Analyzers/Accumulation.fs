@@ -2,15 +2,18 @@
 ///
 /// 1. Mutable accumulator loop → fold/sum (FR0050, fix):
 ///
-///        let mutable total = 0                let total = xs |> Seq.sum
+///        let mutable total = 0                let total = xs |> List.sum
 ///        for x in xs do               →
 ///            total <- total + x
 ///
-///    The general shape becomes `Seq.fold (fun acc x -> ...) init xs` —
+///    The general shape becomes `<M>.fold (fun acc x -> ...) init xs` —
 ///    the same expression evaluated with the same bindings in the same
-///    order, so the rewrite is behavior-preserving; `Seq.sum`/`sumBy`
+///    order, so the rewrite is behavior-preserving; `sum`/`sumBy`
 ///    specializations fire when the combine is FSharp.Core's `+` over a
-///    zero initializer.
+///    zero initializer. The module matches the source's RESOLVED kind:
+///    measured, `List.sum`/`Array.sum` run level with the mutable loop
+///    while `Seq.sum` is ~50% slower on a list — which is why this is an
+///    IDIOM rule (same shape, nicer spelling), not a performance one.
 ///
 /// 2. Quadratic append in a loop (FR0051, note): `acc <- acc @ [x]` or
 ///    `acc <- Array.append acc [| x |]` copies the accumulator on every
@@ -93,12 +96,22 @@ let private (|SourcePathLastIdent|_|) (e: SynExpr) =
     | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
     | _ -> ValueNone
 
-/// Is the loop-source expression provably enumerable as seq<'T>? Literals
-/// and ranges are; a name (or a call through one) is when its resolved type
-/// says so; anything else is not — better to skip a valid rewrite than to
-/// break a loop over a non-generic IEnumerable.
-let private provablyGenericSeq (check: FSharpCheckFileResults) (source: ISourceText) (src: SynExpr) =
-    let resolvesToSeq (ident: Ident) =
+/// The collection MODULE matching the loop source's kind, or ValueNone
+/// when the source is not provably a generic sequence at all (a `for`
+/// loop also accepts the non-generic IEnumerable and duck-typed
+/// GetEnumerator sources, which no Seq/List/Array function does — better
+/// to skip a valid rewrite than to break one of those).
+///
+/// The kind matters beyond correctness: measured (1000 ints, Release),
+/// the mutable loop runs ~2.2µs, `List.sum`/`Array.sum` match it — and
+/// `Seq.sum` takes ~3.4µs, a PESSIMIZATION dressed as a cleanup. So the
+/// rewrite names the concrete module whenever the type is known and only
+/// falls back to Seq for a plain seq.
+let private collectionModule (check: FSharpCheckFileResults) (source: ISourceText) (src: SynExpr) : string voption =
+    let rec stripInstance (t: FSharpType) =
+        if t.IsAbbreviation then stripInstance t.AbbreviatedType else t
+
+    let moduleOfType (ident: Ident) =
         let r = ident.idRange
         let lineText = source.GetLineString(r.EndLine - 1)
 
@@ -106,25 +119,41 @@ let private provablyGenericSeq (check: FSharpCheckFileResults) (source: ISourceT
         | Some symbolUse ->
             match symbolUse.Symbol with
             | :? FSharpMemberOrFunctionOrValue as value ->
-                isGenericSeqType (
+                let t =
                     try
                         value.ReturnParameter.Type
                     with _ ->
                         value.FullType
-                )
-            | _ -> false
-        | None -> false
+
+                (try
+                    let t = stripInstance t
+
+                    if t.HasTypeDefinition && t.TypeDefinition.IsArrayType then
+                        ValueSome "Array"
+                    elif
+                        t.HasTypeDefinition
+                        && t.TypeDefinition.TryFullName = Some "Microsoft.FSharp.Collections.FSharpList`1"
+                    then
+                        ValueSome "List"
+                    elif isGenericSeqType t then
+                        ValueSome "Seq"
+                    else
+                        ValueNone
+                 with _ ->
+                     ValueNone)
+            | _ -> ValueNone
+        | None -> ValueNone
 
     match stripParens src with
-    | SynExpr.ArrayOrList _
-    | SynExpr.ArrayOrListComputed _ -> true
+    | SynExpr.ArrayOrList(isArray = isArray) -> ValueSome(if isArray then "Array" else "List")
+    | SynExpr.ArrayOrListComputed(isArray = isArray) -> ValueSome(if isArray then "Array" else "List")
     | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op)) when
         op.idText = "op_Range" || op.idText = "op_RangeStep"
         ->
-        true
-    | SourcePathLastIdent id -> resolvesToSeq id
-    | SynExpr.App(funcExpr = SourcePathLastIdent id) -> resolvesToSeq id
-    | _ -> false
+        ValueSome "Seq"
+    | SourcePathLastIdent id -> moduleOfType id
+    | SynExpr.App(funcExpr = SourcePathLastIdent id) -> moduleOfType id
+    | _ -> ValueNone
 
 let private insideLoop (path: SyntaxNode list) =
     path
@@ -179,11 +208,16 @@ let find
                         && not (
                             Regex.IsMatch(textOfRange source rest.Range, @"\b" + Regex.Escape acc.idText + @"\b\s*<-")
                         )
-                        && provablyGenericSeq check source src
+                        && (collectionModule check source src).IsSome
                         ->
                         match lambdaPatText source pat with
                         | ValueSome patText ->
                             let srcText = atomicText source src
+
+                            let m =
+                                match collectionModule check source src with
+                                | ValueSome name -> name
+                                | ValueNone -> "Seq"
 
                             let replacementBody =
                                 match rhs with
@@ -199,8 +233,8 @@ let find
                                     ->
                                     match stripParens e with
                                     | SynExpr.Ident v when (patBoundNames pat |> List.tryExactlyOne) = Some v.idText ->
-                                        $"{srcText} |> Seq.sum"
-                                    | _ -> $"{srcText} |> Seq.sumBy (fun {patText} -> {textOfRange source e.Range})"
+                                        $"{srcText} |> {m}.sum"
+                                    | _ -> $"{srcText} |> {m}.sumBy (fun {patText} -> {textOfRange source e.Range})"
                                 // acc + e over a STRING accumulator: a fold
                                 // of (+) would still be O(n²) in allocations,
                                 // String.concat builds the result once
@@ -219,7 +253,7 @@ let find
                                         match stripParens e with
                                         | SynExpr.Ident v when (patBoundNames pat |> List.tryExactlyOne) = Some v.idText ->
                                             srcText
-                                        | _ -> $"{srcText} |> Seq.map (fun {patText} -> {textOfRange source e.Range})"
+                                        | _ -> $"{srcText} |> {m}.map (fun {patText} -> {textOfRange source e.Range})"
 
                                     let concatenated = $"{mapped} |> String.concat \"\""
 
@@ -227,7 +261,7 @@ let find
                                     | SynExpr.Const(SynConst.String("", _, _), _) -> concatenated
                                     | _ -> $"{atomicText source init} + ({concatenated})"
                                 | _ ->
-                                    $"{srcText} |> Seq.fold (fun {acc.idText} {patText} -> {textOfRange source rhs.Range}) {atomicText source init}"
+                                    $"{srcText} |> {m}.fold (fun {acc.idText} {patText} -> {textOfRange source rhs.Range}) {atomicText source init}"
 
                             // cover the whole `let mutable` binding + loop
                             let editRange = Range.mkRange expr.Range.FileName expr.Range.Start forEach.Range.End

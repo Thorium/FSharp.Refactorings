@@ -49,6 +49,16 @@ let private objExprMemberBindings (e: SynExpr) : SynBinding list =
            |> List.collect (fun (SynInterfaceImpl(members = implMembers)) -> ofMembers implMembers))
     | _ -> []
 
+/// Both sides of the F#6 indexer assignment `expr[i] <- value`. The SDK
+/// walker does not traverse SynExpr.Set AT ALL — target and right-hand
+/// side alike — so `logits[0L, int64 pos, key] <- v` hid `pos` and `key`
+/// from every index-based rule (found the hard way: FR0101 rewrote a loop
+/// whose index was plainly used as a value inside one of these).
+let private setChildren (e: SynExpr) : SynExpr list =
+    match e with
+    | SynExpr.Set(targetExpr = target; rhsExpr = rhs) -> [ target; rhs ]
+    | _ -> []
+
 /// Wrap bindings in a one-declaration synthetic file so the SDK walker can
 /// traverse their bodies; only expressions are collected from it.
 let private syntheticTree (bindings: SynBinding list) : ParsedInput =
@@ -60,6 +70,39 @@ let private syntheticTree (bindings: SynBinding list) : ParsedInput =
             false,
             SynModuleOrNamespaceKind.NamedModule,
             [ decl ],
+            PreXmlDoc.Empty,
+            [],
+            None,
+            Range.range0,
+            { LeadingKeyword = SynModuleOrNamespaceLeadingKeyword.None }
+        )
+
+    ParsedInput.ImplFile(
+        ParsedImplFileInput(
+            "synthetic.fs",
+            false,
+            QualifiedNameOfFile(Ident("Synthetic", Range.range0)),
+            [],
+            [ modOrNs ],
+            (false, false),
+            { ConditionalDirectives = []
+              WarnDirectives = []
+              CodeComments = [] },
+            Set.empty
+        )
+    )
+
+/// Like syntheticTree, for bare expressions: each becomes a top-level
+/// `do`-style declaration the walker does traverse.
+let private syntheticExprTree (children: SynExpr list) : ParsedInput =
+    let decls = children |> List.map (fun e -> SynModuleDecl.Expr(e, Range.range0))
+
+    let modOrNs =
+        SynModuleOrNamespace(
+            [ Ident("Synthetic", Range.range0) ],
+            false,
+            SynModuleOrNamespaceKind.NamedModule,
+            decls,
             PreXmlDoc.Empty,
             [],
             None,
@@ -167,9 +210,17 @@ let private build (tree: ParsedInput) : Index =
     while pending.Count > 0 do
         let objPath, objExpr = pending.Dequeue()
 
-        match objExprMemberBindings objExpr with
-        | [] -> ()
-        | bindings ->
+        let synthetic =
+            match objExprMemberBindings objExpr with
+            | [] ->
+                match setChildren objExpr with
+                | [] -> None
+                | children -> Some(syntheticExprTree children)
+            | bindings -> Some(syntheticTree bindings)
+
+        match synthetic with
+        | None -> ()
+        | Some syntheticInput ->
             let liftedExprs = ResizeArray()
             let liftedPats = ResizeArray()
             let liftedTypes = ResizeArray()
@@ -185,7 +236,7 @@ let private build (tree: ParsedInput) : Index =
                     override _.WalkPat(path, pat) = liftedPats.Add(path, pat)
                     override _.WalkType(path, synType) = liftedTypes.Add(path, synType) }
 
-            walkAst liftedCollector (syntheticTree bindings)
+            walkAst liftedCollector syntheticInput
 
             // drop the synthetic module scaffolding at the path's tail and
             // graft onto the real ObjExpr location

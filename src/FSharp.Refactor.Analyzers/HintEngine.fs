@@ -561,6 +561,19 @@ let find
     (check: FSharpCheckFileResults option)
     : Suggestion list =
     let typedCheck = check |> Option.filter (OptionModule.hasErrors >> not)
+
+    // attribute arguments are constant/property-assignment territory:
+    // `[<DllImport(..., SetLastError = true)>]` is not an equality to
+    // simplify (the property even RESOLVES to a bool field, so the typed
+    // gate alone waves it through — found live on Fuuga), and a rewrite
+    // that introduces a call would not compile there at all. No hint
+    // fires inside one.
+    let attributeArgRanges =
+        (AstIndex.ofTree parseTree).Attributes
+        |> Array.map (fun (_, a) -> a.ArgExpr.Range)
+
+    let inAttributeArg (r: range) =
+        attributeArgRanges |> Array.exists (fun a -> Range.rangeContainsRange a r)
     let index = extraCache.GetOrAdd(extraRules, indexHints)
     let suggestions = ResizeArray<Suggestion>()
     let matchedRanges = HashSet<string>()
@@ -606,7 +619,13 @@ let find
 
                 let rangeKey = expr.Range.ToString()
 
-                if pureOk && boolTypedOk && not namedArgumentPosition && matchedRanges.Add rangeKey then
+                if
+                    pureOk
+                    && boolTypedOk
+                    && not namedArgumentPosition
+                    && not (inAttributeArg expr.Range)
+                    && matchedRanges.Add rangeKey
+                then
                     let replacement =
                         hint.RhsVarSpans
                         |> List.fold

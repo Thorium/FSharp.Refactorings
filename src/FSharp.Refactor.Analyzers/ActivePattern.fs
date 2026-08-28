@@ -24,6 +24,8 @@ module FSharp.Refactor.ActivePattern
 
 open System
 open System.Text.RegularExpressions
+open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Analyzers.SDK
@@ -74,8 +76,48 @@ let private locallyBound (declText: string) (name: string) =
 let private capitalize (name: string) =
     string (Char.ToUpperInvariant name.[0]) + name.Substring 1
 
+/// The generated pattern's `input` parameter, annotated when it must be.
+/// The original guard `Path.IsPathRooted p` infers from the match variable;
+/// the extracted pattern's `input` has no such context, and a .NET method
+/// group with overloads (IsPathRooted takes string OR ReadOnlySpan<char>)
+/// then fails resolution — found live on Fuuga. An F# function infers
+/// fine; a member gets its resolved parameter type spelled out; an
+/// unresolvable guard skips the suggestion.
+let private inputParameter
+    (check: FSharpCheckFileResults)
+    (source: ISourceText)
+    (fnExpr: SynExpr)
+    : string voption =
+    let lastIdent =
+        match fnExpr with
+        | SynExpr.Ident id -> Some id
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
+        | _ -> None
+
+    match lastIdent with
+    | None -> ValueNone
+    | Some ident ->
+        let r = ident.idRange
+        let lineText = source.GetLineString(r.EndLine - 1)
+
+        match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with
+        | Some symbolUse ->
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as value ->
+                try
+                    if not value.IsMember then
+                        ValueSome "input"
+                    else
+                        let t = value.CurriedParameterGroups.[0].[0].Type
+                        ValueSome $"(input: {t.Format symbolUse.DisplayContext})"
+                with _ ->
+                    ValueNone
+            | _ -> ValueNone
+        | None -> ValueNone
+
 /// Find `when` guards of the form `f var` that can become active patterns.
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+/// Requires typed check results for the guard's parameter type.
+let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
 
     // only consulted when a candidate guard is found, which is rare
@@ -122,6 +164,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                 let patternName = capitalize fnName
 
                                 if not (fileText.Value.Contains $"(|{patternName}|") then
+                                  match inputParameter check source fnExpr with
+                                  | ValueNone -> ()
+                                  | ValueSome inputParam ->
                                     let fnText = textOfRange source fnExpr.Range
                                     let indent = String(' ', decl.Range.StartColumn)
 
@@ -133,9 +178,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                     // allocation per match attempt)
                                     let binding =
                                         sprintf
-                                            "[<return: Struct>]\n%slet inline private (|%s|_|) input =\n%s    if %s input then ValueSome input else ValueNone"
+                                            "[<return: Struct>]\n%slet inline private (|%s|_|) %s =\n%s    if %s input then ValueSome input else ValueNone"
                                             indent
                                             patternName
+                                            inputParam
                                             indent
                                             fnText
 

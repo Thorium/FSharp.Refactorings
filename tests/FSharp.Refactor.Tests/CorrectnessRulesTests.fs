@@ -167,3 +167,36 @@ let ``matching arguments are fine`` () =
 [<Fact>]
 let ``escaped braces are not placeholders`` () =
     Assert.Empty(formatsIn "module Test\nlet f (x: int) = System.String.Format(\"{{0}} literal {0}\", x)")
+
+// ---- FR0105 CheckedArithmetic ----
+
+let private checkedIn (source: string) =
+    let tree, sourceText = parse source
+    CheckedArithmetic.find tree sourceText
+
+[<Fact>]
+let ``a near-limit constant in an addition is noted`` () =
+    match checkedIn "module Test\nlet f (balance: int) = balance + 2_000_000_000" with
+    | [ s ] -> Assert.Equal("2_000_000_000", s.ConstantText)
+    | other -> failwithf "Expected exactly one overflow note, got %A" other
+
+[<Fact>]
+let ``ordinary constants are ordinary`` () =
+    Assert.Empty(checkedIn "module Test\nlet f (n: int) = n + 1000")
+
+[<Fact>]
+let ``a hex constant is a mask, not a magnitude`` () =
+    Assert.Empty(checkedIn "module Test\nlet f (n: int) = n + 0x7FFFFFFF")
+
+[<Fact>]
+let ``a file that opens Checked has made its choice`` () =
+    Assert.Empty(
+        checkedIn
+            "module Test\nopen Microsoft.FSharp.Core.Operators.Checked\nlet f (balance: int) = balance + 2_000_000_000"
+    )
+
+[<Fact>]
+let ``a near-limit int64 multiplication is noted`` () =
+    match checkedIn "module Test\nlet f (n: int64) = n * 600_000_000_000_000_000L" with
+    | [ s ] -> Assert.Equal("600_000_000_000_000_000L", s.ConstantText)
+    | other -> failwithf "Expected exactly one int64 note, got %A" other

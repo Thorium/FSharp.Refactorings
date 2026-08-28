@@ -238,3 +238,11 @@ let ``De Morgan combines negated conjuncts`` () =
 [<Fact>]
 let ``De Morgan combines negated disjuncts`` () =
     assertSingleSuggestion "module Test\nlet f (a: bool) b = not a || not b" "not (a && b)"
+
+[<Fact>]
+let ``an attribute argument is not an expression to simplify`` () =
+    // from Fuuga: [<DllImport(..., SetLastError = true)>] — the property
+    // resolves to a bool FIELD, so the typed gate alone waves it through;
+    // attribute arguments are constant territory and no hint may fire there
+    assertNoSuggestion
+        "module Test\n[<System.AttributeUsage(System.AttributeTargets.All, AllowMultiple = true)>]\ntype MyAttr() =\n    inherit System.Attribute()"

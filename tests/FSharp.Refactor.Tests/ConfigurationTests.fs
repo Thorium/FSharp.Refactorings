@@ -113,3 +113,26 @@ let ``no config file means everything enabled`` () =
         Assert.True(Configuration.isRuleEnabled analyzed "FR0001" "MatchToIf")
     finally
         Directory.Delete(root, true)
+
+[<Fact>]
+let ``FR0099 is off by default`` () =
+    // it lexes every file containing a line-ending semicolon and rarely
+    // finds anything — cost out of proportion to a cosmetic default
+    let rules = Configuration.parse "{}"
+    Assert.False(Configuration.isEnabledIn rules "FR0099" "TrailingSemicolon")
+
+[<Fact>]
+let ``the configuration can turn FR0099 back on`` () =
+    let rules = Configuration.parse """{ "rules": { "FR0099": true } }"""
+    Assert.True(Configuration.isEnabledIn rules "FR0099" "TrailingSemicolon")
+
+[<Fact>]
+let ``an explicit --codes ask outranks the default-off status`` () =
+    Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", "FR0002,FR0099")
+
+    try
+        Assert.True(Configuration.isRuleEnabled "Test.fs" "FR0099" "TrailingSemicolon")
+    finally
+        Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", null)
+
+    Assert.False(Configuration.isRuleEnabled "Test.fs" "FR0099" "TrailingSemicolon")

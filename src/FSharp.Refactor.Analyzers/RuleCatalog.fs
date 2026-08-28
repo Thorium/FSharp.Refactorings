@@ -91,6 +91,7 @@ let private categories =
       "FR0080", Category.Correctness // leading TABs (FS1161)
       "FR0089", Category.Correctness // [ 1, 2 ] is a one-element list of a tuple
       "FR0100", Category.Correctness // an unfinished branch returning a plausible value
+      "FR0105", Category.Correctness // unchecked arithmetic on near-limit constants wraps silently
 
       // --- performance: correct, but doing work it need not
       "FR0004", Category.Performance
@@ -107,7 +108,6 @@ let private categories =
       "FR0039", Category.Performance
       "FR0040", Category.Performance
       "FR0041", Category.Performance
-      "FR0050", Category.Performance
       "FR0051", Category.Performance
       "FR0052", Category.Performance
       "FR0053", Category.Performance
@@ -143,6 +143,7 @@ let private categories =
       "FR0034", Category.Idiom
       "FR0042", Category.Idiom
       "FR0043", Category.Idiom
+      "FR0050", Category.Idiom // measured: List/Array.sum run LEVEL with the loop, not faster
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

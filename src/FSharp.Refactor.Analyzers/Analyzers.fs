@@ -161,8 +161,8 @@ let ceStripCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0006 ActivePattern ----
 
-let private activePatternMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    ActivePattern.find parseTree source
+let private activePatternMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    ActivePattern.find parseTree source checkResults
     |> List.map (fun s ->
         hint
             "FR0006"
@@ -174,12 +174,12 @@ let private activePatternMessages (parseTree: ParsedInput) (source: ISourceText)
 [<EditorAnalyzer("ActivePattern", "Extract a when-guard into an active pattern", HelpBase)>]
 let activePatternEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0006" "ActivePattern" (fun () ->
-        activePatternMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        whenChecked ctx (activePatternMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
 
 [<CliAnalyzer("ActivePattern", "Extract a when-guard into an active pattern", HelpBase)>]
 let activePatternCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0006" "ActivePattern" (fun () ->
-        activePatternMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        activePatternMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 // ---- FR0007 MutableRemoval ----
 
@@ -2414,3 +2414,26 @@ let recursiveAppendEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
 let recursiveAppendCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0104" "RecursiveAppend" (fun () ->
         recursiveAppendMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0105 CheckedArithmetic ----
+
+let private checkedArithmeticMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    CheckedArithmetic.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0105"
+            (sprintf
+                "Arithmetic on the near-limit constant %s wraps SILENTLY on overflow — F# operators are unchecked by default. Consider `open Microsoft.FSharp.Core.Operators.Checked` in this scope, a wider type (int64/bigint), or a comment saying the wraparound is intended."
+                s.ConstantText)
+            s.Range
+            [])
+
+[<EditorAnalyzer("CheckedArithmetic", "Unchecked arithmetic on near-limit constants", HelpBase)>]
+let checkedArithmeticEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0105" "CheckedArithmetic" (fun () ->
+        checkedArithmeticMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("CheckedArithmetic", "Unchecked arithmetic on near-limit constants", HelpBase)>]
+let checkedArithmeticCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0105" "CheckedArithmetic" (fun () ->
+        checkedArithmeticMessages ctx.ParseFileResults.ParseTree ctx.SourceText)

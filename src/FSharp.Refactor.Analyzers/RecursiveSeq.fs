@@ -54,6 +54,46 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     ignore source
     let index = AstIndex.ofTree parseTree
 
+    // seq-builder CE bodies FIRST: no seq { } means nothing to do, and
+    // most files have none. Before this early-out, the member widening
+    // made this rule the slowest in the whole sweep — every member's
+    // binding was collected and probed against every expression.
+    let seqBodies =
+        index.Exprs
+        |> Array.choose (fun (_, e) ->
+            match e with
+            | SynExpr.App(isInfix = false; funcExpr = IdentName builder; argExpr = SynExpr.ComputationExpr(expr = body)) when
+                seqBuilders.Contains builder
+                ->
+                Some(builder, body.Range)
+            | _ -> None)
+
+    if Array.isEmpty seqBodies then
+        []
+    else
+
+    // every ident occurrence by name, one pass — the self-call probe was
+    // O(bindings × expressions) as separate scans
+    let identOccurrences =
+        System.Collections.Generic.Dictionary<string, ResizeArray<range * bool>>()
+
+    let addOccurrence (name: string) (r: range) (dotted: bool) =
+        match identOccurrences.TryGetValue name with
+        | true, existing -> existing.Add(r, dotted)
+        | false, _ ->
+            let fresh = ResizeArray()
+            fresh.Add(r, dotted)
+            identOccurrences.[name] <- fresh
+
+    for _, e in index.Exprs do
+        match e with
+        | SynExpr.Ident id -> addOccurrence id.idText id.idRange false
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
+        | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+            let last = List.last ids
+            addOccurrence last.idText last.idRange (ids.Length > 1)
+        | _ -> ()
+
     // (function name, binding body range) for every recursive binding
     let recBindings =
         let fromBindings isRec bindings =
@@ -113,49 +153,36 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
         ((fromDecls @ fromExprs) |> List.map (fun (n, r) -> n, r, false)) @ fromMembers
 
-    // seq-builder CE bodies
-    let seqBodies =
-        index.Exprs
-        |> Array.choose (fun (_, e) ->
-            match e with
-            | SynExpr.App(isInfix = false; funcExpr = IdentName builder; argExpr = SynExpr.ComputationExpr(expr = body)) when
-                seqBuilders.Contains builder
-                ->
-                Some(builder, body.Range)
-            | _ -> None)
-
     [ for name, bodyRange, allowDotted in recBindings do
-          // seq bodies belonging to this binding
+          // seq bodies belonging to this binding — skip the probe entirely
+          // when there are none, which is nearly every binding
           let ownSeqs =
               seqBodies
               |> Array.filter (fun (_, seqRange) -> Range.rangeContainsRange bodyRange seqRange)
 
-          let inOwnSeq (r: range) =
-              ownSeqs
-              |> Array.tryPick (fun (builder, seqRange) ->
-                  if Range.rangeContainsRange seqRange r then
-                      Some(r, builder)
-                  else
-                      None)
+          if not (Array.isEmpty ownSeqs) then
+              let inOwnSeq (r: range) =
+                  ownSeqs
+                  |> Array.tryPick (fun (builder, seqRange) ->
+                      if Range.rangeContainsRange seqRange r then
+                          Some(r, builder)
+                      else
+                          None)
 
-          // the first self-reference inside any of them. A member's
-          // re-entry is dotted (`c.Descendants`); matching the last ident
-          // by name accepts some imprecision, fair for an advice-only rule
-          let selfCall =
-              index.Exprs
-              |> Array.tryPick (fun (_, e) ->
-                  match e with
-                  | SynExpr.Ident id when id.idText = name -> inOwnSeq id.idRange
-                  | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
-                  | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when
-                      allowDotted && not ids.IsEmpty && (List.last ids).idText = name
-                      ->
-                      inOwnSeq (List.last ids).idRange
-                  | _ -> None)
+              // the first self-reference inside any of them, via the
+              // occurrence table. A member's re-entry is dotted
+              // (`c.Descendants`); matching the last ident by name accepts
+              // some imprecision, fair for an advice-only rule
+              let selfCall =
+                  match identOccurrences.TryGetValue name with
+                  | true, occurrences ->
+                      occurrences
+                      |> Seq.tryPick (fun (r, dotted) -> if not dotted || allowDotted then inOwnSeq r else None)
+                  | false, _ -> None
 
-          match selfCall with
-          | Some(callRange, builder) ->
-              { Range = callRange
-                FunctionName = name
-                Builder = builder }
-          | None -> () ]
+              match selfCall with
+              | Some(callRange, builder) ->
+                  { Range = callRange
+                    FunctionName = name
+                    Builder = builder }
+              | None -> () ]

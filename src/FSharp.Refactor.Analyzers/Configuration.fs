@@ -64,10 +64,19 @@ let parse (json: string) : Map<string, bool> =
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins over
 /// a name entry; absent rules are enabled.
+/// Rules that are OFF unless the configuration turns them on. FR0099
+/// (trailing semicolons) lexes every file containing `;\n` and sat in the
+/// slowest-analyzer list on every run, for a finding that barely occurs in
+/// real code — cost out of proportion to value as a default.
+let private defaultOff = set [ "fr0099"; "trailingsemicolon" ]
+
 let isEnabledIn (rules: Map<string, bool>) (code: string) (analyzerName: string) : bool =
-    rules.TryFind(code.ToLowerInvariant())
-    |> Option.orElseWith (fun () -> rules.TryFind(analyzerName.ToLowerInvariant()))
-    |> Option.defaultValue true
+    let code = code.ToLowerInvariant()
+    let name = analyzerName.ToLowerInvariant()
+
+    rules.TryFind code
+    |> Option.orElseWith (fun () -> rules.TryFind name)
+    |> Option.defaultValue (not (defaultOff.Contains code || defaultOff.Contains name))
 
 /// Walk up from `directory` looking for the config file, stopping at the
 /// repository root (the first directory holding .git) — a stray
@@ -211,6 +220,22 @@ let hintsFor (analyzedFile: string) : string list = (configFor analyzedFile).Hin
 let isGeneratedFile (analyzedFile: string) =
     analyzedFile.Contains @"\obj\" || analyzedFile.Contains "/obj/"
 
+/// Codes the apply tool's run explicitly asked for (--codes, or a
+/// --categories expansion). An explicit ask turns a rule on even when it
+/// is default-off or config-disabled — the command line outranks defaults.
+let private forcedOn (code: string) (analyzerName: string) =
+    match Environment.GetEnvironmentVariable "FSREF_FORCE_CODES" with
+    | null
+    | "" -> false
+    | s ->
+        s.Split(',')
+        |> Array.exists (fun c ->
+            let c = c.Trim()
+
+            c.Equals(code, StringComparison.OrdinalIgnoreCase)
+            || c.Equals(analyzerName, StringComparison.OrdinalIgnoreCase))
+
 let isRuleEnabled (analyzedFile: string) (code: string) (analyzerName: string) : bool =
     not (isGeneratedFile analyzedFile)
-    && isEnabledIn (rulesFor analyzedFile) code analyzerName
+    && (forcedOn code analyzerName
+        || isEnabledIn (rulesFor analyzedFile) code analyzerName)

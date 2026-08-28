@@ -60,7 +60,17 @@ let private locallyConstructed (check: FSharpCheckFileResults) (source: ISourceT
                 ValueSome(List.last ids)
             | _ -> ValueNone
 
-        match headIdent with
+        // cheap prefilter before paying for symbol resolution: a
+        // constructor-without-new is spelled with a type name and the BCL
+        // factories are PascalCase, while ordinary calls (`let x = load y`)
+        // are lowercase — resolving those for every let in a sweep put
+        // this rule near the top of the slow-analyzer list
+        let plausible =
+            match headIdent with
+            | ValueSome id -> id.idText.Length > 0 && System.Char.IsUpper id.idText.[0]
+            | ValueNone -> false
+
+        match (if plausible then headIdent else ValueNone) with
         | ValueSome id ->
             let r = id.idRange
             let lineText = source.GetLineString(r.EndLine - 1)

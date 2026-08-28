@@ -74,7 +74,7 @@ NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT 
 Reference the package from the project you want analyzed:
 
 ```xml
-<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.6.0" PrivateAssets="all" />
+<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.6.1" PrivateAssets="all" />
 ```
 
 then point Ionide at the restored analyzers in `.vscode/settings.json`:
@@ -83,7 +83,7 @@ then point Ionide at the restored analyzers in `.vscode/settings.json`:
 {
   "FSharp.enableAnalyzers": true,
   "FSharp.analyzersPath": [
-    "~/.nuget/packages/fsharp.refactor.analyzers/0.6.0/analyzers/dotnet/fs"
+    "~/.nuget/packages/fsharp.refactor.analyzers/0.6.1/analyzers/dotnet/fs"
   ]
 }
 ```
@@ -95,7 +95,7 @@ appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 
 ```bash
 dotnet tool install --global fsharp-analyzers
-fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.6.0/analyzers/dotnet/fs --code-root . --report analysis.sarif
+fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.6.1/analyzers/dotnet/fs --code-root . --report analysis.sarif
 ```
 
 `fsharp-analyzers` is the analyzer HOST, and it is the dotnet tool you
@@ -150,9 +150,9 @@ Every rule is one of four kinds, shown in the last column of
 
 | Kind | | Count |
 |---|---|---|
-| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 30 |
-| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 28 |
-| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 31 |
+| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 31 |
+| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 27 |
+| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 32 |
 | `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 14 |
 
 This matters when the repository is not yours. Running everything over a
@@ -169,6 +169,20 @@ fsharp-refactor Their.fsproj --categories correctness,performance --dry-run
 ```
 
 That is the set that earns its review time. For your own code, run the lot.
+
+The category claims are measured, not assumed:
+
+```bash
+dotnet run -c Release --project benchmarks/PerfClaims
+```
+
+re-checks them on your machine, on BOTH axes — wall clock and allocation
+(GC pressure is performance too). The contract: a performance rule's
+rewrite must win on at least one axis, and an idiom rule's must hold
+parity. FR0050 once emitted `Seq.sum` for a list — ~50%% slower than the
+mutable loop it replaced, plus an enumerator allocation — which is how
+the benchmark file, the rule's module-resolved output, and its idiom
+recategorization all came to exist.
 
 ### Multi-targeted projects
 
@@ -266,7 +280,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0047 | A type implementing `IDisposable` whose `Dispose` never touches one of its `new`-constructed disposable fields (CA2213, note) — the mirror of FR0032 | correctness |
 | FR0048 | `String.Format("{0} of {1}", x)` — a placeholder without an argument throws `FormatException` at runtime (CA2241, note); `{{` escapes handled, culture-first overload ignored | correctness |
 | FR0049 | Sync-over-async (CA1849/VSTHRD): `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, `Async.RunSynchronously`, `Thread.Sleep` **inside** `async`/`task { }` invite thread-pool starvation and deadlocks (typed-gated receivers; `Thread.Sleep n` gets a `do! Async.Sleep n` / `do! Task.Delay n` fix in statement position); `.Result`/`.Wait()`/`GetResult()` **outside** CEs get the boundary note — wrap in `task { }` or use the sync API (`Async.RunSynchronously` outside a CE is F#'s intended sync boundary and stays quiet) | correctness |
-| FR0050 | `let mutable total = 0` + `for x in xs do total <- total + x` → `let total = xs \|> Seq.sum` (fix); projections → `sumBy`, general combines → `Seq.fold (fun acc x -> ...) init` — same expression, same bindings, no mutable | performance |
+| FR0050 | `let mutable total = 0` + `for x in xs do total <- total + x` → `let total = xs \|> List.sum` (fix); projections → `sumBy`, general combines → `fold (fun acc x -> ...) init` — same expression, same bindings, no mutable. The module matches the source's resolved kind: measured, `List.sum`/`Array.sum` run LEVEL with the loop while `Seq.sum` is ~50% slower on a list, so this is an idiom rule, and the rewrite never spells `Seq` when it knows better | idiom |
 | FR0051 | `acc <- acc @ [x]` / `acc <- Array.append acc [\|x\|]` inside a loop copies the accumulator per iteration — O(n²) (note): use a ResizeArray, or cons and `List.rev` | performance |
 | FR0052 | `q.Count = 0` on `ConcurrentQueue`/`Stack`/`Bag` → `q.IsEmpty` (CA1836, fix): their `Count` walks segments, `IsEmpty` peeks | performance |
 | FR0053 | `BitConverter.ToString(bytes).Replace("-", "")` → `System.Convert.ToHexString bytes` (CA1872, fix) | performance |
@@ -314,19 +328,20 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0096 | Redundant parentheses around a pattern: `\| (Some y) ->` → `\| Some y ->`, `let f (x) = x` → `let f x = x`. The whole pattern of a match clause, or a bare atom elsewhere — `Some (x, y)`, `Some (Some x)`, `f (x: int)` and member parameters all keep theirs | cosmetic |
 | FR0097 | Redundant parentheses around a type: `(x: (int))` → `(x: int)`, `(string) list` → `string list`. Function and tuple types keep theirs, where the parens bind the type together | cosmetic |
 | FR0098 | The BCL name of a type F# abbreviates: `System.Int32` → `int`, `System.String` → `string`, `System.Object` → `obj`. Only the fully qualified form; a bare `Int32` depends on the opens and on what the file declares | cosmetic |
-| FR0099 | A `;` ending a line does nothing in light syntax: `let x = 1;` → `let x = 1`. Kept where it separates rather than terminates — inside a list, array, record, anonymous record or attribute group — and everywhere in a file that sets `#light "off"`. `;;` is left alone | cosmetic |
+| FR0099 | A `;` ending a line does nothing in light syntax: `let x = 1;` → `let x = 1`. Kept where it separates rather than terminates — inside a list, array, record, anonymous record or attribute group — and everywhere in a file that sets `#light "off"`. `;;` is left alone. OFF BY DEFAULT: it lexes every file containing a line-ending `;` and rarely finds anything — enable via `"FR0099": true` in fsharprefactor.json, or ask for it with `--codes FR0099` | cosmetic |
 | FR0100 | A match branch that says it is unfinished and then returns a stand-in — `\| Jordan ->` / `// Not supported yet` / `None` — becomes `raise (NotImplementedException())`, so the gap reports itself instead of reaching callers as a real-looking result. The comment must sit inside the branch, between the arrow and the value, where it describes that branch and nothing else; a bare `TODO` elsewhere never counts, and `\| Unknown -> None` with no such comment is left alone. `null` and `Unchecked.defaultof<_>` need the comment too — `\| [] -> Unchecked.defaultof<'T>` is the entire contract of a SingleOrDefault, and `\| null -> null` passes a sentinel through. Only fires where sibling branches actually compute, so a table of constants is not mistaken for a stub | correctness |
 | FR0101 | The Python `range(len(xs))` loop: `for i in 0 .. xs.Length - 1 do ... xs.[i]` → `for x in xs do ... x`, when the index's every use is indexing that same collection. Fix rewrites the header and each `xs.[i]`/`xs[i]`; an index also used as a value wants `iteri`, which changes shape enough to stay the author's call, and any `xs.[i] <- ...` keeps the loop | idiom |
 | FR0102 | Positional indexing into an F# LIST inside a loop — `names.[i]` walks i cons cells per access, the quietest quadratic in F#. Typed: arrays, ResizeArray and dictionaries share the syntax and are fine; `List.item`/`List.nth` pin the type by name. Constant indexes (`xs.[0]`) and receivers bound inside the loop are skipped. Advice: iterate directly (FR0101 fixes the canonical shape) or convert once with `List.toArray` | performance |
 | FR0103 | The Python isinstance ladder: an if/elif chain of `shape :? T` tests with `shape :?> T` casts in the branches becomes one `match` with `\| :? T as v ->` patterns — one type test per branch instead of test-plus-cast, and the unsafe `:?>` (an InvalidCastException waiting for a branch reorder) disappears. Needs two or more bare type-tests on the same plain identifier, single-line branches, and every cast targeting its own branch's type; a compound condition or a cross-cast keeps the chain | idiom |
 | FR0104 | A singleton append to an accumulator in a RECURSIVE call — `collect (acc @ [x]) rest` copies the whole accumulator every step, O(n²), and it is the shape first drafts produce more when told to avoid mutation. Note only: the repair is `x :: acc` with one `List.rev` in the base case, or an array/ResizeArray when the result is consumed positionally — the base case changes either way. A general `a @ b` merge is left alone | performance |
+| FR0105 | Arithmetic (`+`, `-`, `*`) on a NEAR-LIMIT integer constant — within a factor of two of `Int32.MaxValue`, or ten-ish digits into int64 territory. F# operators are unchecked by default, so overflow wraps silently and the corrupted value flows on. Note only: `open Microsoft.FSharp.Core.Operators.Checked` makes the scope throw instead, a wider type removes the ceiling, or the wraparound is intended and deserves saying so. Decimal spellings only (hex is a mask), unsigned skipped, and a file already opening Checked is left alone | correctness |
 | — | DU case payload → named record (cross-file) | needs FSAC codefix infra |
 
 ## Configuration
 
 Rules can be disabled per repository with an optional `fsharprefactor.json`,
-searched upward from each analyzed file (the nearest one wins). Keys are rule
-codes or analyzer names, case-insensitive; every rule defaults to enabled, and
+searched upward from each analyzed file, stopping at the repository root (the
+nearest file wins). Keys are rule codes or analyzer names, case-insensitive;
 a malformed file fails open so it can never break the editor. Comments and
 trailing commas are tolerated:
 
@@ -343,6 +358,13 @@ A disabled rule skips its analysis entirely, so the file also works as a
 performance lever on large codebases. Internally all analyzers share one
 memoized AST traversal per file version, so the editor pays for a single
 walk per keystroke regardless of how many rules are active.
+
+Every rule defaults to enabled except FR0099 (line-ending semicolons),
+which lexes every file containing one and rarely finds anything — cost out
+of proportion to a cosmetic default. Turn it on with `"FR0099": true`, or
+ask for it explicitly: the apply tool treats `--codes FR0099` (and a
+`--categories` expansion that includes it) as outranking both the
+default-off status and a config disable.
 
 The same file can add custom FR0012 term-rewriting rules using FSharpLint's
 hint syntax (single-letter identifiers are metavariables):

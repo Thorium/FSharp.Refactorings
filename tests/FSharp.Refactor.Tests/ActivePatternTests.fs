@@ -5,8 +5,8 @@ open FSharp.Refactor
 open FSharp.Refactor.Tests.Parsing
 
 let private findIn (source: string) =
-    let tree, sourceText = parse source
-    ActivePattern.find tree sourceText
+    let tree, sourceText, checkResults = parseAndCheck source
+    ActivePattern.find tree sourceText checkResults
 
 /// Apply both edits of the suggestion (clause first — it sits later in the
 /// document — then the insertion) and verify the result typechecks.
@@ -25,7 +25,10 @@ let private assertNoSuggestion (source: string) = Assert.Empty(findIn source)
 let ``dotted guard function becomes an active pattern`` () =
     assertSingleSuggestion
         "module Test\nlet describe (s: string) =\n    match s with\n    | s when System.String.IsNullOrEmpty s -> \"empty\"\n    | s -> s"
-        "module Test\n[<return: Struct>]\nlet inline private (|IsNullOrEmpty|_|) input =\n    if System.String.IsNullOrEmpty input then ValueSome input else ValueNone\nlet describe (s: string) =\n    match s with\n    | IsNullOrEmpty s -> \"empty\"\n    | s -> s"
+        // a .NET member's extracted input is annotated with its resolved
+        // parameter type — for the overloaded ones (Path.IsPathRooted) it
+        // is the difference between compiling and FS0041
+        "module Test\n[<return: Struct>]\nlet inline private (|IsNullOrEmpty|_|) (input: string) =\n    if System.String.IsNullOrEmpty input then ValueSome input else ValueNone\nlet describe (s: string) =\n    match s with\n    | IsNullOrEmpty s -> \"empty\"\n    | s -> s"
 
 [<Fact>]
 let ``module-level guard function becomes an active pattern`` () =
@@ -74,3 +77,20 @@ let ``repeated guards yield a single suggestion`` () =
             "module Test\nlet isEven (n: int) = n % 2 = 0\nlet f x =\n    match x with\n    | n when isEven n -> n\n    | _ -> 0\nlet g y =\n    match y with\n    | n when isEven n -> n\n    | _ -> 1"
 
     Assert.Equal(1, List.length suggestions)
+
+[<Fact>]
+let ``an overloaded method guard annotates the extracted input`` () =
+    // from Fuuga: Path.IsPathRooted takes string OR ReadOnlySpan<char>; the
+    // extracted pattern's `input` has no inference context, so the resolved
+    // parameter type is spelled out
+    match
+        findIn
+            "module Test\nopen System.IO\nlet f (p: string) =\n    match p with\n    | q when Path.IsPathRooted q -> q\n    | q -> q"
+    with
+    | [ s ] ->
+        Assert.Contains("(input: string)", s.InsertText)
+
+        let patched = applyEdit "module Test\nopen System.IO\nlet f (p: string) =\n    match p with\n    | q when Path.IsPathRooted q -> q\n    | q -> q" s.ClauseRange s.ClauseText
+        let patched = applyEdit patched s.InsertRange s.InsertText
+        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+    | other -> failwithf "Expected exactly one annotated suggestion, got %A" other
