@@ -107,6 +107,16 @@ let ``reassignment after the loop keeps the mutable`` () =
     Assert.Empty folds
 
 [<Fact>]
+let ``counting a non-generic IEnumerable stays a loop`` () =
+    // from the corpus (SQLProvider SeqValues): `for` accepts the non-generic
+    // IEnumerable, Seq.sumBy needs seq<'T> — the rewrite would be FS0001
+    let folds, _ =
+        accumulationIn
+            "let f (values: System.Collections.IEnumerable) =\n    let mutable count = 0\n    for v in values do\n        count <- count + 1\n    count"
+
+    Assert.Empty folds
+
+[<Fact>]
 let ``quadratic list append in a loop is noted`` () =
     let _, quadratics =
         accumulationIn
@@ -367,3 +377,76 @@ let ``a non-empty seed prefixes the concatenation`` () =
     match folds with
     | [ s ] -> Assert.Equal("let acc = \"head:\" + (xs |> String.concat \"\")", s.ReplacementText)
     | other -> failwithf "Expected exactly one seeded string concat, got %A" other
+
+[<Fact>]
+let ``ValueTask Result blocks like Task Result`` () =
+    // post-core BCL async I/O returns ValueTask everywhere
+    let suggestions =
+        blockingIn
+            "let f (vt: System.Threading.Tasks.ValueTask<int>) =\n    task {\n        return vt.Result\n    }"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal(SyncOverAsync.BlockKind.TaskResult, s.Kind)
+    | other -> failwithf "Expected exactly one ValueTask.Result note, got %A" other
+
+[<Fact>]
+let ``Task WaitAll is a blocking wait too`` () =
+    let suggestions =
+        blockingIn
+            "let f (t1: System.Threading.Tasks.Task) =\n    task {\n        System.Threading.Tasks.Task.WaitAll [| t1 |]\n        return 1\n    }"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal(SyncOverAsync.BlockKind.TaskWait, s.Kind)
+    | other -> failwithf "Expected exactly one WaitAll note, got %A" other
+
+[<Fact>]
+let ``a Thread.Sleep inside a nested seq gets no do-fix`` () =
+    // `do!` in the seq body would call a Bind the seq builder lacks
+    let suggestions =
+        blockingIn
+            "let f () =\n    async {\n        let xs = seq {\n            System.Threading.Thread.Sleep 100\n            yield 1\n        }\n        return Seq.length xs\n    }"
+
+    Assert.NotEmpty suggestions
+    Assert.True(suggestions |> List.forall (fun s -> s.Fix.IsNone))
+
+[<Fact>]
+let ``a field-held concurrent queue count is an emptiness check too`` () =
+    let suggestions =
+        countsIn
+            "type H() =\n    member val Queue = System.Collections.Concurrent.ConcurrentQueue<int>() with get\n    member this.Check() = this.Queue.Count = 0"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("this.Queue.IsEmpty", s.ReplacementText)
+    | other -> failwithf "Expected exactly one count note, got %A" other
+
+[<Fact>]
+let ``a recursive member yielding itself through seq is noted`` () =
+    // members are implicitly recursive — no `rec` keyword to find — and
+    // OO-style tree APIs are where recursive seqs live
+    let suggestions =
+        recursiveSeqIn
+            "module Test\ntype Node(children: Node list) =\n    member this.Descendants() : seq<int> = seq {\n        yield 1\n        for c in children do\n            yield! c.Descendants()\n    }"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("Descendants", s.FunctionName)
+    | other -> failwithf "Expected exactly one recursive-member note, got %A" other
+
+[<Fact>]
+let ``quadratic List.append in a loop is noted`` () =
+    let _, quadratics =
+        accumulationIn
+            "let f (xs: int list) =\n    let mutable acc: int list = []\n    for x in xs do\n        if x > 0 then acc <- List.append acc [ x ]\n    acc"
+
+    match quadratics with
+    | [ s ] -> Assert.Equal("acc", s.Name)
+    | other -> failwithf "Expected exactly one List.append note, got %A" other
+
+[<Fact>]
+let ``quadratic append through a ref cell is noted`` () =
+    let _, quadratics =
+        accumulationIn
+            "let f (xs: int list) =\n    let acc = ref ([]: int list)\n    for x in xs do\n        acc.Value <- acc.Value @ [ x ]\n    acc.Value"
+
+    match quadratics with
+    | [ s ] -> Assert.Equal("acc", s.Name)
+    | other -> failwithf "Expected exactly one ref-cell note, got %A" other

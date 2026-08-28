@@ -64,11 +64,11 @@ let private (|GuardFunction|_|) (e: SynExpr) =
 let private locallyBound (declText: string) (name: string) =
     let n = Regex.Escape name
 
-    [ @"let[^\n=]*\b" + n + @"\b"
-      @"use[^\n=]*\b" + n + @"\b"
-      @"fun[^\n>]*\b" + n + @"\b"
-      @"for\s+" + n + @"\b"
-      @"\|\s*" + n + @"\b\s*(->|when)" ]
+    [ $@"let[^\n=]*\b{n}\b"
+      $@"use[^\n=]*\b{n}\b"
+      $@"fun[^\n>]*\b{n}\b"
+      $@"for\s+{n}\b"
+      $@"\|\s*{n}\b\s*(->|when)" ]
     |> List.exists (fun pattern -> Regex.IsMatch(declText, pattern))
 
 let private capitalize (name: string) =

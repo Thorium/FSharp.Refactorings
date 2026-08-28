@@ -90,8 +90,8 @@ let private typeAllowsRemoval (t: FSharpType) =
 let private mayMutate (bodyText: string) (name: string) =
     let n = Regex.Escape name
 
-    Regex.IsMatch(bodyText, @"\b" + n + @"(\.[^\n<]*|\[[^\n]*\]\s*)?\s*<-")
-    || Regex.IsMatch(bodyText, @"&\s*" + n + @"\b")
+    Regex.IsMatch(bodyText, $@"\b{n}(\.[^\n<]*|\[[^\n]*\]\s*)?\s*<-")
+    || Regex.IsMatch(bodyText, $@"&\s*{n}\b")
 
 /// The range of the `mutable` keyword plus its trailing whitespace, located
 /// textually between the start of the let-binding and its head pattern.

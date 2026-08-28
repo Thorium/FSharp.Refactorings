@@ -69,7 +69,10 @@ let isEnabledIn (rules: Map<string, bool>) (code: string) (analyzerName: string)
     |> Option.orElseWith (fun () -> rules.TryFind(analyzerName.ToLowerInvariant()))
     |> Option.defaultValue true
 
-/// Walk up from `directory` to the root looking for the config file.
+/// Walk up from `directory` looking for the config file, stopping at the
+/// repository root (the first directory holding .git) — a stray
+/// fsharprefactor.json above the checkout must not silently reconfigure
+/// every repository beneath it.
 [<TailCall>]
 let rec private findConfigUpward (directory: string) : string option =
     if String.IsNullOrEmpty directory then
@@ -79,6 +82,11 @@ let rec private findConfigUpward (directory: string) : string option =
 
         if File.Exists candidate then
             Some candidate
+        elif
+            Directory.Exists(Path.Combine(directory, ".git"))
+            || File.Exists(Path.Combine(directory, ".git"))
+        then
+            None
         else
             match Path.GetDirectoryName directory with
             | null -> None

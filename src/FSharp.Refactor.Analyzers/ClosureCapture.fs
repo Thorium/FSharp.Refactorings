@@ -99,6 +99,15 @@ let private (|SinkCall|_|) (e: SynExpr) =
         ->
         match stripParens arg with
         | SynExpr.Lambda _ as lambda -> ValueSome(methodId, lambda)
+        // a method group — `src.Changed.Add this.OnChanged` — pins `this`
+        // for the publisher's lifetime just as hard as a lambda; so does
+        // one wrapped in a delegate constructor:
+        // `w.Created.AddHandler(FileSystemEventHandler this.OnCreated)`
+        | SynExpr.LongIdent _ as captured -> ValueSome(methodId, captured)
+        | SynExpr.App(isInfix = false; funcExpr = SynExpr.Ident _; argExpr = inner) ->
+            match stripParens inner with
+            | SynExpr.LongIdent _ as captured -> ValueSome(methodId, captured)
+            | _ -> ValueNone
         | _ -> ValueNone
     | _ -> ValueNone
 

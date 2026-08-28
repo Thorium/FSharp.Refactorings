@@ -161,3 +161,8 @@ let ``copy-and-update of constructor state counts as instance use`` () =
         designIn "type St = { P: int }\ntype B(state: St) =\n    member _.WithP(p: int) = B({ state with P = p })"
 
     Assert.Empty statics
+
+[<Fact>]
+let ``a verbatim prefix chain becomes a verbatim interpolation`` () =
+    // path chains are exactly where @-strings appear; the result is $@"..."
+    assertConcat "let f (name: string) = @\"C:\out\\\" + name + \".txt\"" "$@\"C:\out\{name}.txt\""

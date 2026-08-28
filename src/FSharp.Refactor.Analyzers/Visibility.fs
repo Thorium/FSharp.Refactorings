@@ -51,17 +51,32 @@ let isInScope (allowApiChanges: bool) (path: SyntaxNode list) (accessibilities: 
 ///
 /// Private is the always-safe editor rule: a private module-level binding
 /// has all its call sites in the one file, so the file's own typed results
-/// enumerate them. NonPrivate is the API-CHANGING project-wide variant,
-/// driven only by the apply tool's --api-changes, where the call sites are
-/// found through the whole project's symbol uses.
+/// enumerate them. Assembly is the wider project-wide variant, driven only
+/// by the apply tool's --api-changes, where call sites are found through
+/// the checked project's symbol uses — which is exactly why it stops at
+/// effectively-internal declarations. A PUBLIC function's callers can sit
+/// in a sibling project of the same repository, or in another repository
+/// entirely; the scan cannot see them, so "every use covered" would pass
+/// vacuously and the edit would break them (found the hard way: currying
+/// SQLProvider.Common's public QueryFactory.createRelated broke
+/// SQLProvider.Runtime).
 [<RequireQualifiedAccess>]
 type Scope =
     | Private
-    | NonPrivate
+    | Assembly
 
-/// Does a definition with this accessibility belong to the given scan?
-let scopeMatches (scope: Scope) (accessibility: SynAccess option) =
-    match scope, accessibility with
-    | Scope.Private, Some(SynAccess.Private _) -> true
-    | Scope.NonPrivate, (None | Some(SynAccess.Internal _) | Some(SynAccess.Public _)) -> true
-    | _ -> false
+/// Does a definition with this accessibility, at this path, belong to the
+/// given scan?
+let scopeMatches (scope: Scope) (path: SyntaxNode list) (accessibility: SynAccess option) =
+    match scope with
+    | Scope.Private ->
+        match accessibility with
+        | Some(SynAccess.Private _) -> true
+        | _ -> false
+    | Scope.Assembly ->
+        // a directly-private binding is the single-file rule's territory;
+        // this scan takes the rest of the assembly-confined ones
+        (match accessibility with
+         | Some(SynAccess.Private _) -> false
+         | _ -> true)
+        && isConfined path [ accessibility ]

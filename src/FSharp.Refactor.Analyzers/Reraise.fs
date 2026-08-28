@@ -15,6 +15,9 @@
 ///   - the raise site is lexically in the handler: not inside a lambda,
 ///     computation expression, or nested try (where `reraise` would not
 ///     compile or would refer to a different exception)
+///   - the try-with itself is not inside a computation expression:
+///     `task { try ... with ex -> raise ex }` desugars the handler into a
+///     lambda passed to builder.TryWith, where `reraise ()` is FS0413
 ///   - `raise` resolves (typed check results) to FSharp.Core
 module FSharp.Refactor.Reraise
 
@@ -64,9 +67,25 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         pats |> List.exists (fun p -> patBoundNames p |> List.contains name)
                     | _ -> false))
 
-        [ for _, expr in index.Exprs do
+        // A try-with whose nearest deferring ancestor is a computation
+        // expression desugars into builder.TryWith(body, handler) — the
+        // handler becomes a lambda, where reraise () is FS0413. A lambda or
+        // object-expression member between the two resets to ordinary code.
+        let inComputationExpr (path: SyntaxNode list) =
+            path
+            |> List.tryPick (fun node ->
+                match node with
+                | SyntaxNode.SynExpr(SynExpr.ComputationExpr _)
+                | SyntaxNode.SynExpr(SynExpr.ArrayOrListComputed _) -> Some true
+                | SyntaxNode.SynExpr(SynExpr.Lambda _)
+                | SyntaxNode.SynExpr(SynExpr.MatchLambda _)
+                | SyntaxNode.SynExpr(SynExpr.ObjExpr _) -> Some false
+                | _ -> None)
+            |> Option.defaultValue false
+
+        [ for path, expr in index.Exprs do
               match expr with
-              | SynExpr.TryWith(withCases = clauses) ->
+              | SynExpr.TryWith(withCases = clauses) when not (inComputationExpr path) ->
                   for SynMatchClause(pat = pat; resultExpr = handler) in clauses do
                       let exNames = patBoundNames pat |> Set.ofList
 

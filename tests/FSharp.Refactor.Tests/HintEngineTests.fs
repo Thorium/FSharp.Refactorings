@@ -5,8 +5,8 @@ open FSharp.Refactor
 open FSharp.Refactor.Tests.Parsing
 
 let private findWith (extraRules: string list) (source: string) =
-    let tree, sourceText = parse source
-    HintEngine.find extraRules tree sourceText
+    let tree, sourceText, check = parseAndCheck source
+    HintEngine.find extraRules tree sourceText (Some check)
 
 let private findIn (source: string) = findWith [] source
 
@@ -39,6 +39,23 @@ let ``bool comparison with true is dropped`` () =
 [<Fact>]
 let ``bool comparison with false negates`` () =
     assertSingleSuggestion "module Test\nlet f (x: bool) = false = x" "not x"
+
+[<Fact>]
+let ``comparing an obj value with a bool literal is not a redundant comparison`` () =
+    // from the corpus (SQLProvider OfflineTools): `o = true` type-checks for
+    // o : obj — the literal subsumes to obj — so bare `o` would be FS0001
+    assertNoSuggestion "module Test\nlet f (o: obj) = if (isNull o) || o = true then 1 else 2"
+
+[<Fact>]
+let ``a bool literal comparison without typed proof stays put`` () =
+    // parse-only callers (no check results) cannot prove the operand is bool
+    let tree, sourceText = parse "module Test\nlet f (x: bool) = x = true"
+    Assert.Empty(HintEngine.find [] tree sourceText None)
+
+[<Fact>]
+let ``a bool-returning method call loses its literal comparison`` () =
+    // non-atomic substitutions are parenthesized by the engine
+    assertSingleSuggestion "module Test\nlet f (s: string) = s.Contains \"x\" = true" "(s.Contains \"x\")"
 
 [<Fact>]
 let ``null comparison becomes isNull`` () =
@@ -85,6 +102,26 @@ let ``map id disappears`` () =
 [<Fact>]
 let ``head of sort becomes min`` () =
     assertSingleSuggestion "module Test\nlet f (xs: int list) = List.head (List.sort xs)" "List.min xs"
+
+[<Fact>]
+let ``a float comparison flip is NaN-unsound and stays put`` () =
+    // not (nan > limit) is true; nan <= limit is false — the branch flips
+    assertNoSuggestion "module Test\nlet f (x: float) (limit: float) = not (x > limit)"
+
+[<Fact>]
+let ``a float compare collapse is NaN-unsound and stays put`` () =
+    // compare nan nan = 0 is true; nan = nan is false
+    assertNoSuggestion "module Test\nlet f (a: float) (b: float) = compare a b = 0"
+
+[<Fact>]
+let ``head of sort on floats stays put`` () =
+    // sort places NaN first; min folds through it order-dependently
+    assertNoSuggestion "module Test\nlet f (xs: float list) = List.head (List.sort xs)"
+
+[<Fact>]
+let ``an equality negation on floats is NaN-sound and still fires`` () =
+    // not (nan = x) and nan <> x agree — only ORDERING flips are gated
+    assertSingleSuggestion "module Test\nlet f (a: float) (b: float) = not (a = b)" "a <> b"
 
 [<Fact>]
 let ``compare equals zero becomes equality`` () =

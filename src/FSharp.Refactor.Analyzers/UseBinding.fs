@@ -23,6 +23,7 @@
 module FSharp.Refactor.UseBinding
 
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Refactor.Text
@@ -35,6 +36,51 @@ type Suggestion =
         /// None = advisory only (the value may escape the scope).
         Fix: (string * string) option
     }
+
+/// BCL factories whose result the caller owns, by enclosing type.
+let private bclFactories =
+    [ "System.IO.File", set [ "Open"; "OpenRead"; "OpenWrite"; "OpenText"; "Create"; "CreateText"; "AppendText" ]
+      "System.Xml.XmlReader", set [ "Create" ]
+      "System.Xml.XmlWriter", set [ "Create" ] ]
+
+/// Is the bound expression a construction the binder OWNS — `new T(...)`,
+/// a constructor applied without `new` (`MemoryStream()`), or an
+/// ownership-transferring BCL factory (`File.OpenRead path` is THE way to
+/// open a file, and it leaks exactly like a bare constructor)?
+let private locallyConstructed (check: FSharpCheckFileResults) (source: ISourceText) (rhs: SynExpr) =
+    match rhs with
+    | SynExpr.New _ -> true
+    | SynExpr.App(isInfix = false; funcExpr = f) ->
+        let headIdent =
+            match f with
+            | SynExpr.Ident id -> ValueSome id
+            | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
+            | SynExpr.TypeApp(expr = SynExpr.Ident id) -> ValueSome id
+            | SynExpr.TypeApp(expr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))) when not ids.IsEmpty ->
+                ValueSome(List.last ids)
+            | _ -> ValueNone
+
+        match headIdent with
+        | ValueSome id ->
+            let r = id.idRange
+            let lineText = source.GetLineString(r.EndLine - 1)
+
+            match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ id.idText ]) with
+            | Some symbolUse ->
+                match symbolUse.Symbol with
+                | :? FSharpMemberOrFunctionOrValue as value ->
+                    (try
+                        value.IsConstructor
+                     with _ ->
+                         false)
+                    || (let enclosing = OptionModule.enclosingFullName value
+
+                        bclFactories
+                        |> List.exists (fun (entity, names) -> enclosing = entity && names.Contains id.idText))
+                | _ -> false
+            | None -> false
+        | ValueNone -> false
+    | _ -> false
 
 /// The result-position expressions of a body: what the scope evaluates to.
 [<TailCall>]
@@ -80,7 +126,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   | [ SynBinding(
                           isMutable = false
                           headPat = SynPat.Named(ident = SynIdent(ident = binder); accessibility = None)
-                          expr = SynExpr.New _) ] when ObjectDesign.resolvesToDisposable check source binder ->
+                          expr = rhs) ] when
+                      locallyConstructed check source rhs
+                      && ObjectDesign.resolvesToDisposable check source binder
+                      ->
                       let name = binder.idText
                       let body = lou.Body
 

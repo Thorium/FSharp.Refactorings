@@ -55,6 +55,13 @@ type Suggestion =
 let private ceBuilders = set [ "async"; "task"; "backgroundTask" ]
 
 /// Does the identifier's enclosing entity satisfy the predicate?
+/// Task and ValueTask both block on .Result/.Wait — the BCL's async I/O
+/// returns ValueTask everywhere post-core, so a Task-only prefix test
+/// missed most modern blocking sites.
+let private taskFamily (entity: string) =
+    entity.StartsWith "System.Threading.Tasks.Task"
+    || entity.StartsWith "System.Threading.Tasks.ValueTask"
+
 let private enclosingEntityOf (check: FSharpCheckFileResults) (source: ISourceText) (ident: Ident) =
     let r = ident.idRange
     let lineText = source.GetLineString(r.EndLine - 1)
@@ -122,6 +129,25 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             lambdaRanges
             |> Array.exists (fun l -> Range.rangeContainsRange ceRange l && Range.rangeContainsRange l r)
 
+        // every CE body of ANY builder (seq { }, query { }, custom ones) and
+        // every comprehension. A `do!` fix landing in statement position of
+        // one of those nested inside the async/task would call a Bind the
+        // builder does not have — a compile error, not a fix.
+        let otherCeRanges =
+            index.Exprs
+            |> Array.choose (fun (_, e) ->
+                match e with
+                | SynExpr.ComputationExpr(expr = body) -> Some body.Range
+                | SynExpr.ArrayOrListComputed(expr = body) -> Some body.Range
+                | _ -> None)
+
+        let insideOtherCeWithin (ceRange: range) (r: range) =
+            otherCeRanges
+            |> Array.exists (fun other ->
+                Range.rangeContainsRange ceRange other
+                && not (Range.equals other ceRange)
+                && Range.rangeContainsRange other r)
+
         [ for path, expr in index.Exprs do
               let blocking =
                   match expr with
@@ -131,18 +157,18 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       ->
                       let id = List.last ids
 
-                      if (enclosingEntityOf check source id).StartsWith "System.Threading.Tasks.Task" then
+                      if (enclosingEntityOf check source id) |> taskFamily then
                           Some(BlockKind.TaskResult, None)
                       else
                           None
                   | SynExpr.DotGet(longDotId = SynLongIdent(id = [ id ])) when
                       id.idText = "Result"
-                      && (enclosingEntityOf check source id).StartsWith "System.Threading.Tasks.Task"
+                      && (enclosingEntityOf check source id) |> taskFamily
                       ->
                       Some(BlockKind.TaskResult, None)
                   | SynExpr.App(isInfix = false; funcExpr = CallIdent id) when
-                      id.idText = "Wait"
-                      && (enclosingEntityOf check source id).StartsWith "System.Threading.Tasks.Task"
+                      (id.idText = "Wait" || id.idText = "WaitAll" || id.idText = "WaitAny")
+                      && (enclosingEntityOf check source id) |> taskFamily
                       ->
                       Some(BlockKind.TaskWait, None)
                   | SynExpr.App(isInfix = false; funcExpr = CallIdent id; argExpr = UnitConst) when
@@ -184,7 +210,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   | Some(builder, ceRange) ->
                       let fix =
                           match kind, sleepArg with
-                          | BlockKind.ThreadSleep, Some arg when not (insideLambdaWithin ceRange expr.Range) ->
+                          | BlockKind.ThreadSleep, Some arg when
+                              not (insideLambdaWithin ceRange expr.Range)
+                              && not (insideOtherCeWithin ceRange expr.Range)
+                              ->
                               // statement position: a sequential element, the
                               // CE body itself, a let-continuation, or `do ...`
                               let target =

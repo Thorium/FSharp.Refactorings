@@ -311,6 +311,26 @@ let ``an inherited interface stubs in its own section`` () =
     | other -> failwithf "Expected exactly one inherited-stub fix, got %A" other
 
 [<Fact>]
+let ``members implemented in the main block satisfy inherited interfaces`` () =
+    // from the corpus (SQLProvider Stubs): the IDbConnection stub implements
+    // Dispose in the main block, which satisfies IDisposable — an extra
+    // `interface IDisposable with` stub would double-implement it (FS0767).
+    // The unrelated error keeps the file in FR0077's runs-on-broken-code path.
+    Assert.Empty(
+        missingIn
+            "module Test\nopen System\ntype IRes2 =\n    inherit IDisposable\n    abstract member Load: unit -> int\n\nlet broken: int = \"s\"\n\nlet r =\n    { new IRes2 with\n        member _.Load() = 1\n        member _.Dispose() = () }"
+    )
+
+[<Fact>]
+let ``a file that already type-checks is left alone`` () =
+    // a clean file has nothing missing, whatever the name-matching
+    // heuristics conclude — FR0077 exists to fix FS0366, not working code
+    Assert.Empty(
+        missingIn
+            "module Test\nopen System\ntype IRes3 =\n    inherit IDisposable\n    abstract member Load: unit -> int\n\nlet r =\n    { new IRes3 with\n        member _.Load() = 1\n        member _.Dispose() = () }"
+    )
+
+[<Fact>]
 let ``a complete object expression is quiet`` () =
     Assert.Empty(
         missingIn
@@ -659,3 +679,33 @@ let ``a shadowed failwith is not ours to rewrite`` () =
 [<Fact>]
 let ``wildcard parameters carry nothing to report`` () =
     Assert.Empty(failwithContextIn "module Test\nlet mymethod _ =\n    failwith \"Error\"")
+
+[<Fact>]
+let ``a File factory result leaks like a bare constructor`` () =
+    // File.OpenRead is THE way to open a file; ownership transfers to the
+    // caller exactly as with `new FileStream(...)`
+    let suggestions =
+        useBindingsIn
+            "let f (path: string) =\n    let stream = System.IO.File.OpenRead path\n    let n = stream.ReadByte()\n    n"
+
+    match suggestions with
+    | [ s ] ->
+        Assert.Equal("stream", s.Name)
+        Assert.True s.Fix.IsSome
+    | other -> failwithf "Expected exactly one use-binding suggestion, got %A" other
+
+[<Fact>]
+let ``ignore applied directly still finds the map`` () =
+    let suggestions = mapIgnoresIn "let f (xs: int list) = ignore (xs |> List.map string)"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal(Some "xs |> List.iter (string >> ignore)", s.ReplacementText)
+    | other -> failwithf "Expected exactly one map-ignore suggestion, got %A" other
+
+[<Fact>]
+let ``the direct Seq map spelling is the lazy nothing-runs bug too`` () =
+    let suggestions = mapIgnoresIn "let f (xs: seq<int>) = Seq.map string xs |> ignore"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal(None, s.ReplacementText)
+    | other -> failwithf "Expected exactly one seq map-ignore note, got %A" other

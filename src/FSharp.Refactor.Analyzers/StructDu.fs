@@ -123,7 +123,20 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
 
                         let namingOk = casesWithFields <= 1 || allNamed
 
-                        if not fields.IsEmpty && allSmall && namingOk then
+                        // FS3585: in a struct DU, same-named fields across
+                        // cases must also agree on TYPE — `A of value: float`
+                        // plus `B of value: int` refuses to compile once the
+                        // attribute lands. Spelled-type comparison suffices:
+                        // the small-value whitelist keeps types to plain names
+                        let sameNameSameType =
+                            casesWithFields <= 1
+                            || fields
+                               |> List.choose (fun (SynField(idOpt = idOpt; fieldType = t)) ->
+                                   idOpt |> Option.map (fun id -> id.idText, textOfRange source t.Range))
+                               |> List.groupBy fst
+                               |> List.forall (fun (_, group) -> group |> List.map snd |> List.distinct |> List.length <= 1)
+
+                        if not fields.IsEmpty && allSmall && namingOk && sameNameSameType then
                             // below any XML doc, so the attribute sits
                             // against the type it marks
                             let insertPos = attributeInsertPos source decl.Range

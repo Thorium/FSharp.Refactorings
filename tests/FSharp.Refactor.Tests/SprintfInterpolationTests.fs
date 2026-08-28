@@ -91,3 +91,7 @@ let ``bool holes stay untyped because percent-b lowercases`` () =
 [<Fact>]
 let ``float holes stay untyped because percent-f pads`` () =
     Assert.Empty(holesIn "let f (price: float) (n: int) = $\"%d{n} at {price}\"")
+
+[<Fact>]
+let ``the qualified Printf spelling converts too`` () =
+    assertSprintfFix "module Test\nlet f (x: string) = Printf.sprintf \"asdf %s\" x" "$\"asdf %s{x}\""

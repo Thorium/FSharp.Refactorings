@@ -80,7 +80,38 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 | SynExpr.LetOrUse lou when lou.IsRecursive && not lou.IsBang -> fromBindings true lou.Bindings
                 | _ -> [])
 
-        fromDecls @ fromExprs
+        // members are implicitly recursive — there is no `rec` keyword to
+        // find — and OO-style tree APIs are precisely where recursive seqs
+        // live: `member this.Descendants() = seq { for c in children do
+        // yield! c.Descendants() }`. Their self-calls are dotted, so these
+        // bindings match dotted call spellings too (third tuple element).
+        let fromMembers =
+            index.Decls
+            |> Array.toList
+            |> List.collect (fun (_, decl) ->
+                match decl with
+                | SynModuleDecl.Types(typeDefns = defns) ->
+                    defns
+                    |> List.collect (fun (SynTypeDefn(typeRepr = repr; members = extra)) ->
+                        let ofMembers (members: SynMemberDefn list) =
+                            members
+                            |> List.collect (fun m ->
+                                match m with
+                                | SynMemberDefn.Member(
+                                    memberDefn = SynBinding(
+                                        headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = ids)); expr = body)) when
+                                    not ids.IsEmpty
+                                    ->
+                                    [ (List.last ids).idText, body.Range, true ]
+                                | _ -> [])
+
+                        (match repr with
+                         | SynTypeDefnRepr.ObjectModel(members = ms) -> ofMembers ms
+                         | _ -> [])
+                        @ ofMembers extra)
+                | _ -> [])
+
+        ((fromDecls @ fromExprs) |> List.map (fun (n, r) -> n, r, false)) @ fromMembers
 
     // seq-builder CE bodies
     let seqBodies =
@@ -93,24 +124,33 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 Some(builder, body.Range)
             | _ -> None)
 
-    [ for name, bodyRange in recBindings do
+    [ for name, bodyRange, allowDotted in recBindings do
           // seq bodies belonging to this binding
           let ownSeqs =
               seqBodies
               |> Array.filter (fun (_, seqRange) -> Range.rangeContainsRange bodyRange seqRange)
 
-          // the first self-reference inside any of them
+          let inOwnSeq (r: range) =
+              ownSeqs
+              |> Array.tryPick (fun (builder, seqRange) ->
+                  if Range.rangeContainsRange seqRange r then
+                      Some(r, builder)
+                  else
+                      None)
+
+          // the first self-reference inside any of them. A member's
+          // re-entry is dotted (`c.Descendants`); matching the last ident
+          // by name accepts some imprecision, fair for an advice-only rule
           let selfCall =
               index.Exprs
               |> Array.tryPick (fun (_, e) ->
                   match e with
-                  | SynExpr.Ident id when id.idText = name ->
-                      ownSeqs
-                      |> Array.tryPick (fun (builder, seqRange) ->
-                          if Range.rangeContainsRange seqRange id.idRange then
-                              Some(id.idRange, builder)
-                          else
-                              None)
+                  | SynExpr.Ident id when id.idText = name -> inOwnSeq id.idRange
+                  | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
+                  | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when
+                      allowDotted && not ids.IsEmpty && (List.last ids).idText = name
+                      ->
+                      inOwnSeq (List.last ids).idRange
                   | _ -> None)
 
           match selfCall with

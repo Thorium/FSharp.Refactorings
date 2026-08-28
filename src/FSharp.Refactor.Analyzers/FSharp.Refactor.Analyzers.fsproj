@@ -69,6 +69,10 @@
     <Compile Include="ObjectDesign.fs" />
     <Compile Include="OptionMatch.fs" />
     <Compile Include="LoopPerf.fs" />
+    <Compile Include="IndexedLoop.fs" />
+    <Compile Include="ListIndexing.fs" />
+    <Compile Include="TypeTestChain.fs" />
+    <Compile Include="RecursiveAppend.fs" />
     <Compile Include="TypeChecks.fs" />
     <Compile Include="CharOverload.fs" />
     <Compile Include="CaseInsensitive.fs" />

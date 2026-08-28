@@ -43,6 +43,17 @@ let private aggregationModules = set [ "Array"; "Seq" ]
 /// semantics (floats excluded: NaN handling differs between the worlds).
 let private vectorizedElements = set [ "System.Int32"; "System.Int64" ]
 
+/// The aggregated array: a bare name or a dotted path (this.samples,
+/// state.Buffer). Resolution happens on the LAST ident — the field or
+/// property that actually carries the array type.
+[<return: Struct>]
+let private (|ArrPath|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Ident id -> ValueSome(id, id.idText)
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+        ValueSome(List.last ids, identText ids)
+    | _ -> ValueNone
+
 /// `<m>.<fn> arr` / `arr |> <m>.<fn>` for an aggregation function.
 [<return: Struct>]
 let private (|ArrayAggregation|_|) (e: SynExpr) =
@@ -50,12 +61,12 @@ let private (|ArrayAggregation|_|) (e: SynExpr) =
     | SynExpr.App(
         isInfix = false
         funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))
-        argExpr = SynExpr.Ident arr) when aggregationModules.Contains m.idText && vectorizedFunctions.Contains f.idText ->
-        ValueSome(m.idText, f.idText, arr)
-    | PipeApp(SynExpr.Ident arr, SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))) when
+        argExpr = ArrPath(arr, text)) when aggregationModules.Contains m.idText && vectorizedFunctions.Contains f.idText ->
+        ValueSome(m.idText, f.idText, arr, text)
+    | PipeApp(ArrPath(arr, text), SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))) when
         aggregationModules.Contains m.idText && vectorizedFunctions.Contains f.idText
         ->
-        ValueSome(m.idText, f.idText, arr)
+        ValueSome(m.idText, f.idText, arr, text)
     | _ -> ValueNone
 
 /// Does the identifier resolve to an int[]/int64[]?
@@ -63,20 +74,25 @@ let private resolvesToVectorizableArray (check: FSharpCheckFileResults) (source:
     let r = ident.idRange
     let lineText = source.GetLineString(r.EndLine - 1)
 
+    let vectorizable (t: FSharpType) =
+        try
+            let t = OptionModule.stripAbbreviations t
+
+            t.HasTypeDefinition
+            && t.TypeDefinition.IsArrayType
+            && t.GenericArguments.Count = 1
+            && (OptionModule.stripAbbreviations t.GenericArguments.[0]).TypeDefinition.TryFullName
+               |> Option.exists vectorizedElements.Contains
+        with _ ->
+            false
+
     match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with
     | Some symbolUse ->
         match symbolUse.Symbol with
-        | :? FSharpMemberOrFunctionOrValue as value ->
-            try
-                let t = OptionModule.stripAbbreviations value.FullType
-
-                t.HasTypeDefinition
-                && t.TypeDefinition.IsArrayType
-                && t.GenericArguments.Count = 1
-                && (OptionModule.stripAbbreviations t.GenericArguments.[0]).TypeDefinition.TryFullName
-                   |> Option.exists vectorizedElements.Contains
-            with _ ->
-                false
+        | :? FSharpMemberOrFunctionOrValue as value -> vectorizable value.FullType
+        // a record field: `state.Buffer |> Array.sum` resolves Buffer to
+        // FSharpField, not a member-or-value
+        | :? FSharpField as field -> vectorizable field.FieldType
         | _ -> false
     | None -> false
 
@@ -90,9 +106,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
         [ for _, expr in index.Exprs do
               match expr with
-              | ArrayAggregation(m, fn, arr) when resolvesToVectorizableArray check source arr ->
+              | ArrayAggregation(m, fn, arr, arrText) when resolvesToVectorizableArray check source arr ->
                   { Range = expr.Range
                     ModuleName = m
                     FunctionName = fn
-                    ArrayName = arr.idText }
+                    ArrayName = arrText }
               | _ -> () ]

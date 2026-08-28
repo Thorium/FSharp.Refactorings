@@ -66,7 +66,10 @@ let private charLiteral (c: char) =
 [<return: Struct>]
 let private (|SingleCharString|_|) (e: SynExpr) =
     match e with
-    | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) when text.Length = 1 ->
+    // all three kinds: `@"\"` is THE spelling of a backslash in path code,
+    // and the AST's text is already decoded either way (the FR0015 lesson)
+    | SynExpr.Const(SynConst.String(text, (SynStringKind.Regular | SynStringKind.Verbatim | SynStringKind.TripleQuote), _),
+                    _) when text.Length = 1 ->
         ValueSome(text.[0], e.Range)
     | _ -> ValueNone
 

@@ -43,6 +43,23 @@ let ``raise inside a lambda cannot become reraise`` () =
     )
 
 [<Fact>]
+let ``raise in a handler inside a computation expression stays put`` () =
+    // from the corpus (SQLProvider Providers.SQLite): a try-with inside
+    // task { } desugars its handler into a lambda passed to builder.TryWith,
+    // where reraise () is error FS0413
+    Assert.Empty(
+        reraiseIn
+            "let f (act: unit -> System.Threading.Tasks.Task) =\n    task {\n        try do! act ()\n        with ex ->\n            printfn \"%s\" ex.Message\n            raise ex\n    }"
+    )
+
+[<Fact>]
+let ``a lambda body inside a computation expression is ordinary code again`` () =
+    // the lambda compiles to its own method; its handler is a real catch
+    // block again, so reraise () is fine there
+    assertReraise
+        "let f (act: unit -> int) =\n    async {\n        let g = fun () -> try act () with ex -> raise ex\n        return g ()\n    }"
+
+[<Fact>]
 let ``raise inside a nested handler refers to the inner exception`` () =
     Assert.Empty(
         reraiseIn

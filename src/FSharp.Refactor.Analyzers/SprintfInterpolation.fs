@@ -41,6 +41,11 @@ let rec private collectSpine (args: SynExpr list) (e: SynExpr) =
     match e with
     | SynExpr.App(isInfix = false; funcExpr = f; argExpr = a) -> collectSpine (a :: args) f
     | SingleIdent id when id.idText = "sprintf" -> ValueSome(id, args)
+    // the qualified spelling resolves to the same function
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ printfId; id ])) when
+        printfId.idText = "Printf" && id.idText = "sprintf"
+        ->
+        ValueSome(id, args)
     | _ -> ValueNone
 
 /// A simple argument that reads well inside `{...}` and cannot contain

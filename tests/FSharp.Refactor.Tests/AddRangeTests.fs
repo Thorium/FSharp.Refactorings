@@ -59,3 +59,12 @@ let ``loop over an expression source is parenthesized`` () =
     assertAddRange
         "let f (acc: ResizeArray<int>) (xs: int list) =\n    for x in List.rev xs do\n        acc.Add x"
         "acc.AddRange (List.rev xs)"
+
+[<Fact>]
+let ``an element reading a mutable local keeps its loop`` () =
+    // the element would move into a fabricated Seq.map lambda, where
+    // capturing a mutable local was FS0407 before F# 10
+    Assert.Empty(
+        addRangeIn
+            "let f (xs: int list) =\n    let acc = ResizeArray<int>()\n    let mutable offset = 1\n    for x in xs do\n        acc.Add(x + offset)\n    acc"
+    )

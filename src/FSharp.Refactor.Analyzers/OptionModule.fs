@@ -175,6 +175,56 @@ let private rewrite
             $"{m}.map + {target}"
         )
 
+/// Would code moved from `bodyRange` into a fabricated lambda capture a
+/// MUTABLE LOCAL (an expression-level `let mutable`) or a byref parameter
+/// declared outside it? A match arm may write `total <- total + v` freely;
+/// the closure these rules manufacture around the same code was error
+/// FS0407 on every F# before 10, and byref capture still is. Shared by the
+/// rules that wrap a branch body in `fun ... ->` (Option/Result wrappers,
+/// OptionMatch, AddRange).
+let capturesMutableLocal (index: AstIndex.Index) (bodyRange: range) : bool =
+    let mutableNames =
+        index.Exprs
+        |> Array.collect (fun (_, e) ->
+            match e with
+            | SynExpr.LetOrUse lou when not (Range.rangeContainsRange bodyRange lou.Range) ->
+                lou.Bindings
+                |> List.choose (fun (SynBinding(isMutable = isMut; headPat = p)) ->
+                    if isMut then
+                        match p with
+                        | SynPat.Named(ident = SynIdent(ident = id)) -> Some id.idText
+                        | _ -> None
+                    else
+                        None)
+                |> Array.ofList
+            | _ -> [||])
+
+    let byrefNames =
+        index.Pats
+        |> Array.choose (fun (_, p) ->
+            match p with
+            | SynPat.Typed(
+                pat = SynPat.Named(ident = SynIdent(ident = id))
+                targetType = SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = tids)))) when
+                not tids.IsEmpty
+                && (let t = (List.last tids).idText in t = "byref" || t = "inref" || t = "outref")
+                ->
+                Some id.idText
+            | _ -> None)
+
+    let names = Set.ofArray (Array.append mutableNames byrefNames)
+
+    not names.IsEmpty
+    && index.Exprs
+       |> Array.exists (fun (_, e) ->
+           match e with
+           | SynExpr.Ident id -> names.Contains id.idText && Range.rangeContainsRange bodyRange id.idRange
+           | SynExpr.LongIdent(longDotId = SynLongIdent(id = first :: _)) ->
+               names.Contains first.idText && Range.rangeContainsRange bodyRange first.idRange
+           | SynExpr.LongIdentSet(SynLongIdent(id = first :: _), _, _) ->
+               names.Contains first.idText && Range.rangeContainsRange bodyRange e.Range
+           | _ -> false)
+
 let private findCandidates (cfg: WrapperConfig) (parseTree: ParsedInput) (source: ISourceText) : Candidate list =
     let candidates = ResizeArray<Candidate>()
 
@@ -208,6 +258,8 @@ let private findCandidates (cfg: WrapperConfig) (parseTree: ParsedInput) (source
                         && isSingleLine noneBody.Range
                         && isPlainBody someBody
                         && isPlainBody noneBody
+                        && not (capturesMutableLocal (AstIndex.ofTree parseTree) someBody.Range)
+                        && not (capturesMutableLocal (AstIndex.ofTree parseTree) noneBody.Range)
                         ->
                         match rewrite cfg source scrutinee boundVar someBody noneBody with
                         | Some(replacement, target) ->
@@ -299,6 +351,8 @@ let resolvesToCoreOperator (check: FSharpCheckFileResults) (source: ISourceText)
 
             fullName.StartsWith "Microsoft.FSharp.Core.Operators"
             || fullName.StartsWith "Microsoft.FSharp.Core.ExtraTopLevelOperators"
+            // the qualified printf family: Printf.sprintf and friends
+            || fullName.StartsWith "Microsoft.FSharp.Core.Printf"
         | _ -> false
     | None -> false
 

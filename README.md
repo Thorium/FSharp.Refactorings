@@ -74,7 +74,7 @@ NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT 
 Reference the package from the project you want analyzed:
 
 ```xml
-<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.5.0" PrivateAssets="all" />
+<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.6.0" PrivateAssets="all" />
 ```
 
 then point Ionide at the restored analyzers in `.vscode/settings.json`:
@@ -83,7 +83,7 @@ then point Ionide at the restored analyzers in `.vscode/settings.json`:
 {
   "FSharp.enableAnalyzers": true,
   "FSharp.analyzersPath": [
-    "~/.nuget/packages/fsharp.refactor.analyzers/0.5.0/analyzers/dotnet/fs"
+    "~/.nuget/packages/fsharp.refactor.analyzers/0.6.0/analyzers/dotnet/fs"
   ]
 }
 ```
@@ -95,7 +95,7 @@ appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 
 ```bash
 dotnet tool install --global fsharp-analyzers
-fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.5.0/analyzers/dotnet/fs --code-root . --report analysis.sarif
+fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.6.0/analyzers/dotnet/fs --code-root . --report analysis.sarif
 ```
 
 `fsharp-analyzers` is the analyzer HOST, and it is the dotnet tool you
@@ -151,8 +151,8 @@ Every rule is one of four kinds, shown in the last column of
 | Kind | | Count |
 |---|---|---|
 | `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 30 |
-| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 26 |
-| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 29 |
+| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 28 |
+| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 31 |
 | `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 14 |
 
 This matters when the repository is not yours. Running everything over a
@@ -253,7 +253,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0034 | `if x.IsSome then x.Value + 1 else e` → `match x with \| Some v -> v + 1 \| None -> e` (`.Value` throws when misused; the match cannot); handles the `IsNone`/negated forms, else-less unit `if`, `x.Value.P` prefixes, and spells `ValueSome`/`ValueNone` when the receiver is a voption (typed-gated, so custom `IsSome`/`Value` members never match); boolean combos rewrite to combinators — `x.IsSome && p x.Value` → `Option.exists`, `x.IsNone \|\| p x.Value` → `Option.forall`, chains join inside the lambda | idiom |
 | FR0035 | `List/Array/Seq.contains x ys` inside a loop — or inside a callback given to a collection function — scans `ys` linearly per iteration; note suggests building a Set once outside (probing the loop variable itself never fires) | performance |
 | FR0036 | Fragile runtime type comparisons (notes): `GetType().Name = "..."` breaks silently on renames/namespaces — compare types instead; `x.GetType() = typeof<T>` is exact-type equality — `x :? T` if subtypes are fine | correctness |
-| FR0037 | Build-once types constructed inside a loop: `ConcurrentDictionary`, `JsonSerializerOptions` (CA1869), `SearchValues.Create` (CA1870) — all expensive by design; note suggests hoisting out or making static | performance |
+| FR0037 | Build-once types constructed inside a loop: `ConcurrentDictionary`, `HttpClient`, `JsonSerializerOptions` (CA1869), `Regex`, `SearchValues.Create` (CA1870) — all expensive by design; note suggests hoisting out or making static. `HttpClient` gets its own wording: per-iteration construction exhausts sockets under load, and the right lifetime (a shared instance, or `IHttpClientFactory` under DI) is the author's call | performance |
 | FR0038 | Char overloads for single-character strings (CA1834/1847/1865-67): `s.Contains "x"` → `s.Contains 'x'` and `sb.Append "x"` → `sb.Append 'x'` (both ordinal already — fix); `s.StartsWith("x", StringComparison.Ordinal)` → `s.StartsWith('x')` (fix); bare `StartsWith`/`EndsWith`/`IndexOf` are culture-sensitive where the char overload is ordinal, so those get an advisory note only; receivers typed-gated to `String`/`StringBuilder` | performance |
 | FR0039 | Allocating case-insensitive comparisons (CA1862, note): `a.ToLower() = b.ToLower()` and `s.ToLower().StartsWith "abc"` allocate lowered copies just to compare; `String.Equals(a, b, StringComparison...IgnoreCase)` / the comparison overloads are allocation-free — comparison type stays the author's deliberate choice | performance |
 | FR0040 | Redundant membership guards (CA1853/1868, fix): `if d.ContainsKey k then d.Remove k \|> ignore` → `d.Remove k \|> ignore`, `if not (s.Contains x) then s.Add x \|> ignore` → `s.Add x \|> ignore` — the operations already return `false` on a miss; typed-gated to `Dictionary`/`HashSet`/`SortedSet` | performance |
@@ -315,7 +315,11 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0097 | Redundant parentheses around a type: `(x: (int))` → `(x: int)`, `(string) list` → `string list`. Function and tuple types keep theirs, where the parens bind the type together | cosmetic |
 | FR0098 | The BCL name of a type F# abbreviates: `System.Int32` → `int`, `System.String` → `string`, `System.Object` → `obj`. Only the fully qualified form; a bare `Int32` depends on the opens and on what the file declares | cosmetic |
 | FR0099 | A `;` ending a line does nothing in light syntax: `let x = 1;` → `let x = 1`. Kept where it separates rather than terminates — inside a list, array, record, anonymous record or attribute group — and everywhere in a file that sets `#light "off"`. `;;` is left alone | cosmetic |
-| FR0100 | A match branch that says it is unfinished and then returns a stand-in — `\| Jordan ->` / `// Not supported yet` / `None` — becomes `raise (NotImplementedException())`, so the gap reports itself instead of reaching callers as a real-looking result. The comment must sit inside the branch, between the arrow and the value, where it describes that branch and nothing else; a bare `TODO` elsewhere never counts, and `\| Unknown -> None` with no such comment is left alone. `null` and `Unchecked.defaultof<_>` need no comment. Only fires where sibling branches actually compute, so a table of constants is not mistaken for a stub | correctness |
+| FR0100 | A match branch that says it is unfinished and then returns a stand-in — `\| Jordan ->` / `// Not supported yet` / `None` — becomes `raise (NotImplementedException())`, so the gap reports itself instead of reaching callers as a real-looking result. The comment must sit inside the branch, between the arrow and the value, where it describes that branch and nothing else; a bare `TODO` elsewhere never counts, and `\| Unknown -> None` with no such comment is left alone. `null` and `Unchecked.defaultof<_>` need the comment too — `\| [] -> Unchecked.defaultof<'T>` is the entire contract of a SingleOrDefault, and `\| null -> null` passes a sentinel through. Only fires where sibling branches actually compute, so a table of constants is not mistaken for a stub | correctness |
+| FR0101 | The Python `range(len(xs))` loop: `for i in 0 .. xs.Length - 1 do ... xs.[i]` → `for x in xs do ... x`, when the index's every use is indexing that same collection. Fix rewrites the header and each `xs.[i]`/`xs[i]`; an index also used as a value wants `iteri`, which changes shape enough to stay the author's call, and any `xs.[i] <- ...` keeps the loop | idiom |
+| FR0102 | Positional indexing into an F# LIST inside a loop — `names.[i]` walks i cons cells per access, the quietest quadratic in F#. Typed: arrays, ResizeArray and dictionaries share the syntax and are fine; `List.item`/`List.nth` pin the type by name. Constant indexes (`xs.[0]`) and receivers bound inside the loop are skipped. Advice: iterate directly (FR0101 fixes the canonical shape) or convert once with `List.toArray` | performance |
+| FR0103 | The Python isinstance ladder: an if/elif chain of `shape :? T` tests with `shape :?> T` casts in the branches becomes one `match` with `\| :? T as v ->` patterns — one type test per branch instead of test-plus-cast, and the unsafe `:?>` (an InvalidCastException waiting for a branch reorder) disappears. Needs two or more bare type-tests on the same plain identifier, single-line branches, and every cast targeting its own branch's type; a compound condition or a cross-cast keeps the chain | idiom |
+| FR0104 | A singleton append to an accumulator in a RECURSIVE call — `collect (acc @ [x]) rest` copies the whole accumulator every step, O(n²), and it is the shape first drafts produce more when told to avoid mutation. Note only: the repair is `x :: acc` with one `List.rev` in the base case, or an array/ResizeArray when the result is consumed positionally — the base case changes either way. A general `a @ b` merge is left alone | performance |
 | — | DU case payload → named record (cross-file) | needs FSAC codefix infra |
 
 ## Configuration

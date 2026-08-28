@@ -99,3 +99,12 @@ let ``static type-level mutable never assigned is flagged`` () =
     match suggestions with
     | [ s ] -> Assert.Equal("shared", s.Name)
     | other -> failwithf "Expected exactly one static mutable suggestion, got %A" other
+
+[<Fact>]
+let ``an attributed accessor keeps its shape`` () =
+    // the member-val rewrite replaces the member's whole range, which
+    // includes the attribute list — [<Obsolete>] would silently vanish
+    Assert.Empty(
+        autoPropIn
+            "module Test\ntype Person() =\n    let mutable name = \"\"\n    [<System.Obsolete \"use X\">]\n    member this.Name\n        with get () = name\n        and set v = name <- v"
+    )

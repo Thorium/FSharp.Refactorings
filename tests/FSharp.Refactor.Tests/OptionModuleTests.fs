@@ -177,3 +177,10 @@ let ``dotted default is treated as effectful and uses defaultWith`` () =
         "let f (x: System.DateTime option) = match x with | Some v -> v | None -> System.DateTime.Now"
         "Option.defaultWith"
         "x |> Option.defaultWith (fun () -> System.DateTime.Now)"
+
+[<Fact>]
+let ``a branch writing a mutable local cannot become an iter lambda`` () =
+    // the arm may write `total` freely; the fabricated closure could not
+    // on F# before 10 (FS0407)
+    assertNoSuggestion
+        "let f (x: int option) =\n    let mutable total = 0\n    match x with\n    | Some v -> total <- total + v\n    | None -> ()\n    total"

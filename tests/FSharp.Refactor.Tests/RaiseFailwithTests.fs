@@ -103,3 +103,9 @@ let ``wrapping a different value is left alone`` () =
 [<Fact>]
 let ``property access is left alone`` () =
     Assert.Empty(ofObjIn "let f (s: string) = if isNull s then None else Some (s.Trim())")
+
+[<Fact>]
+let ``a named-argument constructor keeps its raise`` () =
+    // `Exception(message = "boom")` parses its argument as an op_Equality
+    // application — `failwith (message = "boom")` would not compile
+    Assert.Empty(raiseIn "module Test\nlet f () = raise (System.Exception(message = \"boom\"))")

@@ -74,7 +74,7 @@ let ``FR0012: a method call substituted as an argument keeps its parentheses`` (
     let tree, sourceText =
         parse "module Test\nopen System\nlet isCI = Environment.GetEnvironmentVariable(\"CI\") <> null"
 
-    match HintEngine.find [] tree sourceText with
+    match HintEngine.find [] tree sourceText None with
     | [ s ] ->
         // and F# brackets the whole application: (f x), never (f(x))
         Assert.Equal("not (isNull (Environment.GetEnvironmentVariable \"CI\"))", s.ReplacementText)
@@ -115,7 +115,7 @@ let ``FR0012: a multi-argument call keeps its argument list`` () : unit =
 
     let tree, sourceText = parse source
 
-    match HintEngine.find [] tree sourceText with
+    match HintEngine.find [] tree sourceText None with
     | [ s ] ->
         Assert.Equal("not (isNull (IO.Path.Combine(a, b)))", s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
@@ -202,3 +202,20 @@ let ``FR0011: return Struct goes below the doc comment too`` () : unit =
         Assert.StartsWith("/// Matches even numbers.\n[<return: Struct>]\nlet private (|Even|_|)", patched)
         Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
     | other -> failwithf "Expected exactly one struct active pattern, got %A" other
+
+[<Fact>]
+let ``a struct DU needs same-named fields to agree on type`` () : unit =
+    // FS3585: `A of value: float | B of value: int` refuses [<Struct>]
+    let tree, sourceText =
+        parse "module Test\nmodule private Impl =\n    type Mixed =\n        | A of value: float\n        | B of value: int"
+
+    Assert.Empty(StructDu.find false tree sourceText)
+
+[<Fact>]
+let ``same-named fields of one type still take the attribute`` () : unit =
+    let tree, sourceText =
+        parse "module Test\nmodule private Impl =\n    type Same =\n        | A of value: int\n        | B of value: int"
+
+    match StructDu.find false tree sourceText with
+    | [ s ] -> Assert.Equal("Same", s.TypeName)
+    | other -> failwithf "Expected exactly one struct suggestion, got %A" other

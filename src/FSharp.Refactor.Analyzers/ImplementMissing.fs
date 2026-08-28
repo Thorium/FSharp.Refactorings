@@ -152,8 +152,14 @@ let private nameOf (required: Required) =
     | Property(name, _, _) -> name
 
 /// Find object expressions with missing interface members. Runs on files
-/// WITH errors by design.
+/// WITH errors by design — and ONLY on files with errors: a file that
+/// type-checks cleanly has no missing members, whatever this rule's
+/// name-matching heuristics conclude about it.
 let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
+    if not (OptionModule.hasErrors check) then
+        []
+    else
+
     let index = AstIndex.ofTree parseTree
 
     [ for _, expr in index.Exprs do
@@ -214,11 +220,16 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                     then
                                         let baseEntity = baseType.TypeDefinition
 
+                                        // members implemented in the MAIN block satisfy inherited
+                                        // interfaces too: `{ new IDbConnection with ...
+                                        // member _.Dispose() = ... }` compiles, Dispose covering
+                                        // IDisposable — stubbing it again would double-implement
                                         let implemented =
                                             implementedPerInterface
                                             |> List.tryPick (fun (n, ns) ->
                                                 if n = baseEntity.DisplayName then Some ns else None)
                                             |> Option.defaultValue Set.empty
+                                            |> Set.union implementedMain
 
                                         match requiredMembers baseEntity with
                                         | Some(baseName, required) ->

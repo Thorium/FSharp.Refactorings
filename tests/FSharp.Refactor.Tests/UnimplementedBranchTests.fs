@@ -84,10 +84,23 @@ let ``a branch that does real work is untouched`` () =
     assertNoSuggestion (dispatch "    | Jordan ->\n        // not supported yet\n        f 3")
 
 [<Fact>]
-let ``null needs no comment`` () =
+let ``null with a stub comment is accused`` () =
     let source =
-        "module Test\ntype M = A | B\nlet f (x: int) : string = string x\nlet g m =\n    match m with\n    | A -> f 1\n    | B -> null"
+        "module Test\ntype M = A | B\nlet f (x: int) : string = string x\nlet g m =\n    match m with\n    | A -> f 1\n    | B ->\n        // not implemented\n        null"
 
     match findIn source with
     | [ s ] -> Assert.Equal("raise (System.NotImplementedException())", s.ReplacementText)
     | other -> failwithf "Expected one suggestion for null, got %A" other
+
+[<Fact>]
+let ``null without a comment is an ordinary value`` () =
+    // from the corpus (SQLProvider): `| null -> null` passes a sentinel
+    // through, and `| [] -> Unchecked.defaultof<'T>` IS SingleOrDefault's
+    // contract — no value shape accuses itself
+    assertNoSuggestion
+        "module Test\ntype M = A | B\nlet f (x: int) : string = string x\nlet g m =\n    match m with\n    | A -> f 1\n    | B -> null"
+
+[<Fact>]
+let ``defaultof without a comment is an ordinary value`` () =
+    assertNoSuggestion
+        "module Test\nlet single (xs: int list) =\n    match xs with\n    | [ x ] -> x + 1\n    | _ -> Unchecked.defaultof<int>"

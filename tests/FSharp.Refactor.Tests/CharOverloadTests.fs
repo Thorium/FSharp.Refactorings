@@ -50,3 +50,10 @@ let ``multi-character strings are left alone`` () =
 [<Fact>]
 let ``list Contains is not the string method`` () =
     Assert.Empty(charOverloadsIn "let f (xs: System.Collections.Generic.List<string>) = xs.Contains \"x\"")
+
+[<Fact>]
+let ``a verbatim single-char string is the char overload too`` () =
+    // @"\" is THE spelling of a backslash in path code — the FR0015 lesson.
+    // Contains, because StartsWith(string) is culture-sensitive and only
+    // ever gets the advisory tier
+    assertCharFix "let f (s: string) = s.Contains @\"\\\"" "'\\\\'"

@@ -119,6 +119,8 @@ let private categories =
       "FR0076", Category.Performance
       "FR0079", Category.Performance
       "FR0093", Category.Performance
+      "FR0102", Category.Performance // list indexing in a loop is O(i) per access
+      "FR0104", Category.Performance // singleton append per recursive call is O(n²)
 
       // --- idiom: same behaviour, written the way F# writes it
       "FR0001", Category.Idiom
@@ -150,6 +152,8 @@ let private categories =
       "FR0091", Category.Idiom
       "FR0092", Category.Idiom
       "FR0095", Category.Idiom
+      "FR0101", Category.Idiom // index-based loop over a collection it only indexes
+      "FR0103", Category.Idiom // isinstance-style type-test ladders as match
 
       // --- cosmetic: punctuation and spelling of code
       "FR0013", Category.Cosmetic

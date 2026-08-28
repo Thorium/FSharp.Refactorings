@@ -261,3 +261,41 @@ let ``a triple-quoted pattern is seen too`` () =
     assertRegexFix
         "module Test\nopen System.Text.RegularExpressions\nlet f (s: string) = Regex.IsMatch(s, \"\"\"^abc\"\"\")"
         "s.StartsWith \"abc\""
+
+[<Fact>]
+let ``an ignored async call result is flagged`` () =
+    // the real fire-and-forget bug is a direct call ignored, not a named
+    // binding: `saveAsync user |> ignore`
+    let suggestions =
+        discardedAsyncIn "let save (n: int) : Async<unit> = async { return () }\nlet f () = save 1 |> ignore"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("save", s.Name)
+    | other -> failwithf "Expected exactly one ignored-call suggestion, got %A" other
+
+[<Fact>]
+let ``direct ignore of a call result is flagged`` () =
+    let suggestions =
+        discardedAsyncIn "let save (n: int) : Async<unit> = async { return () }\nlet f () = ignore (save 1)"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("save", s.Name)
+    | other -> failwithf "Expected exactly one direct-ignore-call suggestion, got %A" other
+
+[<Fact>]
+let ``a partially applied async function is a different mistake`` () =
+    // `save2 1` is a FUNCTION, not an Async — this rule stays quiet
+    Assert.Empty(
+        discardedAsyncIn
+            "let save2 (a: int) (b: int) : Async<unit> = async { return () }\nlet f () = save2 1 |> ignore"
+    )
+
+[<Fact>]
+let ``a piped construction of the async is flagged too`` () =
+    let suggestions =
+        discardedAsyncIn
+            "let makeAsync (n: int) : Async<unit> = async { return () }\nlet f () = 1 |> makeAsync |> ignore"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("makeAsync", s.Name)
+    | other -> failwithf "Expected exactly one piped suggestion, got %A" other

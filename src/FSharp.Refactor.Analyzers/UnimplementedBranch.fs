@@ -27,9 +27,11 @@
 ///
 ///     | Unknown -> None       // genuinely has no area
 ///
-/// So a weak placeholder needs the comment to accuse it. Only the two values
-/// nobody produces on purpose — `null` and `Unchecked.defaultof<_>` — are
-/// taken as stubs on their own.
+/// So every placeholder needs the comment to accuse it — `null` and
+/// `Unchecked.defaultof<_>` included. They looked like values nobody
+/// produces on purpose, until the corpus produced them on purpose:
+/// `| [] -> Unchecked.defaultof<'T>` is the entire contract of a
+/// SingleOrDefault, and `| null -> null` passes a sentinel through.
 ///
 /// The fix is safe to apply here in a way it would not be for a whole
 /// function body: the sibling branches already fix the type, so substituting
@@ -70,38 +72,35 @@ let private saysUnfinished (comment: string) =
     let text = comment.ToLowerInvariant()
     stubPhrases |> List.exists text.Contains
 
-/// Values that stand in for a result. `Unchecked.defaultof` and `null` are
-/// strong enough to accuse on their own; the rest are ordinary values that
-/// only a comment turns into evidence.
-[<RequireQualifiedAccess>]
-type private Placeholder =
-    | Strong
-    | Weak
-
-let private placeholderKind (e: SynExpr) =
+/// Values that stand in for a result. All of them are ordinary values that
+/// only a comment turns into evidence — `null` and `Unchecked.defaultof`
+/// included: `| [] -> Unchecked.defaultof<'T>` is the entire CONTRACT of a
+/// SingleOrDefault, and `| null -> null` passes a sentinel through, both
+/// found in the corpus. No value shape accuses itself.
+let private isPlaceholder (e: SynExpr) =
     match e with
-    | SynExpr.Null _ -> Some Placeholder.Strong
+    | SynExpr.Null _ -> true
     | SynExpr.App(funcExpr = SynExpr.TypeApp(expr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))))
     | SynExpr.TypeApp(expr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))) when
         ids |> List.map (fun i -> i.idText) |> String.concat "." = "Unchecked.defaultof"
         ->
-        Some Placeholder.Strong
-    | SynExpr.Ident id when id.idText = "None" || id.idText = "ValueNone" -> Some Placeholder.Weak
-    | SynExpr.ArrayOrList(exprs = []) -> Some Placeholder.Weak
+        true
+    | SynExpr.Ident id when id.idText = "None" || id.idText = "ValueNone" -> true
+    | SynExpr.ArrayOrList(exprs = []) -> true
     | SynExpr.Const(constant = c) ->
         match c with
-        | SynConst.String(text = "") -> Some Placeholder.Weak
+        | SynConst.String(text = "") -> true
         | SynConst.Int32 0
-        | SynConst.Int64 0L -> Some Placeholder.Weak
-        | SynConst.Double 0.0 -> Some Placeholder.Weak
-        | _ -> None
+        | SynConst.Int64 0L -> true
+        | SynConst.Double 0.0 -> true
+        | _ -> false
     // a qualified spelling — `Option.None`, `ValueOption.ValueNone`
     | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) ->
         match (List.last ids).idText with
         | "None"
-        | "ValueNone" -> Some Placeholder.Weak
-        | _ -> None
-    | _ -> None
+        | "ValueNone" -> true
+        | _ -> false
+    | _ -> false
 
 /// Every comment in the file, as (range, text).
 let private commentsOf (parseTree: ParsedInput) (source: ISourceText) =
@@ -144,7 +143,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
         let siblingsCompute =
             clauses
             |> List.exists (fun (SynMatchClause(resultExpr = body)) ->
-                (placeholderKind body).IsNone
+                not (isPlaceholder body)
                 && match body with
                    | SynExpr.App _
                    | SynExpr.LetOrUse _
@@ -154,11 +153,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
         if siblingsCompute then
             for SynMatchClause(resultExpr = body; trivia = trivia) in clauses do
-                match placeholderKind body, trivia.ArrowRange with
-                | Some kind, Some arrow ->
-                    let accused = kind = Placeholder.Strong || accusedBy comments.Value arrow body.Range
-
-                    if accused then
+                match isPlaceholder body, trivia.ArrowRange with
+                | true, Some arrow ->
+                    if accusedBy comments.Value arrow body.Range then
                         suggestions.Add
                             { Range = body.Range
                               OriginalText = textOfRange source body.Range

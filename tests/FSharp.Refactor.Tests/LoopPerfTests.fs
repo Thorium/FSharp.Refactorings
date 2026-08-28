@@ -147,3 +147,15 @@ let ``Regex built outside a loop is fine`` () =
             "module Test\nopen System.Text.RegularExpressions\nlet r = Regex \"a+\"\nlet f (x: string) = r.IsMatch x"
 
     Assert.Empty constructions
+
+[<Fact>]
+let ``a field-held collection probed in a loop is noted`` () =
+    // collections routinely live in a config record — `config.Excluded`
+    // is loop-invariant exactly when its root is
+    let contains, _ =
+        loopPerfIn
+            "module Test\ntype Config = { Excluded: int list }\nlet f (config: Config) (xs: int list) =\n    for x in xs do\n        if List.contains x config.Excluded then printfn \"%d\" x"
+
+    match contains with
+    | [ s ] -> Assert.Equal("config.Excluded", s.CollectionName)
+    | other -> failwithf "Expected exactly one contains note, got %A" other

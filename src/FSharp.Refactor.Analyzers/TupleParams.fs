@@ -86,7 +86,7 @@ let private findCandidatesIn (scope: Visibility.Scope) (parseTree: ParsedInput) 
 
     let collector =
         { new SyntaxCollectorBase() with
-            override _.WalkSynModuleDecl(_path, decl) =
+            override _.WalkSynModuleDecl(path, decl) =
                 match decl with
                 | SynModuleDecl.Let(bindings = bindings) ->
                     for SynBinding(headPat = headPat) in bindings do
@@ -95,7 +95,7 @@ let private findCandidatesIn (scope: Visibility.Scope) (parseTree: ParsedInput) 
                             longDotId = SynLongIdent(id = [ ident ])
                             accessibility = accessibility
                             argPats = SynArgPats.Pats [ SynPat.Paren(pat = SynPat.Tuple(elementPats = elements)) as paren ]) when
-                            elements.Length >= 2 && isSingleLine paren.Range && scopeMatches accessibility
+                            elements.Length >= 2 && isSingleLine paren.Range && scopeMatches path accessibility
                             ->
                             candidates.Add
                                 { Ident = ident
@@ -195,7 +195,7 @@ let findApiChanges
     if hasErrors then
         []
     else
-        match findCandidatesIn Visibility.Scope.NonPrivate defFile.ParseTree with
+        match findCandidatesIn Visibility.Scope.Assembly defFile.ParseTree with
         | [] -> []
         | candidates ->
             // per-file application indexes, built lazily as uses arrive

@@ -129,3 +129,16 @@ let ``elif branch is never simplified`` () =
     // review regression: replacing the elif node with its condition would
     // glue the condition onto the preceding branch
     Assert.Empty(findParsed "module Test\nlet f a b (x: bool) = if a then x elif b then true else false")
+
+[<Fact>]
+let ``a shadowed collection module does not get isEmpty`` () =
+    // a user module named Seq with its own length means something else —
+    // with typed results at hand the symbol proves which one this is
+    Assert.Empty(
+        findChecked "module Seq =\n    let length (s: string) = 99\nlet f (s: string) = Seq.length s = 0"
+    )
+
+[<Fact>]
+let ``the genuine List.length still simplifies under the typed gate`` () =
+    let src = "let f (xs: int list) = List.length xs = 0"
+    assertCheckedSuggestion (findChecked src) src "List.isEmpty xs"

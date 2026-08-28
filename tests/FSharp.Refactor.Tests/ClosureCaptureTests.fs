@@ -94,3 +94,17 @@ let ``module-level subscription has no this to capture`` () =
             + "let src = Src()\nlet hook () = src.Fired.Add(fun n -> printfn \"%d\" n)"
         )
     )
+
+[<Fact>]
+let ``a method-group subscription pins this too`` () =
+    // `src.Fired.Add this.Bump` holds `this` for the publisher's lifetime
+    // just as hard as a lambda
+    let suggestions =
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    let mutable total = 0\n    member this.Hook() = src.Fired.Add this.Bump\n    member this.Bump n = total <- total + n"
+        )
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("this", s.CapturedName)
+    | other -> failwithf "Expected exactly one method-group note, got %A" other

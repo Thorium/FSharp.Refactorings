@@ -57,20 +57,38 @@ let private caseNamesFor (check: FSharpCheckFileResults) (source: ISourceText) (
         | _ -> None
     | None -> None
 
-/// `x.IsSome` / `x.IsNone` / `not <either>` → (x, negated).
+/// `x.IsSome` / `x.IsNone` / `Option.isSome x` / `x |> Option.isSome` /
+/// `not <any of those>` → (x, negated). The module-function spelling is
+/// common in code ported from match-heavy style and tests the same thing.
 [<return: Struct>]
 let private (|OptionTest|_|) (e: SynExpr) =
-    match e with
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ x; prop ])) when prop.idText = "IsSome" -> ValueSome(x, false)
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ x; prop ])) when prop.idText = "IsNone" -> ValueSome(x, true)
-    | SynExpr.App(isInfix = false; funcExpr = IdentName "not"; argExpr = inner) ->
-        match stripParens inner with
+    let (|ModuleTest|_|) (f: SynExpr) =
+        match f with
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; fn ])) when
+            m.idText = "Option" || m.idText = "ValueOption"
+            ->
+            match fn.idText with
+            | "isSome" -> Some false
+            | "isNone" -> Some true
+            | _ -> None
+        | _ -> None
+
+    let rec test (e: SynExpr) =
+        match e with
         | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ x; prop ])) when prop.idText = "IsSome" ->
-            ValueSome(x, true)
-        | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ x; prop ])) when prop.idText = "IsNone" ->
             ValueSome(x, false)
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ x; prop ])) when prop.idText = "IsNone" ->
+            ValueSome(x, true)
+        | SynExpr.App(isInfix = false; funcExpr = ModuleTest negated; argExpr = SynExpr.Ident x) ->
+            ValueSome(x, negated)
+        | PipeApp(SynExpr.Ident x, ModuleTest negated) -> ValueSome(x, negated)
+        | SynExpr.App(isInfix = false; funcExpr = IdentName "not"; argExpr = inner) ->
+            match test (stripParens inner) with
+            | ValueSome(x, negated) -> ValueSome(x, not negated)
+            | ValueNone -> ValueNone
         | _ -> ValueNone
-    | _ -> ValueNone
+
+    test e
 
 /// The operands of a same-operator boolean chain, left to right:
 /// `a && b && c` yields [a; b; c].
@@ -141,6 +159,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       (op.idText = "op_BooleanAnd") = not negated
                       && preds |> List.sumBy (fun p -> (valueUses x.idText p.Range).Length) > 0
                       && preds |> List.forall (fun p -> not (shadowedIn x.idText p.Range))
+                      // the predicates move into a fabricated lambda, where
+                      // capturing a mutable local was FS0407 before F# 10
+                      && preds
+                         |> List.forall (fun p ->
+                             not (OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) p.Range))
                       ->
                       match caseNamesFor check source x with
                       | Some(someCase, _) ->
@@ -193,6 +216,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       (valueUses x.idText someExpr.Range).Length > 0
                       && not (shadowedIn x.idText someExpr.Range)
                       && (noneArm |> Option.forall (fun n -> (valueUses x.idText n.Range).Length = 0))
+                      // an arm that is itself an `elif ...` (or any if) has
+                      // a range starting at the keyword — spliced after
+                      // `| None ->` that is a syntax error, not a branch
+                      && isSafeInline someExpr
+                      && (noneArm |> Option.forall isSafeInline)
                       ->
                       match caseNamesFor check source x with
                       | Some(someCase, noneCase) ->

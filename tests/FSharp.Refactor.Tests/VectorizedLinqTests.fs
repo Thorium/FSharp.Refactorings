@@ -45,3 +45,13 @@ let ``lists are not arrays`` () =
 [<Fact>]
 let ``Array sum of a non-primitive is left alone`` () =
     Assert.Empty(vectorizedIn "let f (values: decimal[]) = Array.sum values")
+
+[<Fact>]
+let ``a record-field array aggregation is noted`` () =
+    // the field resolves as FSharpField, not a member-or-value
+    let suggestions =
+        vectorizedIn "type State = { Buffer: int[] }\nlet f (state: State) = state.Buffer |> Array.sum"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("state.Buffer", s.ArrayName)
+    | other -> failwithf "Expected exactly one vectorized note, got %A" other

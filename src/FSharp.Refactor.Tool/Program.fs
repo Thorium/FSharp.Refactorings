@@ -39,9 +39,11 @@
 ///     --categories correctness only apply rules of these kinds
 ///     --dry-run                report what would be applied, change nothing
 ///     --api-changes            also apply CROSS-FILE fixes (rules that
-///                              rewrite call sites of internal/public
-///                              symbols across the project); without it
-///                              those fixes are held back and counted
+///                              rewrite call sites of internal symbols
+///                              across the project); without it those
+///                              fixes are held back and counted. Public
+///                              symbols are never rewritten: their callers
+///                              can live outside the checked project
 ///     --jobs <n>               files typechecked at once (default 4, capped
 ///                              by the core count). Trades CPU for wall
 ///                              clock: FCS reuses each file's prefix within
@@ -117,9 +119,11 @@ OPTIONS
                         multi-targeted project is worked through framework by
                         framework, narrowest first, because code behind another
                         framework's #if is not in the parse tree at all
-  --api-changes         also apply cross-file fixes that change internal or
-                        public signatures, rewriting call sites project-wide.
-                        Held back and merely counted without this
+  --api-changes         also apply cross-file fixes that change internal
+                        signatures, rewriting call sites project-wide. Held
+                        back and merely counted without this. Public
+                        signatures are never rewritten: their callers can
+                        live outside the checked project
   --max-passes <n>      fix-then-reanalyse iterations (default 5)
   --help, -h, /?        this text
 
@@ -442,6 +446,29 @@ let private cliAnalyzers () =
               if m.GetCustomAttributes(typeof<CliAnalyzerAttribute>, false).Length > 0 then
                   m ]
 
+/// The encoding a source file is written in, judged by its BOM — so an
+/// edit does not silently strip a UTF-8 BOM or re-encode a UTF-16 file.
+let private encodingOf (path: string) : System.Text.Encoding =
+    let bom =
+        try
+            use fs = File.OpenRead path
+            let buffer = Array.zeroCreate 3
+            let n = fs.Read(buffer, 0, 3)
+            Array.truncate n buffer
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> [||]
+
+    match bom with
+    | [| 0xEFuy; 0xBBuy; 0xBFuy |] -> System.Text.UTF8Encoding true
+    | _ when bom.Length >= 2 && bom.[0] = 0xFFuy && bom.[1] = 0xFEuy -> System.Text.Encoding.Unicode
+    | _ when bom.Length >= 2 && bom.[0] = 0xFEuy && bom.[1] = 0xFFuy -> System.Text.Encoding.BigEndianUnicode
+    | _ -> System.Text.UTF8Encoding false
+
+/// Write a source file back in the encoding it already had.
+let private writeSource (path: string) (text: string) =
+    File.WriteAllText(path, text, encodingOf path)
+
 let private projectErrors (checker: FSharpChecker) (options: FSharpProjectOptions) =
     let results = checker.ParseAndCheckProject options |> Async.RunSynchronously
 
@@ -458,12 +485,34 @@ let private kindColumn (code: string) =
     let kind = RuleCatalog.name (RuleCatalog.categoryOf code)
     $"[{kind}]".PadRight 13
 
-/// Returns the number of fixes applied.
+/// A file one pass changed: its path, its pre-pass text, and the fixes
+/// that landed in it — enough to undo the pass's work on the file and to
+/// suppress those fixes on later passes.
+type private AppliedFile =
+    { Path: string
+      Before: string
+      Fixes: (string * Fix) list }
+
+/// The suppression key of a fix: rule code, file, and the edit's CONTENT.
+/// Not coordinates — a later pass applying an unrelated fix ABOVE the
+/// suppressed spot shifts every line below it, the coordinate key misses,
+/// and the re-applied fix triggers another rollback, oscillating until
+/// --max-passes. Content keys survive shifting; the cost is suppressing an
+/// identical same-rule fix elsewhere in the same file, which — having
+/// identical content — would almost certainly have broken identically.
+let private fixKey (code: string) (file: string) (f: Fix) =
+    code, Path.GetFullPath file, f.FromText, f.ToText
+
+/// Returns the number of fixes applied and the files they changed.
+/// `suppressed` holds fixes rolled back by an earlier pass's verification;
+/// re-applying one would only be rolled back again.
 let private applyEditGroups
     (dryRun: bool)
+    (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
     (editsByFile: System.Collections.Generic.Dictionary<string, ResizeArray<string * Fix>>)
-    =
+    : int * AppliedFile list =
     let mutable applied = 0
+    let appliedFiles = ResizeArray<AppliedFile>()
 
     for kv in editsByFile do
         let file = kv.Key
@@ -476,6 +525,7 @@ let private applyEditGroups
 
         let mutable current = text
         let mutable appliedRanges: Range list = []
+        let mutable appliedHere: (string * Fix) list = []
 
         let overlaps (r: Range) =
             appliedRanges
@@ -491,38 +541,62 @@ let private applyEditGroups
             // producing one is buggy, but the loop is ours to not spin.
             let changesSomething = f.ToText.Replace("\r", "") <> f.FromText.Replace("\r", "")
 
-            if changesSomething && not (overlaps f.FromRange) then
+            if
+                changesSomething
+                && not (suppressed.Contains(fixKey code file f))
+                && not (overlaps f.FromRange)
+            then
                 let lines = current.Split '\n'
 
-                let startIndex =
-                    (lines
-                     |> Seq.take (f.FromRange.StartLine - 1)
-                     |> Seq.sumBy (fun l -> l.Length + 1))
-                    + f.FromRange.StartColumn
-
-                let endIndex =
-                    (lines |> Seq.take (f.FromRange.EndLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
-                    + f.FromRange.EndColumn
-
+                // a stale or buggy range pointing past the file must be
+                // skipped, not thrown on: Seq.take past the end raises,
+                // and an exception here aborts mid-apply with earlier
+                // files already written
                 if
-                    startIndex <= current.Length
-                    && endIndex <= current.Length
-                    && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace(
-                        "\r",
-                        ""
-                    )
+                    f.FromRange.StartLine - 1 <= lines.Length
+                    && f.FromRange.EndLine - 1 <= lines.Length
                 then
-                    current <- current.Remove(startIndex, endIndex - startIndex).Insert(startIndex, f.ToText)
-                    appliedRanges <- f.FromRange :: appliedRanges
-                    applied <- applied + 1
+                    let startIndex =
+                        (lines
+                         |> Seq.take (f.FromRange.StartLine - 1)
+                         |> Seq.sumBy (fun l -> l.Length + 1))
+                        + f.FromRange.StartColumn
 
-                    printfn
-                        $"  {code} {kindColumn code} {Path.GetFileName file}({f.FromRange.StartLine},{f.FromRange.StartColumn})"
+                    let endIndex =
+                        (lines |> Seq.take (f.FromRange.EndLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
+                        + f.FromRange.EndColumn
+
+                    if
+                        startIndex <= current.Length
+                        && endIndex <= current.Length
+                        && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace(
+                            "\r",
+                            ""
+                        )
+                    then
+                        // splice in the file's own line-ending convention,
+                        // so an LF replacement does not seed a CRLF file
+                        // with mixed endings
+                        let eol = if current.Contains "\r\n" then "\r\n" else "\n"
+                        let toText = f.ToText.Replace("\r\n", "\n").Replace("\n", eol)
+
+                        current <- current.Remove(startIndex, endIndex - startIndex).Insert(startIndex, toText)
+                        appliedRanges <- f.FromRange :: appliedRanges
+                        appliedHere <- (code, f) :: appliedHere
+                        applied <- applied + 1
+
+                        printfn
+                            $"  {code} {kindColumn code} {Path.GetFileName file}({f.FromRange.StartLine},{f.FromRange.StartColumn})"
 
         if current <> text && not dryRun then
-            File.WriteAllText(file, current)
+            writeSource file current
 
-    applied
+            appliedFiles.Add
+                { Path = file
+                  Before = text
+                  Fixes = appliedHere }
+
+    applied, List.ofSeq appliedFiles
 
 /// One project-wide suggestion, normalized across the API-changing rules:
 /// a code, the symbol it rewrites, and edits that may land in any file.
@@ -548,10 +622,11 @@ let private runApiPass
     (options: FSharpProjectOptions)
     (codes: Set<string> option)
     (dryRun: bool)
+    (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
     =
     if options.SourceFiles |> Array.exists (fun f -> f.EndsWith ".fsi") then
         printfn "  (api pass skipped: signature files would need the same changes)"
-        0
+        0, []
     else
         let wanted (file: string) (code: string) (name: string) =
             codes |> Option.forall (fun allowed -> allowed.Contains code)
@@ -651,7 +726,7 @@ let private runApiPass
                         fresh.Add range
                         acceptedRanges.[target] <- fresh
 
-        applyEditGroups dryRun editsByFile
+        applyEditGroups dryRun suppressed editsByFile
 
 /// One analyze-and-apply pass over every file. Returns the number of fixes
 /// applied.
@@ -664,6 +739,7 @@ let private runPass
     (apiChanges: bool)
     (jobs: int)
     (onlyFile: string option)
+    (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
     =
     let projectSw = Stopwatch.StartNew()
     let projectResults = checker.ParseAndCheckProject options |> Async.RunSynchronously
@@ -854,7 +930,7 @@ let private runPass
     if slowest <> "" then
         printfn $"  slowest analyzers: {slowest}"
 
-    applyEditGroups dryRun editsByFile
+    applyEditGroups dryRun suppressed editsByFile
 
 /// One compilation to work on. Which kind it is comes from the file
 /// extension — the caller never has to say.
@@ -1156,13 +1232,73 @@ let private restoreSnapshot (snapshot: Map<string, string>) =
     |> Seq.sumBy (fun (path, original) ->
         try
             if File.ReadAllText path <> original then
-                File.WriteAllText(path, original)
+                writeSource path original
                 1
             else
                 0
         with
         | :? IOException
         | :? UnauthorizedAccessException -> 0)
+
+/// Type-check the project after an applying pass; on new errors, roll the
+/// pass back — first only the changed files the errors name, then (F#
+/// inference being order-dependent, an edit in one file can break a later
+/// one) every file the pass changed, which must return the count to zero
+/// since the pass started clean. Rolled-back fixes go into `suppressed` so
+/// the next pass does not re-apply them and oscillate until --max-passes.
+///
+/// Nearly free on the happy path: the pass ahead re-uses this check's
+/// cached results, so it replaces rather than adds a full project check.
+let private verifyPass
+    (checker: FSharpChecker)
+    (options: FSharpProjectOptions)
+    (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
+    (changedFiles: AppliedFile list)
+    : bool =
+    checker.InvalidateConfiguration options
+    let errors = projectErrors checker options
+
+    if errors.Length = 0 then
+        true
+    else
+        let errorFiles =
+            errors |> Array.map (fun d -> Path.GetFullPath d.FileName) |> Set.ofArray
+
+        let named =
+            changedFiles
+            |> List.filter (fun cf -> errorFiles.Contains(Path.GetFullPath cf.Path))
+
+        let restore (files: AppliedFile list) =
+            for cf in files do
+                writeSource cf.Path cf.Before
+
+                for code, f in cf.Fixes do
+                    suppressed.Add(fixKey code cf.Path f) |> ignore
+
+            checker.InvalidateConfiguration options
+
+        let rolledBack =
+            if not named.IsEmpty then
+                restore named
+
+                if (projectErrors checker options).Length = 0 then
+                    named
+                else
+                    let rest = changedFiles |> List.except named
+                    restore rest
+                    changedFiles
+            else
+                restore changedFiles
+                changedFiles
+
+        eprintfn "  this pass introduced type errors — its changes were rolled back and the offending fixes suppressed:"
+
+        for cf in rolledBack do
+            for code, f in cf.Fixes do
+                eprintfn
+                    $"    {code} {Path.GetFileName cf.Path}({f.FromRange.StartLine},{f.FromRange.StartColumn}) rolled back"
+
+        false
 
 /// Analyze and fix one compilation; returns its exit code.
 let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
@@ -1204,13 +1340,18 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
         // cheap here BECAUSE this call warmed FCS. One full project
         // typecheck is paid either way; this ordering at least reports
         // a broken project up front.
-        // before anything is written, so a framework pass that turns out to
-        // break another one can be undone rather than merely reported
+        // before anything is written, so a pass that turns out to break the
+        // build — this framework's or another's — can be undone rather than
+        // merely reported
         let snapshot =
-            if opts.DryRun || not (isMultiTargeted target) then
+            if opts.DryRun then
                 Map.empty
             else
                 takeSnapshot options.SourceFiles
+
+        // fixes a verification rollback rejected; never re-applied this run
+        let suppressed =
+            System.Collections.Generic.HashSet<string * string * string * string>()
 
         printf "typechecking the project... "
         Console.Out.Flush()
@@ -1221,6 +1362,13 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
 
         if baselineErrors > 0 then
             eprintfn $"The project has {baselineErrors} error(s) before any fix; fix those first:"
+
+            if showHeader then
+                // in a multi-compilation run these "pre-existing" errors can
+                // be an earlier project's applied fixes breaking a shared
+                // source file — that is our doing, not the caller's
+                eprintfn
+                    "  (multi-project run: if an earlier project was just modified, its fixes may have introduced these — review the diff)"
 
             for d in projectErrors checker options |> Array.truncate 5 do
                 eprintfn $"  {d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}"
@@ -1241,7 +1389,8 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                 while apiPass < opts.MaxPasses && apiApplied <> 0 do
                     apiPass <- apiPass + 1
                     printfn $"api pass {apiPass}:"
-                    apiApplied <- runApiPass checker options opts.Codes opts.DryRun
+                    let applied, changedFiles = runApiPass checker options opts.Codes opts.DryRun suppressed
+                    apiApplied <- applied
                     printfn $"  {apiApplied} api-changing fix(es) applied"
 
                     if opts.DryRun then
@@ -1249,7 +1398,9 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                         // only repeat the same report
                         apiApplied <- 0
                     elif apiApplied > 0 then
-                        checker.InvalidateConfiguration options
+                        // a cross-file suggestion's edits all land in the
+                        // same pass, so a rollback keeps them consistent
+                        verifyPass checker options suppressed changedFiles |> ignore
 
             let mutable pass = 0
             let mutable lastApplied = -1
@@ -1258,14 +1409,25 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                 pass <- pass + 1
                 printfn $"pass {pass}:"
 
-                lastApplied <-
-                    runPass checker options analyzers opts.Codes opts.DryRun opts.ApiChanges opts.Jobs onlyFile
+                let applied, changedFiles =
+                    runPass checker options analyzers opts.Codes opts.DryRun opts.ApiChanges opts.Jobs onlyFile suppressed
+
+                lastApplied <- applied
 
                 let prefix = if opts.DryRun then "would be " else ""
                 printfn $"  {lastApplied} fix(es) {prefix}applied"
 
                 if opts.DryRun then
                     lastApplied <- 0 // a dry run never converges; stop after one pass
+                elif lastApplied > 0 then
+                    // verify while the pre-pass texts are in hand; a clean
+                    // result warms the next pass's project check, so this
+                    // REPLACES the end-of-run check rather than adding one
+                    verifyPass checker options suppressed changedFiles |> ignore
+
+            if not opts.DryRun && lastApplied > 0 && pass = opts.MaxPasses then
+                eprintfn
+                    $"did not converge: fixes were still being applied after {opts.MaxPasses} pass(es) — rerun to continue, or raise --max-passes"
 
             if opts.DryRun then
                 0
@@ -1274,7 +1436,13 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                 let finalErrors = errorCount checker options
 
                 if finalErrors > baselineErrors then
-                    eprintfn $"Applying introduced {finalErrors - baselineErrors} error(s) — please review the diff."
+                    // per-pass verification should have made this
+                    // unreachable; if something slipped through anyway, do
+                    // not leave a broken tree behind
+                    let restored = restoreSnapshot snapshot
+
+                    eprintfn
+                        $"Applying introduced {finalErrors - baselineErrors} error(s); the {restored} changed file(s) were put back."
 
                     1
                 // The check above only covers the framework we analysed. A
@@ -1352,4 +1520,11 @@ let main argv =
                     |> List.fold max 0
                 | _ -> runTarget opts several target
 
-            targets |> List.map runOne |> List.fold max 0
+            try
+                targets |> List.map runOne |> List.fold max 0
+            finally
+                // runTarget sets this for the cross-file rule variants; the
+                // corpus harness runs main IN-PROCESS, so a leaked flag
+                // would make later analyzer calls in the same process
+                // api-changes-scoped
+                Environment.SetEnvironmentVariable("FSREF_API_CHANGES", null)

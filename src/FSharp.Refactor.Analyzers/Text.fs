@@ -24,6 +24,10 @@ let textOfRange (source: ISourceText) (r: range) : string =
 
 let isSingleLine (r: range) = r.StartLine = r.EndLine
 
+/// A dotted identifier path as source text: [a; b] → "a.b".
+let identText (ids: Ident list) =
+    ids |> List.map (fun i -> i.idText) |> String.concat "."
+
 /// Where a new attribute belongs on a declaration.
 ///
 /// A declaration's range starts at its XML doc, so inserting at the range

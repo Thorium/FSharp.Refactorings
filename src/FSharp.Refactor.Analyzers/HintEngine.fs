@@ -21,6 +21,10 @@
 ///   - substituted bindings are parenthesized unless atomic
 ///   - the whole replacement is parenthesized when the matched expression was
 ///     an operand of an enclosing application
+///   - a rule comparing a metavariable against a bool literal (`x = true`)
+///     only fires when the binding is provably bool: `o = true` also
+///     type-checks for `o : obj` (the literal subsumes to obj), where
+///     dropping the comparison would not compile
 ///
 /// The built-in rules are curated (see `defaultRules`); repositories can add
 /// their own via `hints.add` in fsharprefactor.json. Invalid rules are
@@ -30,6 +34,7 @@ module FSharp.Refactor.HintEngine
 open System
 open System.Collections.Generic
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Analyzers.SDK
@@ -67,6 +72,17 @@ type Hint =
             /// Metavariables that must bind pure atoms because the right side
             /// drops or duplicates them.
             PureOnlyVars: Set<string>
+            /// Metavariables the left side compares against a bool LITERAL.
+            /// `x = true` type-checks with x : obj too (the literal subsumes
+            /// to obj), so dropping the comparison demands typed proof that
+            /// the binding really is bool.
+            BoolTypedVars: Set<string>
+            /// Metavariables of NaN-sensitive rules: an ordering flip
+            /// (`not (a > b) ===> a <= b`), a `compare` collapse, or a
+            /// sort-to-min. All of these change the answer when a float NaN
+            /// is involved — `not (nan > limit)` is true, `nan <= limit` is
+            /// false — so the bindings need typed proof they are not floats.
+            NotFloatVars: Set<string>
             /// Coarse first-token key of the left side, for indexing.
             HeadKey: string
         }
@@ -79,9 +95,6 @@ let private (|MetaVar|_|) (e: SynExpr) =
     match e with
     | SynExpr.Ident ident when isMetaVar ident.idText -> ValueSome ident.idText
     | _ -> ValueNone
-
-let private identText (ids: Ident list) =
-    ids |> List.map (fun i -> i.idText) |> String.concat "."
 
 /// Structural equality of the constant kinds that appear in rules (SynConst
 /// itself carries NoEquality).
@@ -259,12 +272,76 @@ let parseRule (rule: string) : Hint option =
                     |> List.map (fun (v, r) -> v, r.StartColumn - ParsePrefix.Length, r.EndColumn - ParsePrefix.Length)
                     |> List.sortByDescending (fun (_, s, _) -> s)
 
+                let boolTyped =
+                    match lhs with
+                    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = a); argExpr = b) when
+                        op.idText = "op_Equality" || op.idText = "op_Inequality"
+                        ->
+                        match stripParens a, stripParens b with
+                        | MetaVar v, SynExpr.Const(SynConst.Bool _, _)
+                        | SynExpr.Const(SynConst.Bool _, _), MetaVar v -> Set.singleton v
+                        | _ -> Set.empty
+                    | _ -> Set.empty
+
+                // heads whose rewrite goes wrong on float NaN: ordering
+                // operators under a flip, compare collapses, sorts replaced
+                // by min/max. Equality (`not (a = b) ===> a <> b`) is
+                // NaN-sound and deliberately absent.
+                let nanSensitiveHeads =
+                    set
+                        [ "op_GreaterThan"
+                          "op_GreaterThanOrEqual"
+                          "op_LessThan"
+                          "op_LessThanOrEqual"
+                          "compare"
+                          "sort"
+                          "sortBy"
+                          "sortDescending"
+                          "sortByDescending" ]
+
+                let notFloat =
+                    let acc = HashSet<string>()
+
+                    let addVarsIn e =
+                        for v, _ in collectVars e do
+                            acc.Add v |> ignore
+
+                    let rec walk e =
+                        let rec spine e args =
+                            match e with
+                            | SynExpr.Paren(expr = inner) -> spine inner args
+                            | SynExpr.App(funcExpr = f; argExpr = a) -> spine f (a :: args)
+                            | head -> head, args
+
+                        match e with
+                        | SynExpr.Paren(expr = inner) -> walk inner
+                        | SynExpr.App _ ->
+                            let head, args = spine e []
+
+                            let headName =
+                                match head with
+                                | SynExpr.Ident id -> Some id.idText
+                                | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+                                    Some (List.last ids).idText
+                                | _ -> None
+
+                            if headName |> Option.exists nanSensitiveHeads.Contains then
+                                args |> List.iter addVarsIn
+
+                            args |> List.iter walk
+                        | _ -> ()
+
+                    walk lhs
+                    Set.ofSeq acc
+
                 Some
                     { RuleText = $"{lhsText} ===> {rhsText}"
                       Lhs = lhs
                       RhsText = rhsText
                       RhsVarSpans = spans
                       PureOnlyVars = pureOnly
+                      BoolTypedVars = boolTyped
+                      NotFloatVars = notFloat
                       HeadKey = headKey lhs }
         | _ -> None
     | _ -> None
@@ -366,9 +443,124 @@ let private indexHints (extraRules: string list) : Map<string, Hint list> =
 let private extraCache =
     System.Collections.Concurrent.ConcurrentDictionary<string list, Map<string, Hint list>>()
 
+/// Operators whose application is boolean by construction.
+let private boolOperators =
+    set
+        [ "op_Equality"
+          "op_Inequality"
+          "op_LessThan"
+          "op_GreaterThan"
+          "op_LessThanOrEqual"
+          "op_GreaterThanOrEqual"
+          "op_BooleanAnd"
+          "op_BooleanOr" ]
+
+/// The resolved type of an operand — a name's own type, a call or
+/// projection's return type. ValueNone for anything unresolvable (a lambda,
+/// a literal, a complex expression).
+let private resolvedOperandType
+    (check: FSharpCheckFileResults)
+    (source: ISourceText)
+    (e: SynExpr)
+    : FSharpType voption =
+    let resolve (ident: Ident) =
+        let r = ident.idRange
+        let lineText = source.GetLineString(r.EndLine - 1)
+
+        match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with
+        | Some symbolUse ->
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as value ->
+                ValueSome(
+                    try
+                        value.ReturnParameter.Type
+                    with _ ->
+                        value.FullType
+                )
+            | :? FSharpField as field -> ValueSome field.FieldType
+            | _ -> ValueNone
+        | None -> ValueNone
+
+    let lastIdentOf (e: SynExpr) =
+        match e with
+        | SynExpr.Ident id -> ValueSome id
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
+        | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
+        | _ -> ValueNone
+
+    match stripParens e with
+    | SynExpr.App(funcExpr = f) ->
+        (lastIdentOf f) |> ValueOption.bind (fun id -> resolve id)
+    | stripped ->
+        (lastIdentOf stripped) |> ValueOption.bind (fun id -> resolve id)
+
+/// Is the expression provably of type bool — syntactically boolean (a
+/// comparison, a logical operator, `not`, a literal), or a name or call
+/// whose resolved symbol type is System.Boolean?
+let private isProvablyBool (check: FSharpCheckFileResults) (source: ISourceText) (e: SynExpr) : bool =
+    match stripParens e with
+    | SynExpr.Const(SynConst.Bool _, _) -> true
+    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op)) when boolOperators.Contains op.idText -> true
+    | SynExpr.App(funcExpr = SingleIdent f) when f.idText = "not" -> true
+    | _ ->
+        match resolvedOperandType check source e with
+        | ValueSome t ->
+            (try
+                let t = OptionModule.stripAbbreviations t
+                t.HasTypeDefinition && t.TypeDefinition.TryFullName = Some "System.Boolean"
+             with _ ->
+                 false)
+        | ValueNone -> false
+
+/// Is the expression provably NOT a float (nor a collection of or projection
+/// to floats)? Non-float literals qualify syntactically; anything else needs
+/// its resolved type — including, for a function value like a sortBy key
+/// projection, the eventual return type — to name no System.Double/Single.
+let private isProvablyNotFloat (check: FSharpCheckFileResults) (source: ISourceText) (e: SynExpr) : bool =
+    let floatNames = set [ "System.Double"; "System.Single" ]
+
+    // instance-level stripping: the ENTITY's AbbreviatedType is the open
+    // generic (list<int> would strip to FSharpList<'T>, losing the int),
+    // and the generic arguments are exactly what this check needs
+    let rec stripInstance (t: FSharpType) =
+        if t.IsAbbreviation then stripInstance t.AbbreviatedType else t
+
+    let rec notFloatType (t: FSharpType) =
+        try
+            let t = stripInstance t
+
+            if t.IsFunctionType then
+                notFloatType (Seq.last t.GenericArguments)
+            elif t.IsGenericParameter then
+                false
+            elif not t.HasTypeDefinition then
+                false
+            else
+                not (t.TypeDefinition.TryFullName |> Option.exists floatNames.Contains)
+                && t.GenericArguments |> Seq.forall notFloatType
+        with _ ->
+            false
+
+    match stripParens e with
+    | SynExpr.Const(constant = c) ->
+        match c with
+        | SynConst.Double _
+        | SynConst.Single _ -> false
+        | _ -> true
+    | _ ->
+        (resolvedOperandType check source e) |> ValueOption.exists (fun t -> notFloatType t)
+
 /// Find all expressions matched by a rule. `extraRules` come from the
 /// repository configuration; results are cached per distinct rule list.
-let find (extraRules: string list) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+/// Rules whose firing needs type information (BoolTypedVars) stay silent
+/// when `check` is None or the file has type errors.
+let find
+    (extraRules: string list)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (check: FSharpCheckFileResults option)
+    : Suggestion list =
+    let typedCheck = check |> Option.filter (OptionModule.hasErrors >> not)
     let index = extraCache.GetOrAdd(extraRules, indexHints)
     let suggestions = ResizeArray<Suggestion>()
     let matchedRanges = HashSet<string>()
@@ -397,9 +589,24 @@ let find (extraRules: string list) (parseTree: ParsedInput) (source: ISourceText
                             true
                         | _ -> false)
 
+                let typedVarsOk (vars: Set<string>) (prove: FSharpCheckFileResults -> ISourceText -> SynExpr -> bool) =
+                    vars.IsEmpty
+                    || (match typedCheck with
+                        | Some c ->
+                            vars
+                            |> Set.forall (fun v ->
+                                match bindings.TryGetValue v with
+                                | true, bound -> prove c source bound
+                                | false, _ -> false)
+                        | None -> false)
+
+                let boolTypedOk =
+                    typedVarsOk hint.BoolTypedVars isProvablyBool
+                    && typedVarsOk hint.NotFloatVars isProvablyNotFloat
+
                 let rangeKey = expr.Range.ToString()
 
-                if pureOk && not namedArgumentPosition && matchedRanges.Add rangeKey then
+                if pureOk && boolTypedOk && not namedArgumentPosition && matchedRanges.Add rangeKey then
                     let replacement =
                         hint.RhsVarSpans
                         |> List.fold

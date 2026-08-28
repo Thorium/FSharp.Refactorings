@@ -107,3 +107,27 @@ let ``a multiline if with single-line branches now rewrites`` () =
     assertOptionMatch
         "let f (x: int option) =\n    if x.IsSome then\n        x.Value + 1\n    else\n        0"
         "match x with | Some v -> v + 1 | None -> 0"
+
+[<Fact>]
+let ``the module-function spelling tests the same option`` () =
+    assertOptionMatch
+        "let f (x: int option) = if Option.isSome x then x.Value + 1 else 0"
+        "match x with | Some v -> v + 1 | None -> 0"
+
+[<Fact>]
+let ``an elif else-arm cannot be spliced into a clause`` () =
+    // its range starts at the `elif` keyword — after `| None ->` that is a
+    // syntax error, not a branch
+    Assert.Empty(
+        optionMatchIn
+            "let f (x: int option) (y: int) = if x.IsSome then x.Value + 1 elif y > 0 then 2 else 3"
+    )
+
+[<Fact>]
+let ``a predicate reading a mutable local stays a boolean chain`` () =
+    // the predicates would move into an Option.exists lambda, where
+    // capturing a mutable local was FS0407 before F# 10
+    Assert.Empty(
+        optionMatchIn
+            "let f (x: int option) =\n    let mutable total = 0\n    if x.IsSome && x.Value > total then total <- 1\n    total"
+    )

@@ -169,6 +169,8 @@ let private findCandidates (parseTree: ParsedInput) (source: ISourceText) : Cand
                         && isSingleLine errorBody.Range
                         && isPlainBody okBody
                         && isPlainBody errorBody
+                        && not (OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) okBody.Range)
+                        && not (OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) errorBody.Range)
                         ->
                         match rewrite source scrutinee okVar okBody errorVar errorBody with
                         | Some(replacement, target) ->

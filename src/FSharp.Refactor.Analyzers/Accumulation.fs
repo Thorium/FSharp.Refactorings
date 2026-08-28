@@ -20,6 +20,7 @@ module FSharp.Refactor.Accumulation
 
 open System.Text.RegularExpressions
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Refactor.Text
@@ -62,6 +63,68 @@ let private mentionsIn (index: AstIndex.Index) (name: string) (r: range) =
         | SynExpr.LongIdent(longDotId = SynLongIdent(id = firstId :: _)) when firstId.idText = name ->
             Range.rangeContainsRange r firstId.idRange
         | _ -> false)
+
+/// Is the type (after abbreviations) IEnumerable<'T>, or something that
+/// implements it? A `for` loop also accepts the NON-generic IEnumerable and
+/// duck-typed GetEnumerator sources, which `Seq.fold`/`Seq.sum` do not — so
+/// the rewrite must prove the source is a real seq<'T>, not assume it.
+let private isGenericSeqType (t: FSharpType) =
+    let seqName = "System.Collections.Generic.IEnumerable`1"
+
+    try
+        let t = OptionModule.stripAbbreviations t
+
+        t.HasTypeDefinition
+        && (let td = t.TypeDefinition
+
+            td.IsArrayType
+            || td.TryFullName = Some seqName
+            || td.AllInterfaces
+               |> Seq.exists (fun i -> i.HasTypeDefinition && i.TypeDefinition.TryFullName = Some seqName))
+    with _ ->
+        false
+
+/// The identifier to resolve for a loop source: `xs`, `db.Orders`, `x.A.B`.
+[<return: Struct>]
+let private (|SourcePathLastIdent|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Ident id -> ValueSome id
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
+    | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
+    | _ -> ValueNone
+
+/// Is the loop-source expression provably enumerable as seq<'T>? Literals
+/// and ranges are; a name (or a call through one) is when its resolved type
+/// says so; anything else is not — better to skip a valid rewrite than to
+/// break a loop over a non-generic IEnumerable.
+let private provablyGenericSeq (check: FSharpCheckFileResults) (source: ISourceText) (src: SynExpr) =
+    let resolvesToSeq (ident: Ident) =
+        let r = ident.idRange
+        let lineText = source.GetLineString(r.EndLine - 1)
+
+        match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with
+        | Some symbolUse ->
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as value ->
+                isGenericSeqType (
+                    try
+                        value.ReturnParameter.Type
+                    with _ ->
+                        value.FullType
+                )
+            | _ -> false
+        | None -> false
+
+    match stripParens src with
+    | SynExpr.ArrayOrList _
+    | SynExpr.ArrayOrListComputed _ -> true
+    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op)) when
+        op.idText = "op_Range" || op.idText = "op_RangeStep"
+        ->
+        true
+    | SourcePathLastIdent id -> resolvesToSeq id
+    | SynExpr.App(funcExpr = SourcePathLastIdent id) -> resolvesToSeq id
+    | _ -> false
 
 let private insideLoop (path: SyntaxNode list) =
     path
@@ -116,6 +179,7 @@ let find
                         && not (
                             Regex.IsMatch(textOfRange source rest.Range, @"\b" + Regex.Escape acc.idText + @"\b\s*<-")
                         )
+                        && provablyGenericSeq check source src
                         ->
                         match lambdaPatText source pat with
                         | ValueSome patText ->
@@ -176,27 +240,38 @@ let find
                         | ValueNone -> ()
                     | _ -> ()
                 | _ -> ()
-            // FR0051: quadratic append inside a loop
-            | SynExpr.LongIdentSet(SynLongIdent(id = [ acc ]), rhs, _) when insideLoop path ->
+            // FR0051: quadratic append inside a loop — `acc <- acc @ [x]`,
+            // the module spellings List.append/Array.append, and the
+            // ref-cell form `acc.Value <- acc.Value @ [x]`
+            | SynExpr.LongIdentSet(SynLongIdent(id = ([ _ ] | [ _; _ ]) as accIds), rhs, _) when
+                insideLoop path
+                && (match accIds with
+                    | [ _ ] -> true
+                    | [ _; v ] -> v.idText = "Value"
+                    | _ -> false)
+                ->
+                let acc = List.head accIds
+
+                let isAcc (e: SynExpr) =
+                    match e with
+                    | SynExpr.Ident i -> i.idText = acc.idText
+                    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ i; v ])) ->
+                        i.idText = acc.idText && v.idText = "Value"
+                    | _ -> false
+
                 let quadratic =
                     match rhs with
-                    | SynExpr.App(
-                        funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = SynExpr.Ident lhsId); argExpr = _) when
-                        op.idText = "op_Append" && lhsId.idText = acc.idText
+                    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs); argExpr = _) when
+                        op.idText = "op_Append" && isAcc lhs
                         ->
                         true
                     | SynExpr.App(
                         funcExpr = SynExpr.App(
                             funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])); argExpr = a1)
                         argExpr = a2) when
-                        m.idText = "Array"
+                        (m.idText = "Array" || m.idText = "List")
                         && f.idText = "append"
-                        && ((match a1 with
-                             | SynExpr.Ident i -> i.idText = acc.idText
-                             | _ -> false)
-                            || (match a2 with
-                                | SynExpr.Ident i -> i.idText = acc.idText
-                                | _ -> false))
+                        && (isAcc a1 || isAcc a2)
                         ->
                         true
                     | _ -> false

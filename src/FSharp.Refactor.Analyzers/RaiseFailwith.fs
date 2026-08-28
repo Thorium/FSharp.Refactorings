@@ -63,6 +63,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         match stripParens ctorArg with
                         | SynExpr.Tuple _ -> () // (message, innerException) overload
                         | UnitConst -> () // no-argument constructor
+                        // a single NAMED argument parses as an op_Equality
+                        // application — `Exception(message = "boom")` must
+                        // not become `failwith (message = "boom")`
+                        | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent eq)) when
+                            eq.idText = "op_Equality"
+                            ->
+                            ()
                         | message ->
                             suggestions.Add
                                 { Range = expr.Range

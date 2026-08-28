@@ -39,12 +39,16 @@ let private resolvesToGatedCount (check: FSharpCheckFileResults) (source: ISourc
         | _ -> false
     | None -> false
 
-/// `recv.Count` with a plain identifier receiver.
+/// `recv.Count` where recv is a name or a dotted path — a ConcurrentQueue
+/// naturally lives in a field, so `this.queue.Count` must count too.
 [<return: Struct>]
 let private (|CountAccess|_|) (e: SynExpr) =
     match e with
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ recv; countId ])) when countId.idText = "Count" ->
-        ValueSome(recv, countId)
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
+        ids.Length >= 2 && (List.last ids).idText = "Count"
+        ->
+        let recvIds = ids |> List.take (ids.Length - 1)
+        ValueSome(identText recvIds, List.last ids)
     | _ -> ValueNone
 
 /// Find emptiness checks through Count. Requires typed check results.
@@ -73,7 +77,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       resolvesToGatedCount check source countId
                       && OptionModule.resolvesToCoreOperator check source op
                       ->
-                      let test = $"{recv.idText}.IsEmpty"
+                      let test = $"{recv}.IsEmpty"
 
                       { Range = expr.Range
                         OriginalText = textOfRange source expr.Range

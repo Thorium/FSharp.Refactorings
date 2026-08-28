@@ -297,8 +297,13 @@ let structActivePatternCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0012 Hints ----
 
-let private hintMessages (extraRules: string list) (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    HintEngine.find extraRules parseTree source
+let private hintMessages
+    (extraRules: string list)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (check: FSharpCheckFileResults option)
+    : Message list =
+    HintEngine.find extraRules parseTree source check
     |> List.map (fun s ->
         hint
             "FR0012"
@@ -309,12 +314,16 @@ let private hintMessages (extraRules: string list) (parseTree: ParsedInput) (sou
 [<EditorAnalyzer("Hints", "Term-rewriting hints (fsharplint-style rules)", HelpBase)>]
 let hintsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0012" "Hints" (fun () ->
-        hintMessages (Configuration.hintsFor ctx.FileName) ctx.ParseFileResults.ParseTree ctx.SourceText)
+        hintMessages (Configuration.hintsFor ctx.FileName) ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 [<CliAnalyzer("Hints", "Term-rewriting hints (fsharplint-style rules)", HelpBase)>]
 let hintsCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0012" "Hints" (fun () ->
-        hintMessages (Configuration.hintsFor ctx.FileName) ctx.ParseFileResults.ParseTree ctx.SourceText)
+        hintMessages
+            (Configuration.hintsFor ctx.FileName)
+            ctx.ParseFileResults.ParseTree
+            ctx.SourceText
+            (Some ctx.CheckFileResults))
 
 // ---- FR0013 RedundantParens ----
 
@@ -813,7 +822,7 @@ let private queryInLoopMessages (parseTree: ParsedInput) (source: ISourceText) c
         hint
             "FR0028"
             (sprintf
-                "'%s' is an IQueryable iterated inside another loop: each outer iteration executes a separate database query (N+1). Materialize it once before the loop, use a join, or batch the keys (e.g. chunkBySize)."
+                "'%s' is an IQueryable iterated inside another loop: each outer iteration executes a separate database query (N+1). Materialize it once before the loop, join both sources in a single query { }, or batch the keys (e.g. chunkBySize ~300 per query)."
                 s.SourceText)
             s.Range
             [])
@@ -1033,13 +1042,21 @@ let private loopPerfMessages (fileName: string) (parseTree: ParsedInput) (source
             if constructionEnabled then
                 constructions
                 |> List.map (fun s ->
-                    hint
-                        "FR0037"
-                        (sprintf
-                            "A %s is constructed on every iteration; it is expensive by design — hoist it outside the loop or make it static."
-                            s.TypeName)
-                        s.Range
-                        [])
+                    let message =
+                        if s.TypeName = "HttpClient" then
+                            // not merely expensive: each instance owns a
+                            // socket pool, and per-iteration construction
+                            // exhausts ports under load (TIME_WAIT). The
+                            // right lifetime is framework-dependent (a
+                            // long-lived instance, or IHttpClientFactory
+                            // under DI), so this stays advice
+                            "An HttpClient is constructed on every iteration — under load this exhausts sockets (TIME_WAIT) and skips DNS refresh. Reuse one long-lived client (it is thread-safe for concurrent requests) or take an IHttpClientFactory."
+                        else
+                            sprintf
+                                "A %s is constructed on every iteration; it is expensive by design — hoist it outside the loop or make it static."
+                                s.TypeName
+
+                    hint "FR0037" message s.Range [])
             else
                 []
 
@@ -2304,3 +2321,96 @@ let interpToStringEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
 let interpToStringCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0021" "InterpToString" (fun () ->
         interpToStringMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0101 IndexedLoop ----
+
+let private indexedLoopMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    IndexedLoop.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0101"
+            (sprintf
+                "The index only ever reads '%s.[i]'; iterate '%s' directly."
+                s.CollectionText
+                s.CollectionText)
+            s.Range
+            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+
+[<EditorAnalyzer("IndexedLoop", "Index-based loops that only ever index the bound collection", HelpBase)>]
+let indexedLoopEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0101" "IndexedLoop" (fun () ->
+        indexedLoopMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("IndexedLoop", "Index-based loops that only ever index the bound collection", HelpBase)>]
+let indexedLoopCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0101" "IndexedLoop" (fun () ->
+        indexedLoopMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0102 ListIndexing ----
+
+let private listIndexingMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    ListIndexing.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0102"
+            (sprintf
+                "Indexing the F# list '%s' is O(i) per access — inside a loop that is quadratic. Iterate it directly, or convert once with List.toArray if random access is needed."
+                s.CollectionText)
+            s.Range
+            [])
+
+[<EditorAnalyzer("ListIndexing", "Positional indexing into an F# list inside a loop", HelpBase)>]
+let listIndexingEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0102" "ListIndexing" (fun () ->
+        whenChecked ctx (listIndexingMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("ListIndexing", "Positional indexing into an F# list inside a loop", HelpBase)>]
+let listIndexingCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0102" "ListIndexing" (fun () ->
+        listIndexingMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0103 TypeTestChain ----
+
+let private typeTestChainMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    TypeTestChain.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0103"
+            "This if/elif ladder of type tests can be a match with type-test patterns: one test per branch instead of test-plus-cast, and no unsafe :?> left behind."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("TypeTestChain", "Type-test if-chains rewritten as match", HelpBase)>]
+let typeTestChainEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0103" "TypeTestChain" (fun () ->
+        typeTestChainMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("TypeTestChain", "Type-test if-chains rewritten as match", HelpBase)>]
+let typeTestChainCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0103" "TypeTestChain" (fun () ->
+        typeTestChainMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0104 RecursiveAppend ----
+
+let private recursiveAppendMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    RecursiveAppend.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0104"
+            (sprintf
+                "'%s' appends one element to '%s' on every recursive call — the accumulator is copied each step, O(n²) overall. Cons instead ('x :: %s') and List.rev once in the base case, or accumulate into an array when the result is consumed positionally."
+                s.FunctionName
+                s.AccumulatorName
+                s.AccumulatorName)
+            s.Range
+            [])
+
+[<EditorAnalyzer("RecursiveAppend", "Singleton appends to a recursive accumulator", HelpBase)>]
+let recursiveAppendEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0104" "RecursiveAppend" (fun () ->
+        recursiveAppendMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("RecursiveAppend", "Singleton appends to a recursive accumulator", HelpBase)>]
+let recursiveAppendCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0104" "RecursiveAppend" (fun () ->
+        recursiveAppendMessages ctx.ParseFileResults.ParseTree ctx.SourceText)

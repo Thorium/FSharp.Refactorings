@@ -51,10 +51,22 @@ let private collectionModules = set [ "List"; "Array"; "Seq" ]
 /// calls — `Regex.IsMatch(s, "...")` in a loop — but a `Regex` bound to a
 /// value inside a loop went unnoticed by either rule.
 let private expensiveTypes =
-    set [ "ConcurrentDictionary"; "JsonSerializerOptions"; "Regex" ]
+    set [ "ConcurrentDictionary"; "HttpClient"; "JsonSerializerOptions"; "Regex" ]
 
 /// Static factories with the same build-once intent (Type, method).
 let private expensiveFactories = [ "SearchValues", "Create" ]
+
+/// A probed collection: a bare name or a dotted path (config.Excluded,
+/// this.samples — collections routinely live in a record or object field).
+/// The ROOT identifier is what loop-invariance is judged on: a dotted path
+/// varies per iteration exactly when its root does.
+[<return: Struct>]
+let private (|CollPath|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Ident id -> ValueSome(id, id.idText)
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+        ValueSome(List.head ids, identText ids)
+    | _ -> ValueNone
 
 /// `<m>.contains item coll` and `coll |> <m>.contains item`.
 [<return: Struct>]
@@ -64,14 +76,14 @@ let private (|ContainsCall|_|) (e: SynExpr) =
         isInfix = false
         funcExpr = SynExpr.App(
             isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])); argExpr = _)
-        argExpr = SynExpr.Ident coll) when collectionModules.Contains m.idText && f.idText = "contains" ->
-        ValueSome(m.idText, coll)
-    | PipeApp(SynExpr.Ident coll,
+        argExpr = CollPath(root, text)) when collectionModules.Contains m.idText && f.idText = "contains" ->
+        ValueSome(m.idText, root, text)
+    | PipeApp(CollPath(root, text),
               SynExpr.App(
                   isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])); argExpr = _)) when
         collectionModules.Contains m.idText && f.idText = "contains"
         ->
-        ValueSome(m.idText, coll)
+        ValueSome(m.idText, root, text)
     | _ -> ValueNone
 
 /// `new ConcurrentDictionary<...>(...)` / `ConcurrentDictionary<...>(...)`
@@ -119,7 +131,8 @@ let private (|ExpensiveCtor|_|) (e: SynExpr) =
 
 /// The loop-context binders along the path: Some names when the node sits
 /// inside a loop or a collection-function callback, None otherwise.
-let private loopBinders (path: SyntaxNode list) =
+/// Shared with the other loop-context rules (ListIndexing).
+let loopBinders (path: SyntaxNode list) =
     let mutable insideLoop = false
     let binders = ResizeArray<string>()
     let mutable sawLambda = false
@@ -168,12 +181,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
 
     for path, expr in index.Exprs do
         match expr with
-        | ContainsCall(moduleName, coll) ->
+        | ContainsCall(moduleName, root, collText) ->
             match loopBinders path with
-            | ValueSome binders when not (binders.Contains coll.idText) ->
+            | ValueSome binders when not (binders.Contains root.idText) ->
                 contains.Add
                     { Range = expr.Range
-                      CollectionName = coll.idText
+                      CollectionName = collText
                       ModuleName = moduleName }
             | _ -> ()
         | ExpensiveCtor typeName ->

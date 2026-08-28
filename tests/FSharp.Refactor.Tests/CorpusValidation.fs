@@ -119,7 +119,7 @@ let ``corpus fixes still parse`` () : unit =
                       for s in MatchToIf.find tree sourceText -> s.Range, s.ReplacementText, "FR0001"
                       for s in RaiseFailwith.find tree sourceText -> s.Range, s.ReplacementText, "FR0024"
                       for s in AttributeMerge.find tree sourceText -> s.Range, s.ReplacementText, "FR0060"
-                      for s in HintEngine.find [] tree sourceText -> s.Range, s.ReplacementText, "FR0011/12"
+                      for s in HintEngine.find [] tree sourceText None -> s.Range, s.ReplacementText, "FR0011/12"
                       for s in Simplification.find tree sourceText None -> s.Range, s.ReplacementText, "FR0010"
                       for s in ConversionMove.find tree sourceText -> s.Range, s.ReplacementText, "FR0004"
                       for s in StructDu.find (Visibility.apiChangesAllowed ()) tree sourceText ->
@@ -128,7 +128,10 @@ let ``corpus fixes still parse`` () : unit =
                       for s in MatchBangRule.find tree sourceText do
                           for range, _, replacement in s.Edits -> range, replacement, "FR0073"
                       for s in MatchBangRule.findWhileBang tree sourceText do
-                          for range, _, replacement in s.Edits -> range, replacement, "FR0078" ]
+                          for range, _, replacement in s.Edits -> range, replacement, "FR0078"
+                      for s in IndexedLoop.find tree sourceText do
+                          for range, _, replacement in s.Edits -> range, replacement, "FR0101"
+                      for s in TypeTestChain.find tree sourceText -> s.Range, s.ReplacementText, "FR0103" ]
 
                 // note-only rules: nothing to patch, but count them so a rule
                 // that fires wildly on real code shows up here

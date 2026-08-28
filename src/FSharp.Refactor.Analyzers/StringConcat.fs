@@ -33,9 +33,10 @@ type Suggestion =
       OriginalText: string
       ReplacementText: string }
 
-/// One operand of the chain: literal source text or an interpolation hole.
+/// One operand of the chain: literal source text (flagged verbatim when it
+/// was an @-string) or an interpolation hole.
 type private Piece =
-    | Lit of string
+    | Lit of text: string * verbatim: bool
     | Hole of string
 
 /// Left-to-right operands of a `+` chain.
@@ -73,10 +74,12 @@ let private resolvesToString (check: FSharpCheckFileResults) (source: ISourceTex
         | _ -> false
     | None -> false
 
-/// Literal source text with the surrounding quotes stripped, or None when
-/// the interpolated context would force awkward `{{`/`%%` escapes.
-let private spliceableLiteral (literalSource: string) =
-    let inner = literalSource.Substring(1, literalSource.Length - 2)
+/// Literal source text with the surrounding quotes stripped (a verbatim
+/// literal's `@` included), or None when the interpolated context would
+/// force awkward `{{`/`%%` escapes.
+let private spliceableLiteral (verbatim: bool) (literalSource: string) =
+    let prefix = if verbatim then 2 else 1
+    let inner = literalSource.Substring(prefix, literalSource.Length - prefix - 1)
 
     if inner.Contains '{' || inner.Contains '}' || inner.Contains '%' then
         None
@@ -115,7 +118,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       operands
                       |> List.exists (fun operand ->
                           match operand with
-                          | SynExpr.Const(SynConst.String(_, SynStringKind.Regular, _), _) -> true
+                          | SynExpr.Const(SynConst.String(_, (SynStringKind.Regular | SynStringKind.Verbatim), _), _) ->
+                              true
                           | _ -> false)
 
                   if List.length operands >= 3 && hasStringLiteral then
@@ -124,7 +128,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           |> List.map (fun operand ->
                               match operand with
                               | SynExpr.Const(SynConst.String(_, SynStringKind.Regular, _), _) ->
-                                  spliceableLiteral (textOfRange source operand.Range) |> Option.map Lit
+                                  spliceableLiteral false (textOfRange source operand.Range)
+                                  |> Option.map (fun t -> Lit(t, false))
+                              | SynExpr.Const(SynConst.String(_, SynStringKind.Verbatim, _), _) ->
+                                  spliceableLiteral true (textOfRange source operand.Range)
+                                  |> Option.map (fun t -> Lit(t, true))
                               | SynExpr.Ident id when resolvesToString check source id -> Some(Hole id.idText)
                               | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
                                   not ids.IsEmpty && resolvesToString check source (List.last ids)
@@ -142,9 +150,28 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       // a shadowed (+) can have arbitrary semantics; the
                       // typed operator gate still guards the fix, it just
                       // runs last
+                      // a verbatim piece anywhere makes the whole result a
+                      // verbatim interpolation ($@"..."), which is only sound
+                      // when every REGULAR piece is escape-free — a `\n` or
+                      // `\"` spliced into verbatim context would go literal
+                      let anyVerbatim =
+                          pieces
+                          |> List.exists (fun p ->
+                              match p with
+                              | Some(Lit(_, true)) -> true
+                              | _ -> false)
+
+                      let regularsSafeForVerbatim =
+                          pieces
+                          |> List.forall (fun p ->
+                              match p with
+                              | Some(Lit(text, false)) -> not (text.Contains '\\')
+                              | _ -> true)
+
                       if
                           pieces |> List.forall Option.isSome
                           && hasHole
+                          && (not anyVerbatim || regularsSafeForVerbatim)
                           && OptionModule.resolvesToCoreOperator check source opId
                       then
                           let body =
@@ -152,11 +179,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               |> List.choose id
                               |> List.map (fun piece ->
                                   match piece with
-                                  | Lit text -> text
+                                  | Lit(text, _) -> text
                                   | Hole text -> "{" + text + "}")
                               |> String.concat ""
 
                           { Range = expr.Range
                             OriginalText = textOfRange source expr.Range
-                            ReplacementText = $"$\"{body}\"" }
+                            ReplacementText = if anyVerbatim then $"$@\"{body}\"" else $"$\"{body}\"" }
               | _ -> () ]

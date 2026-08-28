@@ -73,10 +73,17 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     for memberDefn in members do
                         match memberDefn with
                         | SynMemberDefn.GetSetMember(
-                            memberDefnForGet = Some(SynBinding(headPat = AccessorPat(getProp, _); expr = getBody))
+                            memberDefnForGet = Some(SynBinding(
+                                attributes = getAttrs; headPat = AccessorPat(getProp, _); expr = getBody))
                             memberDefnForSet = Some(SynBinding(
-                                headPat = AccessorPat(setProp, [ setArg ]); expr = setBody))) when
+                                attributes = setAttrs; headPat = AccessorPat(setProp, [ setArg ]); expr = setBody))) when
                             getProp.idText = setProp.idText
+                            // the rewrite replaces memberDefn.Range wholesale,
+                            // and that range INCLUDES the attribute list — an
+                            // [<Obsolete>] or [<JsonIgnore>] would silently
+                            // vanish, and the result still compiles
+                            && getAttrs |> List.forall (fun a -> a.Attributes.IsEmpty)
+                            && setAttrs |> List.forall (fun a -> a.Attributes.IsEmpty)
                             ->
                             let backingName =
                                 match stripParens getBody with

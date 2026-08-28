@@ -65,15 +65,35 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         let index = AstIndex.ofTree parseTree
 
+        // the ignored expression, whichever way ignore was spelled
+        let (|IgnoredExpr|_|) (e: SynExpr) =
+            match e with
+            | PipeApp(inner, IdentName "ignore") -> Some(stripParens inner)
+            | SynExpr.App(isInfix = false; funcExpr = IdentName "ignore"; argExpr = inner) -> Some(stripParens inner)
+            | _ -> None
+
+        // a map call in either spelling: `xs |> Module.map f` or
+        // `Module.map f xs` — the direct Seq form is the one that runs
+        // NOTHING when ignored, which is the very bug this rule exists for
+        let (|MapCall|_|) (e: SynExpr) =
+            match e with
+            | PipeApp(sourceExpr,
+                      SynExpr.App(
+                          isInfix = false
+                          funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; mapId ]))
+                          argExpr = mapArg)) -> Some(sourceExpr, m, mapId, mapArg)
+            | SynExpr.App(
+                isInfix = false
+                funcExpr = SynExpr.App(
+                    isInfix = false
+                    funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; mapId ]))
+                    argExpr = mapArg)
+                argExpr = sourceExpr) -> Some(sourceExpr, m, mapId, mapArg)
+            | _ -> None
+
         [ for _, expr in index.Exprs do
               match expr with
-              // <pipeline> |> ignore, where the pipeline ends in Module.map f
-              | PipeApp(PipeApp(sourceExpr,
-                                SynExpr.App(
-                                    isInfix = false
-                                    funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; mapId ]))
-                                    argExpr = mapArg)),
-                        IdentName "ignore") when
+              | IgnoredExpr(MapCall(sourceExpr, m, mapId, mapArg)) when
                   mapId.idText = "map"
                   && mapModules.ContainsKey m.idText
                   && isSingleLine expr.Range

@@ -58,3 +58,22 @@ let ``while loop around a queryable is also noted`` () =
     match suggestions with
     | [ s ] -> Assert.Equal("q", s.SourceText)
     | other -> failwithf "Expected exactly one while-nested note, got %A" other
+
+[<Fact>]
+let ``a collection-callback outer loop counts as a loop`` () =
+    // customers |> List.iter (fun c -> for o in db.Orders do ...) runs the
+    // query once per element exactly like a for-loop
+    let suggestions =
+        queriesIn
+            "open System.Linq\ntype Db() =\n    member _.Orders = [ 1; 2 ].AsQueryable()\nlet f (db: Db) (xs: int list) =\n    xs |> List.iter (fun x ->\n        for o in db.Orders do\n            printfn \"%d %d\" x o)"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("db.Orders", s.SourceText)
+    | other -> failwithf "Expected exactly one callback N+1 note, got %A" other
+
+[<Fact>]
+let ``chunkBySize in the callback pipeline still suppresses`` () =
+    Assert.Empty(
+        queriesIn
+            "open System.Linq\ntype Db() =\n    member _.Orders = [ 1; 2 ].AsQueryable()\nlet f (db: Db) (xs: int list) =\n    xs |> List.chunkBySize 50 |> List.iter (fun batch ->\n        for o in db.Orders do\n            printfn \"%d %d\" batch.Length o)"
+    )

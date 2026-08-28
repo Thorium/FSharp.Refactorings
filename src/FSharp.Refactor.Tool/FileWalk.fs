@@ -52,6 +52,17 @@ let files (pattern: string) (root: string) : string seq =
             yield! here
 
             for subdirectory in subdirectories do
-                if not (isPruned subdirectory) then
+                // a junction or symlink pointing at an ancestor loops this
+                // walk forever — reparse points are not followed
+                let isReparse =
+                    try
+                        File
+                            .GetAttributes(subdirectory)
+                            .HasFlag System.IO.FileAttributes.ReparsePoint
+                    with
+                    | :? System.IO.IOException
+                    | :? System.UnauthorizedAccessException -> true
+
+                if not (isPruned subdirectory) && not isReparse then
                     pending.Push subdirectory
     }
