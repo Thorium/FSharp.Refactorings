@@ -31,16 +31,16 @@ jobs:
 
       - name: Lint
         run: |
-          dotnet dotnet-fsharplint lint src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj
+          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Analyzers/FSharp.Refactorings.Analyzers.fsproj
+          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Tool/FSharp.Refactorings.Apply.fsproj
           dotnet dotnet-fsharplint lint tests/FSharp.Refactorings.Tests/FSharp.Refactorings.Tests.fsproj
 
+      # both shipped projects, not just the analyzers: the apply tool is F#
+      # we ship too, and it went a long time unchecked
       - name: Self-analyze (dogfood)
-        run: >
-          dotnet fsharp-analyzers
-          --project src/FSharp.Refactorings.Analyzers/FSharp.Refactorings.Analyzers.fsproj
-          --analyzers-path src/FSharp.Refactorings.Analyzers/bin/Release/net8.0
-          --code-root .
-          --report self-analysis.sarif
+        run: |
+          dotnet fsharp-analyzers --project src/FSharp.Refactor.Analyzers/FSharp.Refactorings.Analyzers.fsproj --analyzers-path src/FSharp.Refactor.Analyzers/bin/Release/net8.0 --code-root . --report self-analysis.sarif
+          dotnet fsharp-analyzers --project src/FSharp.Refactor.Tool/FSharp.Refactorings.Apply.fsproj --analyzers-path src/FSharp.Refactor.Analyzers/bin/Release/net8.0 --code-root . --report self-analysis-apply.sarif
 
       - name: Pack
         run: |

@@ -1,0 +1,50 @@
+module FSharp.Refactor.Tests.LambdaBuiltinTests
+
+open Xunit
+open FSharp.Refactor
+open FSharp.Refactor.Tests.Parsing
+
+let private findIn (source: string) =
+    let tree, sourceText = parse source
+    LambdaBuiltin.find tree sourceText
+
+let private assertReplacement (source: string) (expected: string) =
+    match findIn source with
+    | [ s ] -> Assert.Equal(expected, s.ReplacementText)
+    | other -> failwithf "Expected exactly one suggestion, got %d: %A" (List.length other) other
+
+let private assertNoSuggestion (source: string) = Assert.Empty(findIn source)
+
+[<Fact>]
+let ``fun x -> x is id`` () =
+    assertReplacement "module Test\nlet m = List.map (fun x -> x) []" "id"
+
+[<Fact>]
+let ``fun (a, b) -> a is fst`` () =
+    assertReplacement "module Test\nlet m = List.map (fun (a, b) -> a) []" "fst"
+
+[<Fact>]
+let ``fun (a, b) -> b is snd`` () =
+    assertReplacement "module Test\nlet m = List.map (fun (a, b) -> b) []" "snd"
+
+[<Fact>]
+let ``a curried lambda is not fst`` () =
+    // `fun x y -> x` takes its arguments one at a time; `fst` takes a tuple
+    assertNoSuggestion "module Test\nlet m = List.map (fun x y -> x) []"
+
+[<Fact>]
+let ``an annotated parameter keeps the lambda`` () =
+    assertNoSuggestion "module Test\nlet m = List.map (fun (a: int, b) -> a) []"
+
+[<Fact>]
+let ``a lambda returning something else is untouched`` () =
+    assertNoSuggestion "module Test\nlet m = List.map (fun x -> x + 1) []"
+
+[<Fact>]
+let ``a three-element tuple is neither fst nor snd`` () =
+    assertNoSuggestion "module Test\nlet m = List.map (fun (a, b, c) -> a) []"
+
+[<Fact>]
+let ``a method argument keeps its lambda`` () =
+    // the lambda-to-delegate conversion is doing work a function value may not
+    assertNoSuggestion "module Test\nlet m (xs: System.Collections.Generic.List<int>) = xs.ConvertAll(fun x -> x)"

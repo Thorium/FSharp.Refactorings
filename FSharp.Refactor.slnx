@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FSharp.Refactor.Analyzers/FSharp.Refactor.Analyzers.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FSharp.Refactor.Tests/FSharp.Refactor.Tests.fsproj" />
+  </Folder>
+</Solution>

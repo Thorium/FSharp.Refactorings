@@ -1,0 +1,96 @@
+module FSharp.Refactor.Tests.ClosureCaptureTests
+
+open Xunit
+open FSharp.Refactor
+open FSharp.Refactor.Tests.Parsing
+
+let private capturesIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    ClosureCapture.find tree sourceText checkResults
+
+let private sourcePrefix =
+    "type Src() =\n    let fired = Event<int>()\n    member _.Fired = fired.Publish\n"
+
+[<Fact>]
+let ``this-capturing event handler is noted`` () =
+    let suggestions =
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    let mutable total = 0\n    member this.Hook() = src.Fired.Add(fun n -> this.Bump n)\n    member this.Bump n = total <- total + n"
+        )
+
+    match suggestions with
+    | [ s ] ->
+        Assert.Equal("this", s.CapturedName)
+        Assert.Equal("Add", s.SinkName)
+    | other -> failwithf "Expected exactly one capture note, got %A" other
+
+[<Fact>]
+let ``instance field capture is an implicit this capture`` () =
+    let suggestions =
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    let mutable total = 0\n    member _.Hook() = src.Fired.Add(fun n -> total <- total + n)\n    member _.Total = total"
+        )
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("total", s.CapturedName)
+    | other -> failwithf "Expected exactly one field-capture note, got %A" other
+
+[<Fact>]
+let ``stateless handler is fine`` () =
+    Assert.Empty(
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    member _.Hook() = src.Fired.Add(fun n -> printfn \"%d\" n)"
+        )
+    )
+
+[<Fact>]
+let ``Subscribe is also a sink`` () =
+    let suggestions =
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    let mutable total = 0\n    member this.Hook() = src.Fired.Subscribe(fun n -> this.Bump n) |> ignore\n    member this.Bump n = total <- total + n"
+        )
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("Subscribe", s.SinkName)
+    | other -> failwithf "Expected exactly one Subscribe note, got %A" other
+
+[<Fact>]
+let ``Observable module functions are sinks`` () =
+    let suggestions =
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    let mutable total = 0\n    member this.Hook() = src.Fired |> Observable.add (fun n -> this.Bump n)\n    member this.Bump n = total <- total + n"
+        )
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("add", s.SinkName)
+    | other -> failwithf "Expected exactly one Observable.add note, got %A" other
+
+[<Fact>]
+let ``ResizeArray Add is not a sink`` () =
+    Assert.Empty(
+        capturesIn
+            "type Keeper() =\n    let handlers = ResizeArray<int -> unit>()\n    member this.Hook() = handlers.Add(fun n -> this.Bump n)\n    member _.Bump(n: int) = ignore n"
+    )
+
+[<Fact>]
+let ``shadowing lambda parameter suppresses the note`` () =
+    Assert.Empty(
+        capturesIn (
+            sourcePrefix
+            + "type Sub(src: Src) =\n    let mutable total = 0\n    member _.Hook(f: int -> int) = src.Fired.Add(fun total -> ignore (total + 1))\n    member _.Total = total"
+        )
+    )
+
+[<Fact>]
+let ``module-level subscription has no this to capture`` () =
+    Assert.Empty(
+        capturesIn (
+            sourcePrefix
+            + "let src = Src()\nlet hook () = src.Fired.Add(fun n -> printfn \"%d\" n)"
+        )
+    )

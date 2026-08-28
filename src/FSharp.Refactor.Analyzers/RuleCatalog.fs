@@ -1,0 +1,185 @@
+/// What kind of change each rule proposes.
+///
+/// The distinction that matters in practice is whether a fix is worth another
+/// person's review time. Running the whole rule set over a repository you do
+/// not maintain and opening a pull request from the result is a good way to
+/// waste everyone's afternoon: nobody wants "removed an empty attribute
+/// argument list" across two hundred files. A disposable that is never
+/// disposed is a different conversation.
+///
+///     fsharp-refactor Their.fsproj --categories correctness,performance
+///
+/// is the run for someone else's codebase. Everything is the run for your own.
+///
+/// The four categories:
+///
+///   correctness — a defect. The code does something other than what it
+///                 looks like it does: a race, a swallowed exception, a
+///                 disposable that leaks, a comparison that never holds.
+///   performance — measurably wasteful, but correct. Allocations that need
+///                 not happen, repeated work, a scan where a lookup would do.
+///   idiom       — the same behaviour written the way F# writes it. Worth
+///                 doing, and worth agreeing on first: it is a matter of
+///                 house style as much as anything.
+///   cosmetic    — punctuation and spelling of code. Real cleanups, and
+///                 nobody's idea of a welcome pull request from a stranger.
+module FSharp.Refactor.RuleCatalog
+
+open System
+
+[<RequireQualifiedAccess>]
+type Category =
+    | Correctness
+    | Performance
+    | Idiom
+    | Cosmetic
+
+let name (category: Category) =
+    match category with
+    | Category.Correctness -> "correctness"
+    | Category.Performance -> "performance"
+    | Category.Idiom -> "idiom"
+    | Category.Cosmetic -> "cosmetic"
+
+let all =
+    [ Category.Correctness
+      Category.Performance
+      Category.Idiom
+      Category.Cosmetic ]
+
+let parse (text: string) =
+    let wanted = text.Trim()
+
+    all
+    |> List.tryFind (fun c -> String.Equals(name c, wanted, StringComparison.OrdinalIgnoreCase))
+
+/// The categories a stranger's repository is worth a pull request over.
+let substantive = set [ Category.Correctness; Category.Performance ]
+
+/// Every rule, by code. A rule absent here reads as `idiom`, which keeps a
+/// newly added rule out of `--categories correctness` until someone has
+/// decided where it belongs.
+let private categories =
+    [ // --- correctness: the code does not do what it looks like it does
+      "FR0014", Category.Correctness // ContainsKey + indexer: races on ConcurrentDictionary
+      "FR0017", Category.Correctness // Async discarded with ignore never runs
+      "FR0018", Category.Correctness // check-then-add races
+      "FR0019", Category.Correctness // Equals without GetHashCode
+      "FR0020", Category.Correctness // abstract member called during construction
+      "FR0027", Category.Correctness // lambda capturing this holds the object alive
+      "FR0032", Category.Correctness // disposable field, no IDisposable
+      "FR0036", Category.Correctness // runtime type comparison breaks on a rename
+      "FR0044", Category.Correctness // raise ex resets the stack trace
+      "FR0045", Category.Correctness // x = nan never holds
+      "FR0046", Category.Correctness // locking a process-wide singleton
+      "FR0047", Category.Correctness // Dispose that misses a field
+      "FR0048", Category.Correctness // String.Format placeholder without an argument
+      "FR0049", Category.Correctness // sync-over-async deadlocks
+      "FR0054", Category.Correctness // raise inside Equals/GetHashCode/Dispose
+      "FR0055", Category.Correctness // swallowing every exception
+      "FR0061", Category.Correctness // invalidArg naming a parameter that does not exist
+      "FR0062", Category.Correctness // public module-level mutable state
+      "FR0063", Category.Correctness // raise in finally discards the exception in flight
+      "FR0064", Category.Correctness // raising runtime-reserved exceptions
+      "FR0065", Category.Correctness // weak cryptography
+      "FR0066", Category.Correctness // SQL assembled from strings
+      "FR0067", Category.Correctness // culture-sensitive parsing
+      "FR0068", Category.Correctness // duplicate enum values conflate cases
+      "FR0072", Category.Correctness // a wildcard hiding one or two real cases
+      "FR0075", Category.Correctness // a disposable bound with let is never disposed
+      "FR0077", Category.Correctness // object expression missing interface members (FS0366)
+      "FR0080", Category.Correctness // leading TABs (FS1161)
+      "FR0089", Category.Correctness // [ 1, 2 ] is a one-element list of a tuple
+      "FR0100", Category.Correctness // an unfinished branch returning a plausible value
+
+      // --- performance: correct, but doing work it need not
+      "FR0004", Category.Performance
+      "FR0011", Category.Performance
+      "FR0015", Category.Performance
+      "FR0016", Category.Performance
+      "FR0021", Category.Performance
+      "FR0028", Category.Performance // N+1 queries
+      "FR0029", Category.Performance // task state machine
+      "FR0030", Category.Performance
+      "FR0035", Category.Performance
+      "FR0037", Category.Performance
+      "FR0038", Category.Performance
+      "FR0039", Category.Performance
+      "FR0040", Category.Performance
+      "FR0041", Category.Performance
+      "FR0050", Category.Performance
+      "FR0051", Category.Performance
+      "FR0052", Category.Performance
+      "FR0053", Category.Performance
+      "FR0058", Category.Performance
+      "FR0059", Category.Performance
+      "FR0069", Category.Performance
+      "FR0070", Category.Performance
+      "FR0071", Category.Performance
+      "FR0076", Category.Performance
+      "FR0079", Category.Performance
+      "FR0093", Category.Performance
+
+      // --- idiom: same behaviour, written the way F# writes it
+      "FR0001", Category.Idiom
+      "FR0002", Category.Idiom
+      "FR0003", Category.Idiom
+      "FR0005", Category.Idiom
+      "FR0006", Category.Idiom
+      "FR0007", Category.Idiom
+      "FR0008", Category.Idiom
+      "FR0009", Category.Idiom
+      "FR0010", Category.Idiom
+      "FR0012", Category.Idiom
+      "FR0022", Category.Idiom
+      "FR0023", Category.Idiom
+      "FR0024", Category.Idiom
+      "FR0025", Category.Idiom
+      "FR0026", Category.Idiom
+      "FR0031", Category.Idiom
+      "FR0033", Category.Idiom
+      "FR0034", Category.Idiom
+      "FR0042", Category.Idiom
+      "FR0043", Category.Idiom
+      "FR0073", Category.Idiom
+      "FR0074", Category.Idiom
+      "FR0078", Category.Idiom
+      "FR0081", Category.Idiom
+      "FR0087", Category.Idiom
+      "FR0090", Category.Idiom
+      "FR0091", Category.Idiom
+      "FR0092", Category.Idiom
+      "FR0095", Category.Idiom
+
+      // --- cosmetic: punctuation and spelling of code
+      "FR0013", Category.Cosmetic
+      "FR0057", Category.Cosmetic // XML doc drift
+      "FR0060", Category.Cosmetic
+      "FR0082", Category.Cosmetic
+      "FR0083", Category.Cosmetic
+      "FR0084", Category.Cosmetic
+      "FR0085", Category.Cosmetic
+      "FR0086", Category.Cosmetic
+      "FR0088", Category.Cosmetic
+      "FR0094", Category.Cosmetic
+      "FR0096", Category.Cosmetic
+      "FR0097", Category.Cosmetic
+      "FR0098", Category.Cosmetic
+      "FR0099", Category.Cosmetic ]
+    |> Map.ofList
+
+/// The category of a rule; anything unlisted reads as `idiom`.
+let categoryOf (code: string) =
+    categories.TryFind(code.ToUpperInvariant())
+    |> Option.defaultValue Category.Idiom
+
+/// Every known code in the given categories.
+let codesIn (wanted: Set<Category>) =
+    categories
+    |> Map.toSeq
+    |> Seq.filter (fun (_, category) -> wanted.Contains category)
+    |> Seq.map fst
+    |> Set.ofSeq
+
+/// Every code the catalog knows, for tests that check nothing was forgotten.
+let known = categories |> Map.toSeq |> Seq.map fst |> Set.ofSeq

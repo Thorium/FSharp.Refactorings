@@ -1,0 +1,78 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Parsing.fs" />
+    <Compile Include="ConfigurationTests.fs" />
+    <Compile Include="RuleCatalogTests.fs" />
+    <Compile Include="MatchToIfTests.fs" />
+    <Compile Include="OptionModuleTests.fs" />
+    <Compile Include="CompositionTests.fs" />
+    <Compile Include="ConversionMoveTests.fs" />
+    <Compile Include="CeStripTests.fs" />
+    <Compile Include="ActivePatternTests.fs" />
+    <Compile Include="MutableRemovalTests.fs" />
+    <Compile Include="TupleParamsTests.fs" />
+    <Compile Include="ResultModuleTests.fs" />
+    <Compile Include="SimplificationTests.fs" />
+    <Compile Include="StructActivePatternTests.fs" />
+    <Compile Include="HintEngineTests.fs" />
+    <Compile Include="RedundantParensTests.fs" />
+    <Compile Include="MethodCallParensTests.fs" />
+    <Compile Include="LambdaBuiltinTests.fs" />
+    <Compile Include="PatternParensTests.fs" />
+    <Compile Include="TypeSyntaxTests.fs" />
+    <Compile Include="TrailingSemicolonTests.fs" />
+    <Compile Include="UnimplementedBranchTests.fs" />
+    <Compile Include="DictTryGetTests.fs" />
+    <Compile Include="NewAnalyzerTests.fs" />
+    <Compile Include="ObjectRulesTests.fs" />
+    <Compile Include="DuFieldNamesTests.fs" />
+    <Compile Include="ParamOrderTests.fs" />
+    <Compile Include="RaiseFailwithTests.fs" />
+    <Compile Include="AutoPropertyTests.fs" />
+    <Compile Include="ClosureCaptureTests.fs" />
+    <Compile Include="QueryInLoopTests.fs" />
+    <Compile Include="TaskStateMachineTests.fs" />
+    <Compile Include="AddRangeTests.fs" />
+    <Compile Include="ObjectDesignTests.fs" />
+    <Compile Include="OptionMatchTests.fs" />
+    <Compile Include="LoopPerfTests.fs" />
+    <Compile Include="CharOverloadTests.fs" />
+    <Compile Include="CaseInsensitiveTests.fs" />
+    <Compile Include="VectorizedLinqTests.fs" />
+    <Compile Include="SprintfInterpolationTests.fs" />
+    <Compile Include="CriticalReviewTests.fs" />
+    <Compile Include="CorrectnessRulesTests.fs" />
+    <Compile Include="AsyncPerfRulesTests.fs" />
+    <Compile Include="StructOptionTests.fs" />
+    <Compile Include="AttributeMergeTests.fs" />
+    <Compile Include="QualityRulesTests.fs" />
+    <Compile Include="PerfTests.fs" />
+    <Compile Include="ModernizationTests.fs" />
+    <Compile Include="ApiChangesTests.fs" />
+    <Compile Include="FileWalkTests.fs" />
+    <Compile Include="CorpusValidation.fs" />
+
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0" />
+    <PackageReference Update="FSharp.Core" Version="10.1.201" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FSharp.Refactor.Analyzers\FSharp.Refactor.Analyzers.fsproj" />
+    <ProjectReference Include="..\..\src\FSharp.Refactor.Tool\FSharp.Refactor.Tool.fsproj" />
+  </ItemGroup>
+
+</Project>
+
+
+

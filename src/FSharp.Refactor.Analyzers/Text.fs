@@ -1,0 +1,379 @@
+/// Helpers for turning FCS ranges back into source text.
+/// All refactorings emit minimal range-based edits, so extracting the exact
+/// original text of a sub-expression is the core primitive.
+module FSharp.Refactor.Text
+
+open FSharp.Compiler.Syntax
+open FSharp.Compiler.Text
+
+/// The exact source text covered by a range.
+let textOfRange (source: ISourceText) (r: range) : string =
+    if r.StartLine = r.EndLine then
+        source.GetLineString(r.StartLine - 1).Substring(r.StartColumn, r.EndColumn - r.StartColumn)
+    else
+        [ for lineNumber in r.StartLine .. r.EndLine do
+              let line = source.GetLineString(lineNumber - 1)
+
+              if lineNumber = r.StartLine then
+                  line.Substring r.StartColumn
+              elif lineNumber = r.EndLine then
+                  line.Substring(0, r.EndColumn)
+              else
+                  line ]
+        |> String.concat "\n"
+
+let isSingleLine (r: range) = r.StartLine = r.EndLine
+
+/// Where a new attribute belongs on a declaration.
+///
+/// A declaration's range starts at its XML doc, so inserting at the range
+/// start puts `[<Struct>]` ABOVE the `///` lines. That compiles, but the
+/// attribute belongs against the thing it decorates, so skip the doc first.
+/// Returns the position, whose column is also the indent to line up with.
+let attributeInsertPos (source: ISourceText) (declRange: range) : pos =
+    let isDocLine (n: int) =
+        n <= source.GetLineCount()
+        && (source.GetLineString(n - 1)).TrimStart().StartsWith "///"
+
+    let mutable line = declRange.StartLine
+
+    while isDocLine line do
+        line <- line + 1
+
+    let column =
+        if line <= source.GetLineCount() then
+            let text = source.GetLineString(line - 1)
+            text.Length - text.TrimStart().Length
+        else
+            declRange.StartColumn
+
+    Position.mkPos line column
+
+/// One project file's parse artifacts, for the project-wide (API-changing)
+/// rule variants: they read call sites out of files other than the one the
+/// definition lives in.
+type FileContext =
+    { FileName: string
+      Source: ISourceText
+      ParseTree: ParsedInput }
+
+/// True when any two of these ranges nest or coincide within one file.
+///
+/// A multi-edit suggestion is atomic — its definition edit and every
+/// call-site edit apply together or not at all — so nested ranges make it
+/// unappliable: splicing the outer one destroys or duplicates the inner.
+/// `f (f (1, 2), 3)` is the shape that produces them.
+let rangesNest (ranges: range list) =
+    ranges
+    |> List.indexed
+    |> List.exists (fun (i, r) ->
+        ranges
+        |> List.skip (i + 1)
+        |> List.exists (fun other ->
+            r.FileName.Equals(other.FileName, System.StringComparison.OrdinalIgnoreCase)
+            && (Range.rangeContainsRange r other || Range.rangeContainsRange other r)))
+
+/// Strip redundant outer parens from an expression whose new context makes
+/// them unnecessary (e.g. a lambda body inside our own parenthesized template).
+[<TailCall>]
+let rec stripParens (e: SynExpr) =
+    match e with
+    | SynExpr.Paren(expr = inner) -> stripParens inner
+    | _ -> e
+
+/// Expressions that need no parentheses when used as a pipe source or a
+/// function argument.
+let isAtomic (e: SynExpr) =
+    match e with
+    | SynExpr.Ident _
+    | SynExpr.LongIdent _
+    | SynExpr.Const _
+    | SynExpr.Paren _
+    | SynExpr.DotGet _ -> true
+    // NOT a high-precedence application. `f(x)` and `X.Y(x)` carry
+    // ExprAtomicFlag.Atomic, but F# still rejects them unparenthesised in
+    // argument position: `isNull Environment.GetEnvironmentVariable("CI")`
+    // is error FS0597, "this argument expression needs parentheses". A
+    // corpus run over FSharp.Data caught FR0012 emitting exactly that.
+    // Parenthesising is always semantically safe, so treat them as needing
+    // it rather than trying to tell argument position from pipe source.
+    | _ -> false
+
+/// The expression's text, parenthesized unless it is atomic.
+///
+/// A call written in .NET style needs the parentheses moved rather than
+/// added: F# brackets the whole application, so `f(x)` becomes `(f x)`
+/// and not `(f(x))`. Only single, already-atomic arguments are moved —
+/// a tuple `Path.Combine(a, b)` is the argument list and must keep its
+/// parentheses, and `f (a + b)` would change meaning without them.
+let atomicText (source: ISourceText) (e: SynExpr) =
+    let text = textOfRange source e.Range
+
+    if isAtomic e then
+        text
+    else
+        match e with
+        | SynExpr.App(flag = ExprAtomicFlag.Atomic; funcExpr = func; argExpr = SynExpr.Paren(expr = inner)) when
+            isAtomic inner
+            && (match inner with
+                | SynExpr.Tuple _ -> false
+                | _ -> true)
+            ->
+            $"({textOfRange source func.Range} {textOfRange source inner.Range})"
+        | _ -> $"({text})"
+
+/// The expression's text as a function argument: parenthesized unless atomic,
+/// and always parenthesized when it starts with `-` (it would parse as
+/// subtraction).
+let argumentText (source: ISourceText) (e: SynExpr) =
+    let text = textOfRange source e.Range
+
+    if isAtomic e && not (text.StartsWith '-') then
+        text
+    else
+        // shares atomicText's bracket placement: `f(x)` reads as `(f x)`
+        atomicText source e
+
+/// Pure atoms whose evaluation cannot run user code — safe to evaluate
+/// eagerly where the original code evaluated them lazily. Empty collection
+/// literals qualify; non-empty ones would evaluate their elements. Dotted
+/// paths are deliberately excluded: `DateTime.Now` and friends are property
+/// getters whose evaluation is observable.
+let isPureAtom (e: SynExpr) =
+    match e with
+    | SynExpr.Ident _
+    | SynExpr.Const _
+    | SynExpr.Null _
+    | SynExpr.ArrayOrList(exprs = []) -> true
+    | _ -> false
+
+/// True when the expression is ordinary expression syntax that can be moved
+/// into a lambda body. Computation-expression-only forms (`return e`,
+/// `yield e`, `do! e`, `let! ...`) cannot.
+let isPlainBody (e: SynExpr) =
+    match e with
+    | SynExpr.YieldOrReturn _
+    | SynExpr.YieldOrReturnFrom _
+    | SynExpr.DoBang _ -> false
+    | SynExpr.LetOrUse lou -> not lou.IsBang
+    | _ -> true
+
+/// An identifier expression, whether parsed as Ident or a single-segment
+/// LongIdent (operators like `|>` come through as the latter).
+[<return: Struct>]
+let (|IdentName|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Ident ident -> ValueSome ident.idText
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ ident ])) -> ValueSome ident.idText
+    | _ -> ValueNone
+
+/// Like IdentName, but yields the Ident itself (for symbol resolution).
+[<return: Struct>]
+let (|SingleIdent|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Ident ident -> ValueSome ident
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ ident ])) -> ValueSome ident
+    | _ -> ValueNone
+
+/// True when the text ends in a printf format specifier whose leading `%`
+/// is not itself escaped (`%%`) — the shape a typed interpolation hole has
+/// in the literal part preceding its `{`.
+let endsWithFormatSpecifier (text: string) =
+    System.Text.RegularExpressions.Regex.IsMatch(text, @"%[-+0# ]*[0-9]*(\.[0-9]+)?[a-zA-Z]$")
+    && (let idx = text.LastIndexOf '%'
+        let mutable run = 0
+        let mutable i = idx - 1
+
+        while i >= 0 && text.[i] = '%' do
+            run <- run + 1
+            i <- i - 1
+
+        run % 2 = 0)
+
+[<return: Struct>]
+let (|BoolConst|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Const(SynConst.Bool b, _) -> ValueSome b
+    | _ -> ValueNone
+
+[<return: Struct>]
+let (|UnitConst|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Const(SynConst.Unit, _) -> ValueSome()
+    | _ -> ValueNone
+
+[<return: Struct>]
+let (|ZeroConst|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.Const(SynConst.Int32 0, _) -> ValueSome()
+    | _ -> ValueNone
+
+/// `lhs |> rhs` (the parsed shape of the infix pipe).
+[<return: Struct>]
+let (|PipeApp|_|) (e: SynExpr) =
+    match e with
+    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = IdentName "op_PipeRight"; argExpr = lhs); argExpr = rhs) ->
+        ValueSome(lhs, rhs)
+    | _ -> ValueNone
+
+/// A guard-free match clause's pattern and body.
+let simpleClause (SynMatchClause(pat = pat; whenExpr = whenExpr; resultExpr = result)) =
+    match whenExpr with
+    | Some _ -> None
+    | None -> Some(pat, result)
+
+/// The name a case pattern binds: `v`, `(v)`, or None for `_`.
+[<TailCall>]
+let rec boundVar (arg: SynPat) =
+    match arg with
+    | SynPat.Named(ident = SynIdent(ident = v)) -> Some(Some v.idText)
+    | SynPat.Wild _ -> Some None
+    | SynPat.Paren(pat = inner) -> boundVar inner
+    | _ -> None
+
+/// Lambda parameter name for an optionally-bound variable.
+let lambdaParam (boundVar: string option) = defaultArg boundVar "_"
+
+/// Every name bound anywhere in a pattern (loop patterns, lambda
+/// parameters, constructor arguments).
+[<TailCall>]
+let rec patBoundNamesLoop (acc: string list) (pending: SynPat list) =
+    match pending with
+    | [] -> acc
+    | p :: rest ->
+        let acc, next =
+            match p with
+            | SynPat.Named(ident = SynIdent(ident = id)) -> id.idText :: acc, rest
+            | SynPat.Typed(pat = inner)
+            | SynPat.Attrib(pat = inner)
+            | SynPat.Paren(inner, _) -> acc, inner :: rest
+            | SynPat.Tuple(elementPats = ps)
+            | SynPat.ArrayOrList(elementPats = ps)
+            | SynPat.Ands(pats = ps) -> acc, ps @ rest
+            | SynPat.As(lhsPat = l; rhsPat = r)
+            | SynPat.Or(lhsPat = l; rhsPat = r) -> acc, l :: r :: rest
+            | SynPat.LongIdent(argPats = SynArgPats.Pats ps) -> acc, ps @ rest
+            | _ -> acc, rest
+
+        patBoundNamesLoop acc next
+
+let patBoundNames (p: SynPat) : string list = patBoundNamesLoop [] [ p ]
+
+/// True when the expression's source text can be inlined at an arbitrary
+/// single-line expression position without changing how it parses. Anything
+/// greedy enough to swallow following tokens (`else`, `then`, a pipeline
+/// stage), or that needs `;`/`in` on one line, is rejected; parenthesized
+/// expressions are always fine.
+[<TailCall>]
+let rec isSafeInline (e: SynExpr) : bool =
+    match e with
+    | SynExpr.Paren _ -> true
+    | SynExpr.IfThenElse _
+    | SynExpr.Match _
+    | SynExpr.MatchLambda _
+    | SynExpr.MatchBang _
+    | SynExpr.Lambda _
+    | SynExpr.LetOrUse _
+    | SynExpr.Sequential _
+    | SynExpr.TryWith _
+    | SynExpr.TryFinally _
+    | SynExpr.Do _
+    | SynExpr.DoBang _
+    | SynExpr.While _
+    | SynExpr.For _
+    | SynExpr.ForEach _ -> false
+    // An application is only as safe as its rightmost part:
+    // `f <| fun x -> x` ends in an unparenthesized lambda.
+    | SynExpr.App(argExpr = arg) -> isSafeInline arg
+    | SynExpr.Tuple(exprs = exprs) ->
+        match exprs with
+        | [] -> true
+        | _ -> isSafeInline (List.last exprs)
+    | SynExpr.Typed(expr = inner) -> isSafeInline inner
+    | _ -> true
+
+/// Does an attribute list carry an attribute with this (short) name?
+/// Matches both `[<CustomOperation ...>]` and `[<CustomOperationAttribute ...>]`.
+let hasAttributeNamed (name: string) (attrs: SynAttributes) =
+    attrs
+    |> List.exists (fun attrList ->
+        attrList.Attributes
+        |> List.exists (fun a ->
+            match a.TypeName with
+            | SynLongIdent(id = ids) when not ids.IsEmpty ->
+                let t = (List.last ids).idText
+                t = name || t = name + "Attribute"
+            | _ -> false))
+
+/// Member names of the computation-expression builder protocol. A type
+/// carrying two or more of these is a CE builder, and F# requires builder
+/// members to be instance members (the builder is a value).
+let ceProtocolNames =
+    set
+        [ "Bind"
+          "Return"
+          "ReturnFrom"
+          "Yield"
+          "YieldFrom"
+          "Zero"
+          "Combine"
+          "Delay"
+          "Run"
+          "For"
+          "While"
+          "TryWith"
+          "TryFinally"
+          "Using"
+          "Source"
+          "MergeSources"
+          "BindReturn" ]
+
+/// The name of a `member this.Name ...` definition, if that is its shape.
+let memberDefnName (m: SynMemberDefn) =
+    match m with
+    | SynMemberDefn.Member(memberDefn = SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = ids)))) when
+        not ids.IsEmpty
+        ->
+        Some (List.last ids).idText
+    | _ -> None
+
+/// Types whose instance-ness is a contract rather than a choice: CE builders
+/// (two or more protocol members, or any [<CustomOperation>]), and subclasses
+/// (`inherit ...`), whose members frameworks like SignalR dispatch on
+/// instances by name.
+let instanceIsContract (members: SynMemberDefn list) =
+    let ceMembers =
+        members
+        |> List.choose memberDefnName
+        |> List.filter ceProtocolNames.Contains
+        |> List.distinct
+
+    ceMembers.Length >= 2
+    || members
+       |> List.exists (fun m ->
+           match m with
+           | SynMemberDefn.ImplicitInherit _
+           | SynMemberDefn.Inherit _ -> true
+           | SynMemberDefn.Member(memberDefn = SynBinding(attributes = attrs)) ->
+               hasAttributeNamed "CustomOperation" attrs
+           | _ -> false)
+
+/// Does the range cover a line carrying a compiler directive
+/// (#if/#else/#endif)? The parse tree only sees the active branch, so a fix
+/// replacing such a range would splice the directive structure apart and
+/// leave code that no longer compiles under the other defines.
+let spansDirective (source: ISourceText) (r: range) =
+    seq { r.StartLine .. r.EndLine }
+    |> Seq.exists (fun line ->
+        let text = (source.GetLineString(line - 1)).TrimStart()
+
+        text.StartsWith "#if" || text.StartsWith "#else" || text.StartsWith "#endif")
+
+/// Total line accessor: a stale or synthetic FCS range can point outside the
+/// current source snapshot. Out-of-bounds yields "" via a bounds check —
+/// nothing is caught, so real failures still propagate.
+let lineTextAt (source: ISourceText) (zeroBasedLine: int) =
+    if zeroBasedLine < 0 || zeroBasedLine >= source.GetLineCount() then
+        ""
+    else
+        source.GetLineString zeroBasedLine
