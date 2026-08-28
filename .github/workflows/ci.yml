@@ -31,21 +31,21 @@ jobs:
 
       - name: Lint
         run: |
-          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Analyzers/FSharp.Refactorings.Analyzers.fsproj
-          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Tool/FSharp.Refactorings.Apply.fsproj
-          dotnet dotnet-fsharplint lint tests/FSharp.Refactorings.Tests/FSharp.Refactorings.Tests.fsproj
+          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Analyzers/FSharp.Refactor.Analyzers.fsproj
+          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Tool/FSharp.Refactor.Tool.fsproj
+          dotnet dotnet-fsharplint lint tests/FSharp.Refactor.Tests/FSharp.Refactor.Tests.fsproj
 
       # both shipped projects, not just the analyzers: the apply tool is F#
       # we ship too, and it went a long time unchecked
       - name: Self-analyze (dogfood)
         run: |
-          dotnet fsharp-analyzers --project src/FSharp.Refactor.Analyzers/FSharp.Refactorings.Analyzers.fsproj --analyzers-path src/FSharp.Refactor.Analyzers/bin/Release/net8.0 --code-root . --report self-analysis.sarif
-          dotnet fsharp-analyzers --project src/FSharp.Refactor.Tool/FSharp.Refactorings.Apply.fsproj --analyzers-path src/FSharp.Refactor.Analyzers/bin/Release/net8.0 --code-root . --report self-analysis-apply.sarif
+          dotnet fsharp-analyzers --project src/FSharp.Refactor.Analyzers/FSharp.Refactor.Analyzers.fsproj --analyzers-path src/FSharp.Refactor.Analyzers/bin/Release/net8.0 --code-root . --report self-analysis.sarif
+          dotnet fsharp-analyzers --project src/FSharp.Refactor.Tool/FSharp.Refactor.Tool.fsproj --analyzers-path src/FSharp.Refactor.Analyzers/bin/Release/net8.0 --code-root . --report self-analysis-apply.sarif
 
       - name: Pack
         run: |
-          dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
-          dotnet pack src/FSharp.Refactorings.Apply -c Release -o artifacts
+          dotnet pack src/FSharp.Refactor.Analyzers -c Release -o artifacts
+          dotnet pack src/FSharp.Refactor.Tool -c Release -o artifacts
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -67,8 +67,8 @@ jobs:
 
       - name: Pack
         run: |
-          dotnet pack src/FSharp.Refactorings.Analyzers -c Release -o artifacts
-          dotnet pack src/FSharp.Refactorings.Apply -c Release -o artifacts
+          dotnet pack src/FSharp.Refactor.Analyzers -c Release -o artifacts
+          dotnet pack src/FSharp.Refactor.Tool -c Release -o artifacts
 
       - name: Push to NuGet
         run: >
