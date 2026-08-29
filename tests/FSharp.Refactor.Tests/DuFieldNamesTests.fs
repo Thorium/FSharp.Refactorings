@@ -24,7 +24,7 @@ let private assertFieldNames (source: string) (expectedPatched: string) =
             |> List.fold (fun acc (r, _, t) -> applyEdit acc r t) source
 
         Assert.Equal(expectedPatched, patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one field-name suggestion, got %d: %A" (List.length other) other
 
 [<Fact>]

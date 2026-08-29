@@ -55,3 +55,43 @@ let ``a record-field array aggregation is noted`` () =
     match suggestions with
     | [ s ] -> Assert.Equal("state.Buffer", s.ArrayName)
     | other -> failwithf "Expected exactly one vectorized note, got %A" other
+
+[<Fact>]
+let ``piped Array contains on an int array is noted`` () =
+    match vectorizedIn "let f (values: int[]) = values |> Array.contains 42" with
+    | [ s ] ->
+        Assert.Equal("contains", s.FunctionName)
+        Assert.Equal("values", s.ArrayName)
+    | other -> failwithf "Expected exactly one contains note, got %A" other
+
+[<Fact>]
+let ``direct Array contains on an int array is noted`` () =
+    match vectorizedIn "let f (values: int[]) = Array.contains 42 values" with
+    | [ s ] -> Assert.Equal("contains", s.FunctionName)
+    | other -> failwithf "Expected exactly one direct contains note, got %A" other
+
+[<Fact>]
+let ``Array contains on a list stays quiet`` () =
+    Assert.Empty(vectorizedIn "let f (values: int list) = values |> List.contains 42")
+
+[<Fact>]
+let ``Array contains on a float array stays quiet`` () =
+    // NaN: Enumerable.Contains uses EqualityComparer, F# contains uses (=)
+    Assert.Empty(vectorizedIn "let f (values: float[]) = values |> Array.contains 4.2")
+
+[<Fact>]
+let ``a contains inside a query expression stays quiet`` () =
+    // inside query { } this is a quotation for a provider's translator:
+    // SQLProvider turns Array.contains into SQL IN, and the Enumerable
+    // spelling may not translate at all
+    Assert.Empty(
+        vectorizedIn
+            "let f (values: int[]) (xs: int list) =\n    query {\n        for x in xs do\n            where (values |> Array.contains x)\n            select x\n    }"
+    )
+
+[<Fact>]
+let ``a sum inside a query expression stays quiet too`` () =
+    Assert.Empty(
+        vectorizedIn
+            "let f (values: int[]) (xs: int list) =\n    query {\n        for x in xs do\n            select (Array.sum values + x)\n    }"
+    )

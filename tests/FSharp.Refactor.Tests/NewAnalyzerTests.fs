@@ -19,7 +19,7 @@ let private assertRegexFix (source: string) (expectedReplacement: string) =
         | [ (range, _, replacement) ] ->
             Assert.Equal(expectedReplacement, replacement)
             let patched = applyEdit source range replacement
-            Assert.True(parsesCleanly patched, sprintf "Patched source does not parse:\n%s" patched)
+            Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
         | other -> failwithf "Expected exactly one edit, got %A" other
     | other -> failwithf "Expected exactly one regex suggestion, got %d: %A" (List.length other) other
 
@@ -35,7 +35,7 @@ let private assertRegexHoist (source: string) (expectedPatched: string) =
             |> List.fold (fun acc (r, _, t) -> applyEdit acc r t) source
 
         Assert.Equal(expectedPatched, patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one hoist suggestion, got %d: %A" (List.length other) other
 
 [<Fact>]
@@ -130,7 +130,7 @@ let private assertPatchedStructDu (suggestions: StructDu.Suggestion list) (sourc
     | [ s ] ->
         let patched = applyEdit source s.InsertRange s.InsertText
         Assert.Equal(expectedPatched, patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one struct-DU suggestion, got %d: %A" (List.length other) other
 
 let private assertStructDu (source: string) (expectedPatched: string) =

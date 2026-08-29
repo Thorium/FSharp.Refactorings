@@ -110,7 +110,7 @@ let private inputParameter
                     else
                         let t = value.CurriedParameterGroups.[0].[0].Type
                         ValueSome $"(input: {t.Format symbolUse.DisplayContext})"
-                with _ ->
+                with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                     ValueNone
             | _ -> ValueNone
         | None -> ValueNone

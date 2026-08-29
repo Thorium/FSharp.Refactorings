@@ -74,7 +74,7 @@ NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT 
 Reference the package from the project you want analyzed:
 
 ```xml
-<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.6.3" PrivateAssets="all" />
+<PackageReference Include="FSharp.Refactor.Analyzers" Version="*" PrivateAssets="all" />
 ```
 
 then point Ionide at the restored analyzers in `.vscode/settings.json`:
@@ -83,19 +83,22 @@ then point Ionide at the restored analyzers in `.vscode/settings.json`:
 {
   "FSharp.enableAnalyzers": true,
   "FSharp.analyzersPath": [
-    "~/.nuget/packages/fsharp.refactor.analyzers/0.6.2/analyzers/dotnet/fs"
+    "~/.nuget/packages/fsharp.refactor.analyzers/<version>/analyzers/dotnet/fs"
   ]
 }
 ```
 
-(on Windows the cache lives under `%USERPROFILE%\.nuget\packages`). Suggestions
+replacing `<version>` with the version restore actually picked (the NuGet
+cache always keys folders by version, so this one path cannot float; check
+with `ls ~/.nuget/packages/fsharp.refactor.analyzers/`). On Windows the
+cache lives under `%USERPROFILE%\.nuget\packages`. Suggestions
 appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 
 ### CLI / CI
 
 ```bash
 dotnet tool install --global fsharp-analyzers
-fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.6.3/analyzers/dotnet/fs --code-root . --report analysis.sarif
+fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/<version>/analyzers/dotnet/fs --code-root . --report analysis.sarif
 ```
 
 `fsharp-analyzers` is the analyzer HOST, and it is the dotnet tool you
@@ -142,6 +145,8 @@ if applying ever introduces one.
 | `--max-passes <n>` | Fix-then-reanalyze iterations (default 5). |
 | `--help` | The same list, from the tool itself (`-h` and `/?` also work). |
 | `--api-changes` | Also apply the cross-file fixes described below. |
+| `--no-if-defs` | Never emit `#if`/`#else`/`#endif` pairs for capability fixes on multi-targeted projects (see below). The fixes stay plain, and any the legacy frameworks reject are put back by the final build check. |
+| `--report <file>` | Write every finding the run surfaced as SARIF 2.1.0 — the format GitHub code scanning renders as inline PR annotations. Pairs naturally with `--dry-run` for a CI lint gate. |
 
 ### Someone else's codebase
 
@@ -152,7 +157,7 @@ Every rule is one of four kinds, shown in the last column of
 |---|---|---|
 | `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 30 |
 | `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 29 |
-| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 32 |
+| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 33 |
 | `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 14 |
 
 This matters when the repository is not yours. Running everything over a
@@ -188,6 +193,50 @@ recategorization all came to exist.
 
 Nothing extra to do: a multi-targeted project is worked through framework
 by framework, narrowest first.
+
+Capability fixes get both worlds — using the project's own vocabulary.
+When a project also targets frameworks older than an overload (net4x,
+netstandard2.0), the tool reads the fsproj's `DefineConstants` and looks
+for a framework-shaped constant — `NETSTANDARD21`, `NET8`, digits
+required — whose `'$(TargetFramework)' == '...'` conditions cover only
+the modern frameworks. Names denoting a legacy framework (`NET48`,
+`NET451`, `NETSTANDARD2_0`) are refused outright whatever their
+conditions say: the SDK defines exactly those constants during the
+legacy compilations themselves, where no fsproj parse can see them. Flavor names sharing the same condition
+(SQLProvider defines `MICROSOFTSQL` right beside `NETSTANDARD21`) are
+passed over: their meaning is the flavor, and a sibling project
+compiling the same shared file may define them on legacy frameworks
+too. If a constant qualifies and the file already uses conditional
+compilation, FR0038 and FR0106 emit a pair instead of a fix the legacy
+half cannot compile:
+
+```fsharp
+#if NETSTANDARD21
+let orderNumber (s: string) = Int32.Parse(s.AsSpan(6, 5))
+#else
+let orderNumber (s: string) = Int32.Parse(s.Substring(6, 5))
+#endif
+```
+
+No invented constants, ever: a project defining no such constant gets the
+plain fix, and the final all-frameworks build stays the arbiter (a fix
+the legacy half rejects is put back). Constants appearing in a
+`DefineConstants` element whose condition the tool cannot fully read
+(anything beyond `'$(TargetFramework)' == 'X'` chained with `Or`) are
+disqualified rather than guessed at. A line already inside a positive
+region of the chosen constant — or a hand-written `NET*_OR_GREATER` —
+gets the plain fix (nothing legacy compiles it), a file with no `#if`
+anywhere stays free of them, and editors always suggest the plain form.
+`--no-if-defs` turns the pairing off entirely for a run that should never
+add conditional compilation, whatever the project defines.
+
+Large solutions stay affordable through three levers: one FCS checker
+serves the whole run (twenty projects share nearly all their reference
+assemblies, parsed once); a shared source file swept under one set of
+conditional-compilation defines is never re-swept by the next project
+that compiles it identically; and a multi-targeted project whose sources
+contain no `#if` at all gets a single-framework sweep, with the final
+all-frameworks build still verifying the rest.
 
 That is not busywork. A rule gated on what the target can resolve behaves
 differently per framework — `s.Contains 'x'` is offered under `net8.0`,
@@ -271,7 +320,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0038 | Char overloads for single-character strings (CA1834/1847/1865-67): `s.Contains "x"` → `s.Contains 'x'` and `sb.Append "x"` → `sb.Append 'x'` (both ordinal already — fix); `s.StartsWith("x", StringComparison.Ordinal)` → `s.StartsWith('x')` (fix); bare `StartsWith`/`EndsWith`/`IndexOf` are culture-sensitive where the char overload is ordinal, so those get an advisory note only; receivers typed-gated to `String`/`StringBuilder` | performance |
 | FR0039 | Allocating case-insensitive comparisons (CA1862, note): `a.ToLower() = b.ToLower()` and `s.ToLower().StartsWith "abc"` allocate lowered copies just to compare; `String.Equals(a, b, StringComparison...IgnoreCase)` / the comparison overloads are allocation-free — comparison type stays the author's deliberate choice | performance |
 | FR0040 | Redundant membership guards (CA1853/1868, fix): `if d.ContainsKey k then d.Remove k \|> ignore` → `d.Remove k \|> ignore`, `if not (s.Contains x) then s.Add x \|> ignore` → `s.Add x \|> ignore` — the operations already return `false` on a miss; typed-gated to `Dictionary`/`HashSet`/`SortedSet` | performance |
-| FR0041 | `Array.sum/average/min/max` on `int[]`/`int64[]` is a scalar loop; on .NET 8+ System.Linq's `Sum()`/`Average()`/`Min()`/`Max()` are SIMD-vectorized (note only: LINQ `Sum` throws on overflow where `Array.sum` wraps; floats excluded — NaN semantics differ) | performance |
+| FR0041 | `Array.sum/average/min/max/contains` on `int[]`/`int64[]` is a scalar loop; on .NET 8+ System.Linq's `Sum()`/`Average()`/`Min()`/`Max()`/`Contains()` are SIMD-vectorized (`Contains` measured ~5x at 1000 elements, ~6x at 100k; note only: LINQ `Sum` throws on overflow where `Array.sum` wraps; floats excluded — NaN semantics differ; quiet inside `query { }`, where the code is a quotation for a provider's translator and the LINQ spelling may not translate) | performance |
 | FR0042 | Fully applied `sprintf` → typed interpolated string (`sprintf "asdf %s" x` → `$"asdf %s{x}"`); specifiers are kept verbatim so the output is byte-identical; guards: regular literal with no `{`/`}`, simple arguments only, no `%a`/`%t`/`*`-widths, partial applications never match | idiom |
 | FR0043 | In an interpolated string that *already* has a typed hole, the remaining plain holes gain specifiers (`$"%s{name} is {age}"` → `$"%s{name} is %d{age}"`) — free compile-time type pinning since the string is on the printf path anyway; specifier-free strings are left on the F# 8 `String.Concat` fast path, and only ToString-identical specifiers are used (`%s`/`%d`/`%c`; never `%b` or `%f`) | idiom |
 | FR0044 | `raise ex` in a `with` handler resets the stack trace → `reraise ()` (CA2200, fix); skipped inside lambdas/CEs/nested trys where `reraise` would not compile or would mean a different exception | correctness |
@@ -281,11 +330,12 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0048 | `String.Format("{0} of {1}", x)` — a placeholder without an argument throws `FormatException` at runtime (CA2241, note); `{{` escapes handled, culture-first overload ignored | correctness |
 | FR0049 | Sync-over-async (CA1849/VSTHRD): `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, `Async.RunSynchronously`, `Thread.Sleep` **inside** `async`/`task { }` invite thread-pool starvation and deadlocks (typed-gated receivers; `Thread.Sleep n` gets a `do! Async.Sleep n` / `do! Task.Delay n` fix in statement position); `.Result`/`.Wait()`/`GetResult()` **outside** CEs get the boundary note — wrap in `task { }` or use the sync API (`Async.RunSynchronously` outside a CE is F#'s intended sync boundary and stays quiet) | correctness |
 | FR0050 | `let mutable total = 0` + `for x in xs do total <- total + x` → `let total = xs \|> List.sum` (fix); projections → `sumBy`, general combines → `fold (fun acc x -> ...) init` — same expression, same bindings, no mutable. The module matches the source's resolved kind: measured, `List.sum`/`Array.sum` run LEVEL with the loop while `Seq.sum` is ~50% slower on a list, so this is an idiom rule, and the rewrite never spells `Seq` when it knows better | idiom |
+| FR0107 | `let mutable found = false` + `for x in xs do if p x then found <- true` → `let found = xs \|> List.exists (fun x -> p x)` (fix); the `true`-initialized dual becomes `forall` with the predicate negated. Tightly gated because `exists` SHORT-CIRCUITS where the flag loop kept iterating: the loop body must be exactly the one `if` (no `else`, no second statement), the predicate must never mention the flag and must be visibly effect-free (any assignment, sequencing, statement construct or `ignore` inside it disqualifies), nothing may reassign the flag afterward, and the source must resolve to a real List/Array/Seq. Module-resolved like FR0050; measured level with the loop on the no-hit worst case, faster on any hit | idiom |
 | FR0051 | `acc <- acc @ [x]` / `acc <- Array.append acc [\|x\|]` inside a loop copies the accumulator per iteration — O(n²) (note): use a ResizeArray, or cons and `List.rev`. Also `acc <- acc + s` on a STRING (typed-proven) in any loop — the slowest string builder measured, 36x a StringBuilder at 1000 pieces; the note names StringBuilder or collect-then-`String.concat` | performance |
 | FR0052 | `q.Count = 0` on `ConcurrentQueue`/`Stack`/`Bag` → `q.IsEmpty` (CA1836, fix): their `Count` walks segments, `IsEmpty` peeks | performance |
 | FR0053 | `BitConverter.ToString(bytes).Replace("-", "")` → `System.Convert.ToHexString bytes` (CA1872, fix) | performance |
 | FR0054 | `raise`/`failwith` inside `Equals`/`GetHashCode`/`ToString`/`Dispose` overrides (CA1065, note): implicit callers (hash containers, debuggers, formatting, finalization) never expect them to throw; raises inside the member's own `try` stay quiet | correctness |
-| FR0055 | `try ... with _ -> ()` (or `:? Exception -> ()`) swallows every exception including cancellation, and `with _ -> ""` / `0` / `Unchecked.defaultof` / `None` / `null` / `[]` additionally disguises the failure as a result (note): log or `reraise ()`, and catch the specific type; deliberately ignoring a *specific* exception stays quiet, as does the `try ...; true with _ -> false` probe idiom | correctness |
+| FR0055 | `try ... with _ -> ()` (or `:? Exception -> ()`) swallows every exception including cancellation, and `with _ -> ""` / `0` / `false` / `Unchecked.defaultof` / `None` / `ValueNone` / `null` / `[]` additionally disguises the failure as a result (note): log or `reraise ()`, and catch the specific type; deliberately ignoring a *specific* exception stays quiet, and a bool fallback is quiet only for the genuine probe idiom — a try body answering with the opposite literal (`try ...; true with _ -> false`) | correctness |
 | FR0057 | XML doc drift (note): a doc comment with `<param>` tags that misses some actual parameters — the compiler warns about *unknown* names (FS3390) but not *missing* ones; fully undocumented functions are a style choice and stay quiet | cosmetic |
 | FR0058 | A `let rec` re-entering itself through `seq`/`taskSeq`/`asyncSeq { }` builds a fresh enumerator per recursion level — every element pays O(depth) `MoveNext`s (note): walk with an explicit `Stack`/queue inside a single builder | performance |
 | FR0059 | A `private` function returning `Some`/`None` moves to `ValueSome`/`ValueNone` (fix): definition constructors and every match site rewritten together — no heap allocation per call; any use where `option` is load-bearing (`List.tryPick f`, `Option.*` pipelines, `let`-bound results, explicit annotations) suppresses the whole suggestion | performance |
@@ -329,7 +379,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0097 | Redundant parentheses around a type: `(x: (int))` → `(x: int)`, `(string) list` → `string list`. Function and tuple types keep theirs, where the parens bind the type together | cosmetic |
 | FR0098 | The BCL name of a type F# abbreviates: `System.Int32` → `int`, `System.String` → `string`, `System.Object` → `obj`. Only the fully qualified form; a bare `Int32` depends on the opens and on what the file declares | cosmetic |
 | FR0099 | A `;` ending a line does nothing in light syntax: `let x = 1;` → `let x = 1`. Kept where it separates rather than terminates — inside a list, array, record, anonymous record or attribute group — and everywhere in a file that sets `#light "off"`. `;;` is left alone. OFF BY DEFAULT: it lexes every file containing a line-ending `;` and rarely finds anything — enable via `"FR0099": true` in fsharprefactor.json, or ask for it with `--codes FR0099` | cosmetic |
-| FR0100 | A match branch that says it is unfinished and then returns a stand-in — `\| Jordan ->` / `// Not supported yet` / `None` — becomes `raise (NotImplementedException())`, so the gap reports itself instead of reaching callers as a real-looking result. The comment must sit inside the branch, between the arrow and the value, where it describes that branch and nothing else; a bare `TODO` elsewhere never counts, and `\| Unknown -> None` with no such comment is left alone. `null` and `Unchecked.defaultof<_>` need the comment too — `\| [] -> Unchecked.defaultof<'T>` is the entire contract of a SingleOrDefault, and `\| null -> null` passes a sentinel through. Only fires where sibling branches actually compute, so a table of constants is not mistaken for a stub | correctness |
+| FR0100 | A match branch that says it is unfinished and then returns a stand-in — `\| Jordan ->` / `// Not supported yet` / `None` / `ValueNone` / `false` — becomes `raise (NotImplementedException())`, so the gap reports itself instead of reaching callers as a real-looking result. The comment must sit inside the branch, between the arrow and the value, where it describes that branch and nothing else; a bare `TODO` elsewhere never counts, and `\| Unknown -> None` with no such comment is left alone. `null` and `Unchecked.defaultof<_>` need the comment too — `\| [] -> Unchecked.defaultof<'T>` is the entire contract of a SingleOrDefault, and `\| null -> null` passes a sentinel through. Only fires where sibling branches actually compute, so a table of constants is not mistaken for a stub | correctness |
 | FR0101 | The Python `range(len(xs))` loop: `for i in 0 .. xs.Length - 1 do ... xs.[i]` → `for x in xs do ... x`, when the index's every use is indexing that same collection. Fix rewrites the header and each `xs.[i]`/`xs[i]`; an index also used as a value wants `iteri`, which changes shape enough to stay the author's call, and any `xs.[i] <- ...` keeps the loop | idiom |
 | FR0102 | Positional indexing into an F# LIST inside a loop — `names.[i]` walks i cons cells per access, the quietest quadratic in F#. Typed: arrays, ResizeArray and dictionaries share the syntax and are fine; `List.item`/`List.nth` pin the type by name. Constant indexes (`xs.[0]`) and receivers bound inside the loop are skipped. Advice: iterate directly (FR0101 fixes the canonical shape) or convert once with `List.toArray` | performance |
 | FR0103 | The Python isinstance ladder: an if/elif chain of `shape :? T` tests with `shape :?> T` casts in the branches becomes one `match` with `\| :? T as v ->` patterns — one type test per branch instead of test-plus-cast, and the unsafe `:?>` (an InvalidCastException waiting for a branch reorder) disappears. Needs two or more bare type-tests on the same plain identifier, single-line branches, and every cast targeting its own branch's type; a compound condition or a cross-cast keeps the chain | idiom |
@@ -353,6 +403,41 @@ trailing commas are tolerated:
     "conversionMove": { "enabled": false }
   }
 }
+```
+
+Paths can be excluded too — additively over the built-in defaults
+(`paket-files`, `.paket`, `node_modules`), which cover generated and
+vendored code a compilation nonetheless includes:
+
+```json
+{
+  "ignorePaths": [ "generated", "external/imported" ]
+}
+```
+
+A bare name matches as a whole path segment; an entry containing a slash
+matches anywhere in the normalized path; an entry containing `*` is a
+glob — `*` stays within a segment, `**` crosses them (`*.g.fs`,
+`src/generated/**`). Ignored files are neither analyzed nor even
+type-checked by the apply tool's sweep — on a paket-heavy solution that
+is a lot of vendored source nobody wants "fixed". Files opening with the
+conventional `// <auto-generated>` marker are skipped automatically
+wherever they sit, as is everything under `obj/`.
+
+Individual findings can be silenced in place with the F# analyzer SDK's
+own suppression comments — the same ones editors honor, so one comment
+silences both the light bulb and the apply tool (a suppressed finding is
+neither reported nor fixed):
+
+```fsharp
+// fsharpanalyzer: ignore-line-next FR0106
+let orderNumber (s: string) = Int32.Parse(s.Substring(6, 5))
+
+let inline dodgy (s: string) = s.Substring(0, 3) // fsharpanalyzer: ignore-line FR0106
+
+// fsharpanalyzer: ignore-file FR0031, FR0038
+// fsharpanalyzer: ignore-region-start FR0002
+// fsharpanalyzer: ignore-region-end
 ```
 
 A disabled rule skips its analysis entirely, so the file also works as a

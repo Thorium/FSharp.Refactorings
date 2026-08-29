@@ -81,7 +81,7 @@ let private locallyConstructed (check: FSharpCheckFileResults) (source: ISourceT
                 | :? FSharpMemberOrFunctionOrValue as value ->
                     (try
                         value.IsConstructor
-                     with _ ->
+                     with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                          false)
                     || (let enclosing = OptionModule.enclosingFullName value
 

@@ -50,8 +50,9 @@ let private isCatchAll (pat: SynPat) =
 let private isDefaultFallback (e: SynExpr) =
     match e with
     | SynExpr.Const(SynConst.Unit, _) -> false // handled as the empty body
-    // `try ping (); true with _ -> false` is the idiomatic bool probe —
-    // the failure IS the answer there, so bools stay quiet
+    // bools are decided by the caller, which can see the try BODY: the
+    // `try ping (); true with _ -> false` probe stays quiet, while
+    // `try parse s with _ -> false` disguises the failure as an answer
     | SynExpr.Const(SynConst.Bool _, _) -> false
     | SynExpr.Const _ -> true
     | SynExpr.Null _ -> true
@@ -81,13 +82,29 @@ let inline private (|IsDefaultFallback|_|) input =
     else
         ValueNone
 
+/// The expression a block evaluates to — the tail of its Sequential chain.
+let rec private lastExprOf (e: SynExpr) =
+    match e with
+    | SynExpr.Sequential(expr2 = e2) -> lastExprOf e2
+    | SynExpr.Paren(expr = inner) -> lastExprOf inner
+    | _ -> e
+
+/// Is a bool-literal catch-all the PROBE idiom — the try body answering
+/// with the opposite literal (`try ping (); true with _ -> false`, or the
+/// inverted did-it-throw probe)? Then the failure IS the answer. Any other
+/// body makes the literal a disguised default like the rest.
+let private isBoolProbe (tryBody: SynExpr) (fallback: bool) =
+    match lastExprOf tryBody with
+    | SynExpr.Const(SynConst.Bool bodyValue, _) -> bodyValue <> fallback
+    | _ -> false
+
 /// Find empty and default-substituting catch-all handlers.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree
 
     [ for _, expr in index.Exprs do
           match expr with
-          | SynExpr.TryWith(withCases = clauses) ->
+          | SynExpr.TryWith(tryExpr = tryBody; withCases = clauses) ->
               for clause in clauses do
                   match simpleClause clause with
                   | Some(pat, result) when isCatchAll pat ->
@@ -96,6 +113,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                           { Range = clause.Range
                             PatternText = textOfRange source pat.Range
                             FallbackText = None }
+                      | SynExpr.Const(SynConst.Bool fallback, _) as body when not (isBoolProbe tryBody fallback) ->
+                          { Range = clause.Range
+                            PatternText = textOfRange source pat.Range
+                            FallbackText = Some(textOfRange source body.Range) }
                       | IsDefaultFallback body ->
                           { Range = clause.Range
                             PatternText = textOfRange source pat.Range

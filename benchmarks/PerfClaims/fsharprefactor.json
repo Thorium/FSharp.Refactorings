@@ -1,0 +1,7 @@
+{
+  // The perf-claim gates measure BEFORE shapes on purpose: mutable
+  // accumulation loops, sprintf chains, ContainsKey+indexer pairs. A rule
+  // "fixing" a fixture would erase the very difference the gate measures,
+  // so this whole project is off-limits to the analyzers and the tool.
+  "ignorePaths": ["PerfClaims"]
+}

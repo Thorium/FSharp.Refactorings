@@ -68,7 +68,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
                     t.HasTypeDefinition
                     && t.TypeDefinition.TryFullName = Some "Microsoft.FSharp.Collections.FSharpList`1"
-                with _ ->
+                with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                     false
 
             match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with

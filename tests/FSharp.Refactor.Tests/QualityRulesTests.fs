@@ -324,7 +324,7 @@ let private assertHoisted (source: string) (expectedPatched: string) =
             |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
 
         Assert.Equal(expectedPatched, patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one invariant note, got %A" other
 
 [<Fact>]
@@ -391,7 +391,7 @@ let private assertExpanded (source: string) (expectedReplacement: string) =
     | [ s ] ->
         Assert.Equal(expectedReplacement, s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one wildcard note, got %A" other
 
 [<Fact>]

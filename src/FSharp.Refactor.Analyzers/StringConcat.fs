@@ -56,7 +56,7 @@ let private resolvesToString (check: FSharpCheckFileResults) (source: ISourceTex
         try
             let t = OptionModule.stripAbbreviations t
             t.HasTypeDefinition && t.TypeDefinition.TryFullName = Some "System.String"
-        with _ ->
+        with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
             false
 
     match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with

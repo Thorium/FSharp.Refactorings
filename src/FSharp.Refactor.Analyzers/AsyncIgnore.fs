@@ -65,7 +65,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         try
             let t = OptionModule.stripAbbreviations t
             t.HasTypeDefinition && t.TypeDefinition.TryFullName = Some AsyncTypeName
-        with _ ->
+        with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
             false
 
     let resolve (ident: Ident) =
@@ -101,7 +101,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         try
                             let groups = value.CurriedParameterGroups.Count
                             groups > 0 && groups <= applied
-                        with _ ->
+                        with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                             false
 
                     if fullyApplied && isAsyncType value.ReturnParameter.Type then

@@ -184,7 +184,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                 let element =
                     [ "x"; "item"; "element" ]
-                    |> List.tryFind (fun name -> not (Regex.IsMatch(loopText, @"\b" + name + @"\b")))
+                    |> List.tryFind (fun name -> not (Regex.IsMatch(loopText, $@"\b{name}\b")))
 
                 match element with
                 | Some element ->
@@ -196,8 +196,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                     let useEdits =
                         indexedUses
-                        |> Array.toList
-                        |> List.map (fun (useRange, _) -> useRange, textOfRange source useRange, element)
+                        |> Array.map (fun (useRange, _) -> useRange, textOfRange source useRange, element) |> Array.toList
 
                     suggestions.Add
                         { Range = expr.Range

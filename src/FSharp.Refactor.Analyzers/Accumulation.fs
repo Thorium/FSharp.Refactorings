@@ -96,7 +96,7 @@ let private isGenericSeqType (t: FSharpType) =
             || td.TryFullName = Some seqName
             || td.AllInterfaces
                |> Seq.exists (fun i -> i.HasTypeDefinition && i.TypeDefinition.TryFullName = Some seqName))
-    with _ ->
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
         false
 
 /// The identifier to resolve for a loop source: `xs`, `db.Orders`, `x.A.B`.
@@ -151,7 +151,7 @@ let private collectionModule (check: FSharpCheckFileResults) (source: ISourceTex
                         ValueSome "Seq"
                     else
                         ValueNone
-                 with _ ->
+                 with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                      ValueNone)
             | _ -> ValueNone
         | None -> ValueNone
@@ -371,7 +371,7 @@ let find
 
                                          t.HasTypeDefinition
                                          && t.TypeDefinition.TryFullName = Some "System.String"
-                                      with _ ->
+                                      with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                                           false)
                                  | _ -> false
                              | None -> false)
@@ -395,3 +395,122 @@ let find
                 || not (folds |> Seq.exists (fun f -> Range.rangeContainsRange f.Range q.Range)))
 
         List.ofSeq folds, List.ofSeq quadratics
+
+// ---- FR0107: mutable flag loop → exists/forall ----
+
+/// May the predicate be evaluated FEWER times than the loop evaluated it?
+/// `exists` short-circuits where the flag loop kept iterating, so unlike
+/// FR0050's fold (same evaluations, same order) this rewrite is only safe
+/// when the predicate visibly does nothing but answer: any assignment,
+/// sequencing, statement-shaped construct or `ignore` anywhere inside it
+/// disqualifies the whole loop. A heuristic, not a purity proof — it errs
+/// toward silence.
+let private effectFreeIn (index: AstIndex.Index) (r: range) =
+    index.Exprs
+    |> Array.forall (fun (_, e) ->
+        not (Range.rangeContainsRange r e.Range)
+        || (match e with
+            | SynExpr.Set _
+            | SynExpr.LongIdentSet _
+            | SynExpr.DotSet _
+            | SynExpr.DotIndexedSet _
+            | SynExpr.NamedIndexedPropertySet _
+            | SynExpr.DotNamedIndexedPropertySet _
+            | SynExpr.Sequential _
+            | SynExpr.Do _
+            | SynExpr.DoBang _
+            | SynExpr.While _
+            | SynExpr.For _
+            | SynExpr.ForEach _
+            | SynExpr.TryWith _
+            | SynExpr.TryFinally _
+            | SynExpr.LetOrUse _ -> false
+            | SynExpr.Ident id -> id.idText <> "ignore"
+            | _ -> true))
+
+/// Mutable boolean flag set inside a loop → exists/forall (FR0107, fix):
+///
+///     let mutable found = false          let found =
+///     for x in xs do              →          xs |> List.exists (fun x -> p x)
+///         if p x then found <- true
+///
+/// The `true`-initialized dual becomes `forall` with the predicate
+/// negated. Gates: the loop body is EXACTLY the one `if`, no `else`; the
+/// assigned literal is the initializer's opposite; the predicate never
+/// mentions the flag, passes `effectFreeIn`, and fits one line; nothing
+/// reassigns the flag after the loop; and the source resolves to a real
+/// List/Array/Seq the same way FR0050's fold does. `exists`/`forall`
+/// short-circuit, so the rewrite does the same or less work — never more.
+let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : FoldSuggestion list =
+    if OptionModule.hasErrors check then
+        []
+    else
+        let index = AstIndex.ofTree parseTree
+
+        [ for _, expr in index.Exprs do
+              match expr with
+              | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
+                  match lou.Bindings, lou.Body with
+                  | [ SynBinding(isMutable = true; headPat = SynPat.Named(ident = SynIdent(ident = flag)); expr = init) ],
+                    SynExpr.Sequential(
+                        expr1 = SynExpr.ForEach(pat = pat; enumExpr = src; bodyExpr = loopBody) as forEach
+                        expr2 = rest) ->
+                      let loopBody =
+                          match loopBody with
+                          | SynExpr.Do(expr = inner) -> inner
+                          | other -> other
+
+                      match stripParens init, loopBody with
+                      | SynExpr.Const(SynConst.Bool initVal, _),
+                        SynExpr.IfThenElse(ifExpr = cond; thenExpr = thenBranch; elseExpr = None) ->
+                          match stripParens thenBranch with
+                          | SynExpr.LongIdentSet(SynLongIdent(id = [ target ]), assigned, _) when
+                              target.idText = flag.idText
+                              && (match stripParens assigned with
+                                  | SynExpr.Const(SynConst.Bool b, _) -> b = not initVal
+                                  | _ -> false)
+                              && isSingleLine cond.Range
+                              && isSingleLine src.Range
+                              && not (mentionsIn index flag.idText cond.Range)
+                              && effectFreeIn index cond.Range
+                              // the flag must not be re-assigned in the continuation
+                              && not (
+                                  Regex.IsMatch(
+                                      textOfRange source rest.Range,
+                                      @"\b" + Regex.Escape flag.idText + @"\b\s*<-"
+                                  )
+                              )
+                              ->
+                              match lambdaPatText source pat, collectionModule check source src with
+                              | ValueSome patText, ValueSome m ->
+                                  let srcText = atomicText source src
+                                  let condText = textOfRange source cond.Range
+
+                                  let call =
+                                      if initVal then
+                                          // starts true, falsified by cond:
+                                          // the loop computes forall (not cond)
+                                          let negated =
+                                              match stripParens cond with
+                                              | SynExpr.App(funcExpr = SingleIdent notId; argExpr = inner) when
+                                                  notId.idText = "not"
+                                                  ->
+                                                  textOfRange source inner.Range
+                                              | _ -> $"not ({condText})"
+
+                                          $"{srcText} |> {m}.forall (fun {patText} -> {negated})"
+                                      else
+                                          $"{srcText} |> {m}.exists (fun {patText} -> {condText})"
+
+                                  let editRange =
+                                      Range.mkRange expr.Range.FileName expr.Range.Start forEach.Range.End
+
+                                  if not (spansDirective source editRange) then
+                                      { Range = editRange
+                                        OriginalText = textOfRange source editRange
+                                        ReplacementText = $"let {flag.idText} = {call}" }
+                              | _ -> ()
+                          | _ -> ()
+                      | _ -> ()
+                  | _ -> ()
+              | _ -> () ]

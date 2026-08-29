@@ -15,8 +15,8 @@ let private assertCharFix (source: string) (expectedReplacement: string) =
         | Some replacement ->
             Assert.Equal(expectedReplacement, replacement)
             let patched = applyEdit source s.Range replacement
-            Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
-        | None -> failwith "Expected a fix, got an advisory"
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith $"Expected a fix, got an advisory, calling assertCharFix with source: {source}, expectedReplacement: {expectedReplacement}"
     | other -> failwithf "Expected exactly one char-overload suggestion, got %d: %A" (List.length other) other
 
 [<Fact>]

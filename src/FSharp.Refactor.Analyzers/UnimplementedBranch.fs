@@ -93,6 +93,9 @@ let private isPlaceholder (e: SynExpr) =
         | SynConst.Int32 0
         | SynConst.Int64 0L -> true
         | SynConst.Double 0.0 -> true
+        // `| X -> false // Not supported yet` — the comment gate keeps
+        // ordinary boolean tables quiet, so both literals may accuse
+        | SynConst.Bool _ -> true
         | _ -> false
     // a qualified spelling — `Option.None`, `ValueOption.ValueNone`
     | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) ->

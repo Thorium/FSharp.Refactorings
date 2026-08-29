@@ -55,7 +55,7 @@ let ``corpus fixes still parse`` () : unit =
         /// file(line,col) plus the source line, so a sample can be judged
         /// without opening the file
         let siteOf (file: string) (source: string) (r: FSharp.Compiler.Text.range) =
-            let lines = source.Replace("\r\n", "\n").Split('\n')
+            let lines = source.Replace("\r\n", "\n").Split '\n'
 
             let text =
                 if r.StartLine >= 1 && r.StartLine <= lines.Length then
@@ -70,7 +70,7 @@ let ``corpus fixes still parse`` () : unit =
         // parse-only rule applies to an .fsx exactly as it does to an .fs,
         // and scripts are where a lot of real-world F# actually lives.
         let files =
-            roots.Split(';')
+            roots.Split ';'
             |> Seq.collect (fun root ->
                 if Directory.Exists root then
                     seq {
@@ -161,7 +161,7 @@ let ``corpus fixes still parse`` () : unit =
                         countHit code (siteOf file source range)
                         let patched = applyEdit source range replacement
 
-                        if not hadParseErrors && not (parsesCleanlyNamed asName patched) then
+                        if not (hadParseErrors || (parsesCleanlyNamed asName patched)) then
                             failures.Add $"{code} {file}({range.StartLine},{range.StartColumn}): -> {replacement}"
 
                 let multiEditSets =
@@ -176,7 +176,7 @@ let ``corpus fixes still parse`` () : unit =
                         |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
                         |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
 
-                    if not hadParseErrors && not (parsesCleanlyNamed asName patched) then
+                    if not (hadParseErrors || (parsesCleanlyNamed asName patched)) then
                         failures.Add $"multi-edit {file}: {edits.Length} edits"
             with ex ->
                 // a rule THREW: that is a catastrophic failure, unlike a
@@ -211,7 +211,7 @@ let ``run apply tool from env`` () : unit =
     | null
     | "" -> ()
     | args ->
-        let argv = args.Split('|')
+        let argv = args.Split '|'
         use captured = new StringWriter()
         let oldOut = Console.Out
         let oldErr = Console.Error

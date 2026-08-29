@@ -85,7 +85,7 @@ let ``FR0012: a method call substituted as an argument keeps its parentheses`` (
                 s.Range
                 s.ReplacementText
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one null-comparison hint, got %A" other
 
 [<Fact>]
@@ -103,7 +103,7 @@ let ``FR0008: a method call in a call tuple keeps its parentheses`` () : unit =
             |> List.sortByDescending (fun e -> e.Range.StartLine, e.Range.StartColumn)
             |> List.fold (fun acc e -> applyEdit acc e.Range e.Replacement) source
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one tupled-parameter suggestion, got %A" other
 
 [<Fact>]
@@ -119,7 +119,7 @@ let ``FR0012: a multi-argument call keeps its argument list`` () : unit =
     | [ s ] ->
         Assert.Equal("not (isNull (IO.Path.Combine(a, b)))", s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one multi-argument null hint, got %A" other
 
 [<Fact>]
@@ -182,7 +182,7 @@ let ``FR0016: Struct goes below the doc comment, not above it`` () : unit =
             patched
         )
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one struct-DU suggestion, got %A" other
 
 [<Fact>]
@@ -200,7 +200,7 @@ let ``FR0011: return Struct goes below the doc comment too`` () : unit =
             |> List.fold (fun acc e -> applyEdit acc e.Range e.Replacement) source
 
         Assert.StartsWith("/// Matches even numbers.\n[<return: Struct>]\nlet private (|Even|_|)", patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one struct active pattern, got %A" other
 
 [<Fact>]

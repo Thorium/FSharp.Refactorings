@@ -84,7 +84,7 @@ let private assertInterp (source: string) (expectedReplacement: string) =
     | [ s ] ->
         Assert.Equal(expectedReplacement, s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
-        Assert.True(parsesCleanly patched, sprintf "Patched source does not parse:\n%s" patched)
+        Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
     | other -> failwithf "Expected exactly one interpolation suggestion, got %d: %A" (List.length other) other
 
 [<Fact>]

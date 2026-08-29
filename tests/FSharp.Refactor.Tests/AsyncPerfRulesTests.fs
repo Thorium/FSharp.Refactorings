@@ -50,7 +50,7 @@ let ``Thread Sleep in an async gets the Async Sleep fix`` () =
                 "let f () = async {\n    System.Threading.Thread.Sleep 100\n    return 1\n}"
 
             let patched = applyEdit source r replacement
-            Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
         | None -> failwith "Expected a fix for Thread.Sleep"
     | other -> failwithf "Expected exactly one Sleep site, got %A" other
 
@@ -77,7 +77,7 @@ let private assertFold (source: string) (expectedReplacement: string) =
     | [ s ], _ ->
         Assert.Equal(expectedReplacement, s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one fold suggestion, got %A" other
 
 [<Fact>]
@@ -135,6 +135,89 @@ let ``quadratic Array append in a loop is noted`` () =
     match quadratics with
     | [ s ] -> Assert.Equal("acc", s.Name)
     | other -> failwithf "Expected exactly one Array-append note, got %A" other
+
+// ---- FR0107 FlagLoop ----
+
+let private flagLoopsIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    Accumulation.findFlagLoops tree sourceText checkResults
+
+let private assertFlagRewrite (source: string) (expectedReplacement: string) =
+    match flagLoopsIn source with
+    | [ s ] ->
+        Assert.Equal(expectedReplacement, s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one flag-loop suggestion, got %A" other
+
+[<Fact>]
+let ``a false flag set in a loop becomes exists`` () =
+    assertFlagRewrite
+        "let f (xs: int list) =\n    let mutable found = false\n    for x in xs do\n        if x > 3 then found <- true\n    found"
+        "let found = xs |> List.exists (fun x -> x > 3)"
+
+[<Fact>]
+let ``an array source resolves to Array exists`` () =
+    assertFlagRewrite
+        "let f (xs: int[]) =\n    let mutable found = false\n    for x in xs do\n        if x > 3 then found <- true\n    found"
+        "let found = xs |> Array.exists (fun x -> x > 3)"
+
+[<Fact>]
+let ``a true flag falsified in a loop becomes forall`` () =
+    assertFlagRewrite
+        "let f (xs: int list) =\n    let mutable ok = true\n    for x in xs do\n        if x < 0 then ok <- false\n    ok"
+        "let ok = xs |> List.forall (fun x -> not (x < 0))"
+
+[<Fact>]
+let ``a negated predicate in the forall dual loses its not`` () =
+    assertFlagRewrite
+        "let valid (x: int) = x >= 0\nlet f (xs: int list) =\n    let mutable ok = true\n    for x in xs do\n        if not (valid x) then ok <- false\n    ok"
+        "let ok = xs |> List.forall (fun x -> (valid x))"
+
+[<Fact>]
+let ``a second statement in the loop body keeps the mutable`` () =
+    Assert.Empty(
+        flagLoopsIn
+            "let f (xs: int list) =\n    let mutable found = false\n    let mutable count = 0\n    for x in xs do\n        count <- count + 1\n        if x > 3 then found <- true\n    found"
+    )
+
+[<Fact>]
+let ``a side-effecting predicate keeps the mutable`` () =
+    // exists short-circuits — a predicate with visible effects would run
+    // fewer times after the rewrite
+    Assert.Empty(
+        flagLoopsIn
+            "let f (xs: int list) =\n    let mutable found = false\n    let mutable seen = 0\n    for x in xs do\n        if (seen <- seen + 1; x > 3) then found <- true\n    found, seen"
+    )
+
+[<Fact>]
+let ``an else branch keeps the mutable`` () =
+    Assert.Empty(
+        flagLoopsIn
+            "let g () = ()\nlet f (xs: int list) =\n    let mutable found = false\n    for x in xs do\n        if x > 3 then found <- true else g ()\n    found"
+    )
+
+[<Fact>]
+let ``flag reassignment after the loop keeps the mutable`` () =
+    Assert.Empty(
+        flagLoopsIn
+            "let f (xs: int list) =\n    let mutable found = false\n    for x in xs do\n        if x > 3 then found <- true\n    found <- found && xs.Length > 1\n    found"
+    )
+
+[<Fact>]
+let ``a predicate reading the flag keeps the mutable`` () =
+    Assert.Empty(
+        flagLoopsIn
+            "let f (xs: int list) =\n    let mutable found = false\n    for x in xs do\n        if not found && x > 3 then found <- true\n    found"
+    )
+
+[<Fact>]
+let ``a non-generic IEnumerable source keeps the mutable`` () =
+    // `for` accepts it; List/Array/Seq.exists do not
+    Assert.Empty(
+        flagLoopsIn
+            "let f (values: System.Collections.IEnumerable) =\n    let mutable found = false\n    for v in values do\n        if hash v > 3 then found <- true\n    found"
+    )
 
 // ---- FR0052 CountIsEmpty ----
 
@@ -340,6 +423,33 @@ let ``the bool probe idiom stays quiet`` () =
         swallowedIn
             "module Test\nlet canPing (ping: unit -> unit) =\n    try\n        ping ()\n        true\n    with _ -> false"
     )
+
+[<Fact>]
+let ``the inverted did-it-throw probe stays quiet too`` () =
+    Assert.Empty(
+        swallowedIn
+            "module Test\nlet throws (act: unit -> unit) =\n    try\n        act ()\n        false\n    with _ -> true"
+    )
+
+[<Fact>]
+let ``a false fallback on a non-probe body is a disguise`` () =
+    // the body computes a real bool; the catch-all rewrites failure as
+    // `false`, indistinguishable from an honest negative
+    match
+        swallowedIn
+            "module Test\nlet isValid (parse: string -> bool) (s: string) =\n    try parse s\n    with _ -> false"
+    with
+    | [ s ] -> Assert.Equal(Some "false", s.FallbackText)
+    | other -> failwithf "Expected one swallowed-exception finding, got %A" other
+
+[<Fact>]
+let ``a ValueNone fallback is a disguise`` () =
+    match
+        swallowedIn
+            "module Test\nlet tryRead (read: unit -> int) =\n    try ValueSome(read ())\n    with _ -> ValueNone"
+    with
+    | [ s ] -> Assert.Equal(Some "ValueNone", s.FallbackText)
+    | other -> failwithf "Expected one swallowed-exception finding, got %A" other
 
 [<Fact>]
 let ``a specific exception with a default is a decision`` () =

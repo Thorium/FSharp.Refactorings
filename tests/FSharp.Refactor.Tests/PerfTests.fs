@@ -117,7 +117,7 @@ let ``every analyzer stays fast on a large file`` () =
     let report =
         [ yield $"lines: {sourceText.GetLineCount()}, analyzers: {analyzers.Length}"
           for name, ms, hits in timings do
-              yield sprintf "%-45s %8.1f ms  %d hits" name ms hits ]
+              yield $"%-45s{name} %8.1f{ms} ms  %d{hits} hits" ]
         |> String.concat "\n"
 
     File.WriteAllText(Path.Combine(Path.GetTempPath(), "fsref-perf.txt"), report)
@@ -127,7 +127,7 @@ let ``every analyzer stays fast on a large file`` () =
     Assert.True(
         slow.IsEmpty,
         "Pathologically slow analyzers:\n"
-        + String.concat "\n" (slow |> List.map (fun (n, ms, _) -> sprintf "%s: %.0f ms" n ms))
+        + String.concat "\n" (slow |> List.map (fun (n, ms, _) -> $"%s{n}: %.0f{ms} ms"))
     )
 
 // ---- FR0106 SubstringSpan ----
@@ -145,7 +145,7 @@ let ``a Substring fed to Parse becomes AsSpan`` () =
     | [ sug ] ->
         let patched = applyEdit source sug.Range "AsSpan"
         Assert.Contains("Int32.Parse(s.AsSpan(6, 5))", patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one AsSpan suggestion, got %A" other
 
 [<Fact>]
@@ -156,7 +156,7 @@ let ``a Substring fed to TryParse becomes AsSpan`` () =
     match substringSpansIn source with
     | [ sug ] ->
         let patched = applyEdit source sug.Range "AsSpan"
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one TryParse suggestion, got %A" other
 
 [<Fact>]
@@ -189,3 +189,78 @@ let ``byref TryParse spelling is deliberately untouched`` () =
         substringSpansIn
             "module Test\nopen System\nlet f (s: string) =\n    let mutable r = 0\n    Int32.TryParse(s.Substring(6, 5), &r) |> ignore\n    r"
     )
+
+// ---- CapabilityFix dual-framework emission ----
+
+let private withDualTfm (f: unit -> unit) =
+    Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", "NETSTANDARD21")
+
+    try
+        f ()
+    finally
+        Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", null)
+
+let private dualFixFor (source: string) =
+    let tree, sourceText, checkResults = FSharp.Refactor.Tests.Parsing.parseAndCheck source
+
+    match FSharp.Refactor.SubstringSpan.find tree sourceText checkResults with
+    | [ s ] -> FSharp.Refactor.CapabilityFix.make sourceText s.Range "Substring" "AsSpan"
+    | other -> failwithf "Expected exactly one suggestion, got %A" other
+
+[<Fact>]
+let ``a dual-framework run wraps the fix in an if-else pair`` () =
+    withDualTfm (fun () ->
+        let fix =
+            dualFixFor
+                "module Test\nopen System\n#if NETSTANDARD\nlet flag = 1\n#endif\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))"
+
+        Assert.Contains("#if NETSTANDARD21", fix.ToText)
+        Assert.Contains("Int32.Parse(s.AsSpan(6, 5))", fix.ToText)
+        Assert.Contains("#else", fix.ToText)
+        Assert.Contains("Int32.Parse(s.Substring(6, 5))", fix.ToText)
+        Assert.Contains("#endif", fix.ToText))
+
+[<Fact>]
+let ``a file without conditionals keeps the plain fix even on a dual run`` () =
+    withDualTfm (fun () ->
+        let fix = dualFixFor "module Test\nopen System\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))"
+        Assert.Equal("AsSpan", fix.ToText))
+
+[<Fact>]
+let ``a line already under a modern guard keeps the plain fix`` () =
+    // the guard scan is textual, so drive CapabilityFix.make directly: a
+    // test parse (empty defines) never enters the NET6_0_OR_GREATER branch
+    withDualTfm (fun () ->
+        let text =
+            "module Test\nopen System\n#if NET6_0_OR_GREATER\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))\n#endif"
+
+        let sourceText = SourceText.ofString text
+        let line = sourceText.GetLineString 3
+        let col = line.IndexOf "Substring"
+
+        let r =
+            FSharp.Compiler.Text.Range.mkRange
+                "T.fs"
+                (FSharp.Compiler.Text.Position.mkPos 4 col)
+                (FSharp.Compiler.Text.Position.mkPos 4 (col + 9))
+
+        let fix = FSharp.Refactor.CapabilityFix.make sourceText r "Substring" "AsSpan"
+        Assert.Equal("AsSpan", fix.ToText))
+
+[<Fact>]
+let ``the negative branch of a modern guard still wraps`` () =
+    // inside #else of the guard: this line IS what legacy compiles
+    withDualTfm (fun () ->
+        let fix =
+            dualFixFor
+                "module Test\nopen System\n#if NETSTANDARD21\nlet flag = 1\n#else\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))\n#endif"
+
+        Assert.Contains("#if NETSTANDARD21", fix.ToText))
+
+[<Fact>]
+let ``without the dual signal the fix is always plain`` () =
+    let fix =
+        dualFixFor
+            "module Test\nopen System\n#if NETSTANDARD\nlet flag = 1\n#endif\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))"
+
+    Assert.Equal("AsSpan", fix.ToText)

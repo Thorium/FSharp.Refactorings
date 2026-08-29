@@ -20,7 +20,7 @@ let private assertMatchBang (source: string) (expectedPatched: string) =
     | [ s ] ->
         let patched = applyAll source s.Edits
         Assert.Equal(expectedPatched, patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one match! note, got %A" other
 
 [<Fact>]
@@ -66,7 +66,7 @@ let ``the three-part mutable-condition loop collapses to while!`` () =
             patched
         )
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one while! note, got %A" other
 
 [<Fact>]
@@ -95,7 +95,7 @@ let private assertFlattened (source: string) (expectedReplacement: string) =
     | [ s ] ->
         Assert.Equal(expectedReplacement, s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one flatten note, got %A" other
 
 [<Fact>]
@@ -154,7 +154,7 @@ let ``a contained local disposable becomes a use binding`` () =
                 s.Range
                 "use"
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one use-binding fix, got %A" other
 
 [<Fact>]
@@ -220,7 +220,7 @@ let ``List map piped to ignore becomes iter`` () =
                 s.Range
                 s.ReplacementText.Value
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one map-ignore fix, got %A" other
 
 [<Fact>]
@@ -294,7 +294,7 @@ let ``missing interface members get NotImplementedException stubs`` () =
     | [ s ] ->
         Assert.Equal<string list>([ "Stop"; "Name" ] |> List.sort, s.MissingNames |> List.sort)
         let patched = applyEdit source s.Range s.InsertText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one implement-missing fix, got %A" other
 
 [<Fact>]
@@ -307,7 +307,7 @@ let ``an inherited interface stubs in its own section`` () =
         Assert.Contains("Dispose", s.MissingNames)
         Assert.Contains("interface IDisposable with", s.InsertText)
         let patched = applyEdit source s.Range s.InsertText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one inherited-stub fix, got %A" other
 
 [<Fact>]
@@ -347,7 +347,7 @@ let ``a property with getter and setter stubs both`` () =
         Assert.Contains("with get () =", s.InsertText)
         Assert.Contains("and set _v =", s.InsertText)
         let patched = applyEdit source s.Range s.InsertText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one get-set stub fix, got %A" other
 
 // ---- FR0080 TabIndentation ----
@@ -370,7 +370,7 @@ let ``leading tabs expand to spaces line by line`` () =
             |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
 
         Assert.Equal("module Test\nlet f x =\n    let y = x + 1\n    y + 1", patched)
-        Assert.True(parsesCleanly patched, sprintf "Patched source does not parse:\n%s" patched)
+        Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
     | other -> failwithf "Expected exactly one tab note, got %A" other
 
 [<Fact>]
@@ -423,7 +423,7 @@ let private assertSyntaxFix (kind: RedundantSyntax.Kind) (source: string) (expec
     | [ s ] ->
         let patched = applyEdit source s.Range s.ReplacementText
         Assert.Equal(expectedPatched, patched)
-        Assert.True(parsesCleanly patched, sprintf "Patched source does not parse:\n%s" patched)
+        Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
     | other -> failwithf "Expected exactly one %A fix, got %A" kind other
 
 [<Fact>]
@@ -492,7 +492,7 @@ let ``new on a non-disposable construction is noted`` () =
         let patched =
             applyEdit "module Test\nlet sb = new System.Text.StringBuilder()" s.Range ""
 
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one redundant-new fix, got %A" other
 
 [<Fact>]
@@ -625,7 +625,7 @@ let private assertFailwithContext (source: string) (expectedPatched: string) =
     | [ s ] ->
         let patched = applyEdit source s.Range s.ReplacementText
         Assert.Equal(expectedPatched, patched)
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one failwith-context hint, got %A" other
 
 [<Fact>]

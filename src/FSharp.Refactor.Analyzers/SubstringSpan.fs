@@ -72,7 +72,7 @@ let private isReadOnlySpanOfChar (t: FSharpType) =
         && t.GenericArguments.Count = 1
         && (let g = strip t.GenericArguments.[0]
             g.HasTypeDefinition && g.TypeDefinition.TryFullName = Some "System.Char")
-    with _ ->
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
         false
 
 /// Does the parser's enclosing type offer a ReadOnlySpan<char> overload of
@@ -92,7 +92,7 @@ let private hasSpanOverload (check: FSharpCheckFileResults) (source: ISourceText
                     && m.CurriedParameterGroups.[0].Count >= 1
                     && isReadOnlySpanOfChar m.CurriedParameterGroups.[0].[0].Type)
             | None -> false
-         with _ ->
+         with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
              false)
     | ValueNone -> false
 

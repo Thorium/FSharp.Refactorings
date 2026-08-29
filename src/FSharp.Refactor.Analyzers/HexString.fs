@@ -52,7 +52,7 @@ let private toHexStringAvailable (check: FSharpCheckFileResults) =
                 entity.MembersFunctionsAndValues
                 |> Seq.exists (fun m -> m.LogicalName = "ToHexString")
             | None -> false
-        with _ ->
+        with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
             false)
 
 /// Find dash-stripped BitConverter hex chains. Requires typed check results

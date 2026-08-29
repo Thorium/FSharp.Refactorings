@@ -85,7 +85,7 @@ let parseAndCheck (source: string) : ParsedInput * ISourceText * FSharpCheckFile
 
     match answer with
     | FSharpCheckFileAnswer.Succeeded checkResults -> parseResults.ParseTree, sourceText, checkResults
-    | FSharpCheckFileAnswer.Aborted -> failwith "Typechecking was aborted"
+    | FSharpCheckFileAnswer.Aborted -> failwith $"Typechecking was aborted, calling parseAndCheck with source: {source}"
 
 /// True when the source typechecks as a script without errors.
 let typechecksCleanly (source: string) : bool =
@@ -97,14 +97,14 @@ let typechecksCleanly (source: string) : bool =
 /// Replace `range` in `source` with `newText` (ranges are 1-based lines,
 /// 0-based columns).
 let applyEdit (source: string) (range: range) (newText: string) : string =
-    let lines = source.Replace("\r\n", "\n").Split('\n')
+    let lines = source.Replace("\r\n", "\n").Split '\n'
 
     let before = [ for i in 0 .. range.StartLine - 2 -> lines.[i] ]
 
     let after = [ for i in range.EndLine .. lines.Length - 1 -> lines.[i] ]
 
     let startLinePrefix = lines.[range.StartLine - 1].Substring(0, range.StartColumn)
-    let endLineSuffix = lines.[range.EndLine - 1].Substring(range.EndColumn)
+    let endLineSuffix = lines.[range.EndLine - 1].Substring range.EndColumn
 
     let patchedMiddle = startLinePrefix + newText + endLineSuffix
 

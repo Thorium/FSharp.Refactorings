@@ -1113,7 +1113,10 @@ let private charOverloadMessages (parseTree: ParsedInput) (source: ISourceText) 
                     "%s has a char overload for a single character; it skips the string-comparison setup."
                     s.MethodName)
                 s.Range
-                [ fix s.Range s.OriginalText replacement ]
+                // a capability fix: on a dual-framework run this may emit
+                // an #if NET6_0_OR_GREATER / #else pair (char overloads
+                // are net-core-era; net4x siblings compile the #else)
+                [ CapabilityFix.make source s.Range s.OriginalText replacement ]
         | None ->
             hint
                 "FR0038"
@@ -1192,17 +1195,19 @@ let redundantGuardCliAnalyzer (ctx: CliContext) : Async<Message list> =
 let private vectorizedLinqMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
     VectorizedLinq.find parseTree source checkResults
     |> List.map (fun s ->
-        hint
-            "FR0041"
-            (sprintf
-                "%s.%s over an array is a scalar loop; on .NET 8+ System.Linq's %s%s() is SIMD-vectorized for '%s''s element type (note: LINQ Sum throws on overflow where F#'s sum wraps)."
-                s.ModuleName
-                s.FunctionName
-                (string (System.Char.ToUpperInvariant s.FunctionName.[0]))
-                (s.FunctionName.Substring 1)
-                s.ArrayName)
-            s.Range
-            [])
+        let message =
+            if s.FunctionName = "contains" then
+                $"{s.ModuleName}.contains over an array is a scalar loop; on .NET 8+ System.Linq's Contains() is SIMD-vectorized for '{s.ArrayName}''s element type (measured ~5x at 1000 elements, ~6x at 100k)."
+            else
+                sprintf
+                    "%s.%s over an array is a scalar loop; on .NET 8+ System.Linq's %s%s() is SIMD-vectorized for '%s''s element type (note: LINQ Sum throws on overflow where F#'s sum wraps)."
+                    s.ModuleName
+                    s.FunctionName
+                    (string (System.Char.ToUpperInvariant s.FunctionName.[0]))
+                    (s.FunctionName.Substring 1)
+                    s.ArrayName
+
+        hint "FR0041" message s.Range [])
 
 [<EditorAnalyzer("VectorizedLinq", "SIMD-vectorized LINQ aggregations for primitive arrays", HelpBase)>]
 let vectorizedLinqEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -1419,10 +1424,24 @@ let private accumulationMessages
     let quadraticEnabled =
         Configuration.isRuleEnabled fileName "FR0051" "QuadraticAppend"
 
-    if not (foldEnabled || quadraticEnabled) then
+    let flagEnabled = Configuration.isRuleEnabled fileName "FR0107" "FlagLoop"
+
+    if not (foldEnabled || quadraticEnabled || flagEnabled) then
         []
     else
         let folds, quadratics = Accumulation.find parseTree source checkResults
+
+        let flagMessages =
+            if flagEnabled then
+                Accumulation.findFlagLoops parseTree source checkResults
+                |> List.map (fun s ->
+                    hint
+                        "FR0107"
+                        "This mutable flag loop asks an exists/forall question; the rewrite answers it directly — and short-circuits, doing the same or less work."
+                        s.Range
+                        [ fix s.Range s.OriginalText s.ReplacementText ])
+            else
+                []
 
         let foldMessages =
             if foldEnabled then
@@ -1455,7 +1474,7 @@ let private accumulationMessages
             else
                 []
 
-        foldMessages @ quadraticMessages
+        foldMessages @ quadraticMessages @ flagMessages
 
 [<EditorAnalyzer("Accumulation", "Mutable accumulator loops and quadratic appends", HelpBase)>]
 let accumulationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -2454,7 +2473,9 @@ let private substringSpanMessages (parseTree: ParsedInput) (source: ISourceText)
                 "This Substring allocates a copy that %s immediately discards — AsSpan parses in place (measured 2.6x, allocation-free). The span overload is present in this compilation."
                 s.ParserName)
             s.Range
-            [ fix s.Range "Substring" "AsSpan" ])
+            // a capability fix: on a dual-framework run this may emit an
+            // #if NET6_0_OR_GREATER / #else pair instead of the plain swap
+            [ CapabilityFix.make source s.Range "Substring" "AsSpan" ])
 
 [<EditorAnalyzer("SubstringSpan", "Parse from a span instead of a Substring copy", HelpBase)>]
 let substringSpanEditorAnalyzer (ctx: EditorContext) : Async<Message list> =

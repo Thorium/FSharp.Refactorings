@@ -63,6 +63,6 @@ let files (pattern: string) (root: string) : string seq =
                     | :? System.IO.IOException
                     | :? System.UnauthorizedAccessException -> true
 
-                if not (isPruned subdirectory) && not isReparse then
+                if not ((isPruned subdirectory) || isReparse) then
                     pending.Push subdirectory
     }

@@ -91,4 +91,4 @@ let ``the README's kind summary matches the rules it lists`` () =
 
     for KeyValue(kind, stated) in claimed do
         let counted = actual.TryFind kind |> Option.defaultValue 0
-        Assert.True((stated = counted), sprintf "README says %d %s rules; it lists %d" stated kind counted)
+        Assert.True((stated = counted), $"README says %d{stated} %s{kind} rules; it lists %d{counted}")

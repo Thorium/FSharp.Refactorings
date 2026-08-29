@@ -145,6 +145,7 @@ let private categories =
       "FR0042", Category.Idiom
       "FR0043", Category.Idiom
       "FR0050", Category.Idiom // measured: List/Array.sum run LEVEL with the loop, not faster
+      "FR0107", Category.Idiom // exists/forall short-circuit where the flag loop kept iterating
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

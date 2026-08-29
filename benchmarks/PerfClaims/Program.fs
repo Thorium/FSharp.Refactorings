@@ -748,6 +748,24 @@ let cases =
               t
         After = fun () -> List.sum xsList }
 
+      // the predicate never hits, so exists gets NO short-circuit help:
+      // this is the rewrite's worst case, a full scan against a full scan.
+      // Any real match only widens the gap in exists's favor
+      { Code = "FR0107"
+        Name = "mutable flag loop -> List.exists (no-hit worst case)"
+        Cat = Idiom
+        Iters = 50_000
+        Before =
+          fun () ->
+              let mutable found = false
+
+              for x in xsList do
+                  if x > 1_000_000 then
+                      found <- true
+
+              if found then 1 else 0
+        After = fun () -> if List.exists (fun x -> x > 1_000_000) xsList then 1 else 0 }
+
       { Code = "FR0095"
         Name = "map (fun x -> x) -> map id"
         Cat = Idiom

@@ -45,7 +45,7 @@ let private isQueryableType (t: FSharpType) =
                |> Seq.exists (fun i ->
                    i.HasTypeDefinition
                    && (i.TypeDefinition.TryFullName |> Option.exists isQueryableName)))
-    with _ ->
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
         false
 
 /// The identifier to resolve for a loop source: `q`, `db.Orders`, `x.A.B`.

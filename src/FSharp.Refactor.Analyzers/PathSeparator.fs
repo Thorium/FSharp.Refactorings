@@ -63,7 +63,7 @@ let private existsOnDisk (text: string) =
     try
         rootedLiteral.IsMatch text
         && (System.IO.Directory.Exists text || System.IO.File.Exists text)
-    with _ ->
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
         false
 
 /// A string literal that is a separator or starts/ends with one.

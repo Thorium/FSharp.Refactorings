@@ -14,7 +14,7 @@ let private assertReraise (source: string) =
     match reraiseIn source with
     | [ s ] ->
         let patched = applyEdit source s.Range "reraise ()"
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one reraise suggestion, got %d: %A" (List.length other) other
 
 [<Fact>]
@@ -77,7 +77,7 @@ let private assertNaN (source: string) (expectedReplacement: string) =
     | [ s ] ->
         Assert.Equal(expectedReplacement, s.ReplacementText)
         let patched = applyEdit source s.Range s.ReplacementText
-        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one NaN suggestion, got %d: %A" (List.length other) other
 
 [<Fact>]

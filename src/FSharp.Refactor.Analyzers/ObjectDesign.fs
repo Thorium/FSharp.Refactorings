@@ -45,7 +45,7 @@ let private isDisposableType (t: FSharpType) =
                |> Seq.exists (fun i ->
                    i.HasTypeDefinition
                    && (i.TypeDefinition.TryFullName |> Option.exists isDisposableName)))
-    with _ ->
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
         false
 
 /// Does the binder at this location resolve to an IDisposable-implementing

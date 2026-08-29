@@ -13,7 +13,7 @@ let private assertPatched (source: string) (expectedPatched: string) =
     | [ s ] ->
         let patched = applyEdit source s.Range s.ReplacementText
         Assert.Equal(expectedPatched, patched)
-        Assert.True(parsesCleanly patched, sprintf "Patched source does not parse:\n%s" patched)
+        Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
     | other -> failwithf "Expected exactly one unimplemented-branch suggestion, got %d: %A" (List.length other) other
 
 let private assertNoSuggestion (source: string) = Assert.Empty(findIn source)
@@ -91,6 +91,30 @@ let ``null with a stub comment is accused`` () =
     match findIn source with
     | [ s ] -> Assert.Equal("raise (System.NotImplementedException())", s.ReplacementText)
     | other -> failwithf "Expected one suggestion for null, got %A" other
+
+[<Fact>]
+let ``false with a stub comment is accused`` () =
+    let source =
+        "module Test\ntype M = A | B\nlet f (x: int) = x > 0\nlet g m =\n    match m with\n    | A -> f 1\n    | B ->\n        // Not supported yet\n        false"
+
+    match findIn source with
+    | [ s ] -> Assert.Equal("raise (System.NotImplementedException())", s.ReplacementText)
+    | other -> failwithf "Expected one suggestion for false, got %A" other
+
+[<Fact>]
+let ``false without a comment is an ordinary value`` () =
+    Assert.Empty(
+        findIn "module Test\ntype M = A | B\nlet f (x: int) = x > 0\nlet g m =\n    match m with\n    | A -> f 1\n    | B -> false"
+    )
+
+[<Fact>]
+let ``ValueNone with a stub comment is accused`` () =
+    let source =
+        "module Test\ntype M = A | B\nlet f (x: int) = ValueSome x\nlet g m =\n    match m with\n    | A -> f 1\n    | B ->\n        // not implemented\n        ValueNone"
+
+    match findIn source with
+    | [ s ] -> Assert.Equal("raise (System.NotImplementedException())", s.ReplacementText)
+    | other -> failwithf "Expected one suggestion for ValueNone, got %A" other
 
 [<Fact>]
 let ``null without a comment is an ordinary value`` () =

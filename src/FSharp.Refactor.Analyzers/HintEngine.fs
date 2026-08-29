@@ -508,7 +508,7 @@ let private isProvablyBool (check: FSharpCheckFileResults) (source: ISourceText)
             (try
                 let t = OptionModule.stripAbbreviations t
                 t.HasTypeDefinition && t.TypeDefinition.TryFullName = Some "System.Boolean"
-             with _ ->
+             with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                  false)
         | ValueNone -> false
 
@@ -538,7 +538,7 @@ let private isProvablyNotFloat (check: FSharpCheckFileResults) (source: ISourceT
             else
                 not (t.TypeDefinition.TryFullName |> Option.exists floatNames.Contains)
                 && t.GenericArguments |> Seq.forall notFloatType
-        with _ ->
+        with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
             false
 
     match stripParens e with

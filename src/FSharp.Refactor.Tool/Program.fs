@@ -44,6 +44,12 @@
 ///                              fixes are held back and counted. Public
 ///                              symbols are never rewritten: their callers
 ///                              can live outside the checked project
+///     --no-if-defs             never emit #if/#else/#endif pairs for
+///                              capability fixes on multi-targeted
+///                              projects; fixes stay plain and the final
+///                              build check alone decides their fate
+///     --report <file>          write every surfaced finding as SARIF
+///                              2.1.0 for CI annotation
 ///     --jobs <n>               files typechecked at once (default 4, capped
 ///                              by the core count). Trades CPU for wall
 ///                              clock: FCS reuses each file's prefix within
@@ -87,6 +93,13 @@ type private Options =
         Categories: Set<RuleCatalog.Category> option
         DryRun: bool
         ApiChanges: bool
+        /// Suppresses dual-framework #if pair emission: capability fixes
+        /// stay plain everywhere, and the all-frameworks build check alone
+        /// decides whether they survive on a legacy-targeting project.
+        NoIfDefs: bool
+        /// SARIF 2.1.0 output file: every finding the run surfaced, for CI
+        /// annotation. Pairs naturally with --dry-run.
+        Report: string option
         MaxPasses: int
         Jobs: int
         /// Overrides the automatic narrowest-framework choice, so the code
@@ -129,6 +142,12 @@ OPTIONS
                         back and merely counted without this. Public
                         signatures are never rewritten: their callers can
                         live outside the checked project
+  --no-if-defs          never emit #if/#else/#endif pairs for capability
+                        fixes on multi-targeted projects. The fixes stay
+                        plain, and any that break a legacy framework are
+                        simply put back by the final build check
+  --report <file>       write every finding as SARIF 2.1.0 — the format CI
+                        turns into inline annotations. Pairs with --dry-run
   --max-passes <n>      fix-then-reanalyse iterations (default 5)
   --help, -h, /?        this text
 
@@ -173,6 +192,8 @@ let rec private parseArgsLoop opts args =
     | "-?" :: _ -> Ok { opts with ShowHelp = true }
     | "--dry-run" :: rest -> parseArgsLoop { opts with DryRun = true } rest
     | "--api-changes" :: rest -> parseArgsLoop { opts with ApiChanges = true } rest
+    | "--no-if-defs" :: rest -> parseArgsLoop { opts with NoIfDefs = true } rest
+    | "--report" :: file :: rest -> parseArgsLoop { opts with Report = Some file } rest
     | "--framework" :: tfm :: rest -> parseArgsLoop { opts with Framework = tfm } rest
     | "--jobs" :: n :: rest ->
         match Int32.TryParse n with
@@ -211,6 +232,8 @@ let private parseArgs (argv: string[]) =
           Categories = None
           DryRun = false
           ApiChanges = false
+          NoIfDefs = false
+          Report = None
           MaxPasses = 5
           // Measured sweet spot. FCS reuses each file's prefix within one
           // incremental build, so parallel checks buy wall clock by giving
@@ -792,6 +815,273 @@ let private runApiPass
 
 /// One analyze-and-apply pass over every file. Returns the number of fixes
 /// applied.
+/// The project's OWN guard constant for dual-framework capability fixes:
+/// a DefineConstants value whose $(TargetFramework) conditions cover
+/// modern frameworks and none of the legacy ones — SQLProvider's
+///
+///     <DefineConstants Condition=" '$(TargetFramework)' == 'netstandard2.1'
+///         Or '$(TargetFramework)' == 'net8.0' ...">NETSTANDARD21</DefineConstants>
+///
+/// says "NETSTANDARD21 marks the net6+-capable half", so #if blocks are
+/// written in the project's own vocabulary. Both condition placements are
+/// read (on the element, or on its PropertyGroup); only conditions built
+/// purely from '$(TargetFramework)' == '...' comparisons joined by Or are
+/// trusted — anything fancier is ignored. No usable constant means no
+/// dual emission at all: nothing is invented.
+let private chooseDualConstant (projectPath: string) (modern: string list) (legacy: string list) : string option =
+    try
+        let text = File.ReadAllText projectPath
+
+        let tfmsOf (condition: string) =
+            let comparisons =
+                System.Text.RegularExpressions.Regex.Matches(
+                    condition,
+                    "'\\$\\(TargetFramework\\)'\\s*==\\s*'([^']+)'"
+                )
+
+            if comparisons.Count = 0 || condition.Contains "!=" then
+                None
+            else
+                // strip the recognized comparisons; only Or, parens and
+                // whitespace may remain, or the condition is too clever
+                let stripped =
+                    System.Text.RegularExpressions.Regex.Replace(
+                        condition,
+                        "'\\$\\(TargetFramework\\)'\\s*==\\s*'[^']+'",
+                        ""
+                    )
+
+                let leftovers =
+                    System.Text.RegularExpressions.Regex.Replace(stripped, "(?i)\\bOr\\b|[()\\s]", "")
+
+                if leftovers = "" then
+                    Some [ for m in comparisons -> m.Groups.[1].Value ]
+                else
+                    None
+
+        let definedOn =
+            System.Collections.Generic.Dictionary<string, System.Collections.Generic.HashSet<string>>()
+
+        // constants also defined SOMEWHERE we cannot resolve to a framework
+        // set — an unconditioned <DefineConstants>$(DefineConstants);FIREBIRD</...>,
+        // a Configuration condition, anything clever. Those may be active on
+        // legacy frameworks too, so they are disqualified outright: when the
+        // scope cannot be known, the constant is not a candidate
+        let tainted = System.Collections.Generic.HashSet<string>()
+
+        for groupMatch in
+            System.Text.RegularExpressions.Regex.Matches(text, "<PropertyGroup([^>]*)>((?s:.*?))</PropertyGroup>") do
+            let groupCondition =
+                System.Text.RegularExpressions.Regex.Match(groupMatch.Groups.[1].Value, "Condition\\s*=\\s*\"([^\"]*)\"")
+
+            for defineMatch in
+                System.Text.RegularExpressions.Regex.Matches(
+                    groupMatch.Groups.[2].Value,
+                    "<DefineConstants([^>]*)>([^<]*)</DefineConstants>"
+                ) do
+                let elementCondition =
+                    System.Text.RegularExpressions.Regex.Match(
+                        defineMatch.Groups.[1].Value,
+                        "Condition\\s*=\\s*\"([^\"]*)\""
+                    )
+
+                let condition =
+                    if elementCondition.Success then elementCondition.Groups.[1].Value
+                    elif groupCondition.Success then groupCondition.Groups.[1].Value
+                    else ""
+
+                let constants =
+                    [ for c in defineMatch.Groups.[2].Value.Split ';' do
+                          let c = c.Trim()
+
+                          if c <> "" && not (c.Contains "$(") then
+                              c ]
+
+                match (if condition = "" then None else tfmsOf condition) with
+                | None ->
+                    for constant in constants do
+                        tainted.Add constant |> ignore
+                | Some tfms ->
+                    for constant in constants do
+                        match definedOn.TryGetValue constant with
+                        | true, existing -> existing.UnionWith tfms
+                        | false, _ -> definedOn.[constant] <- System.Collections.Generic.HashSet tfms
+
+        // only framework-SHAPED names qualify (NETSTANDARD21, NET8, net80):
+        // a flavor constant like MICROSOFTSQL or LOGARY5 may share the exact
+        // TFM condition in this fsproj, but its meaning is the flavor, and a
+        // sibling project compiling the same shared file can define it
+        // unconditionally — legacy included — turning our #if into a break.
+        // The trailing digits are required: SQLProvider's bare NETSTANDARD
+        // is a fossil of netstandard-vs-net451 days and is nowadays defined
+        // everywhere
+        let frameworkShaped =
+            System.Text.RegularExpressions.Regex @"^(?i)net(standard|coreapp)?[\d_]+$"
+
+        // a name that DENOTES a legacy framework (NET48, NET451, NET481,
+        // NETSTANDARD2_0...) can never guard the modern branch, whatever
+        // its fsproj conditions say: the SDK implicitly defines exactly
+        // that constant during the legacy compilation itself, invisibly
+        // to this textual parse, and #if NET48 would then flip the modern
+        // branch ON for net48
+        let legacyNamed =
+            System.Text.RegularExpressions.Regex @"^(?i)(net4\d*|netstandard1[\d_]*|netstandard2_?0|netcoreapp2_?0)$"
+
+        definedOn
+        |> Seq.filter (fun kv ->
+            // never defined for a legacy framework, never defined anywhere
+            // unknowable, framework-shaped without naming a legacy one, and
+            // active for at least one of this project's modern frameworks
+            not (tainted.Contains kv.Key)
+            && frameworkShaped.IsMatch kv.Key
+            && not (legacyNamed.IsMatch kv.Key)
+            && legacy |> List.forall (kv.Value.Contains >> not)
+            && modern |> List.exists kv.Value.Contains)
+        |> Seq.sortByDescending (fun kv -> modern |> List.filter kv.Value.Contains |> List.length)
+        |> Seq.tryHead
+        |> Option.map (fun kv -> kv.Key)
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+        None
+
+/// Do any of the project's sources use conditional compilation? Parsed
+/// from the fsproj's own Compile items — cheap, and it fails TOWARD
+/// caution: wildcards, imports or an unreadable file all report true, so
+/// the full framework-by-framework sweep still happens. Only a plainly
+/// #if-free project earns the single-framework fast path (its other
+/// frameworks are still verified by the final all-frameworks build).
+let private sourcesUseConditionals (projectPath: string) =
+    try
+        let dir = Path.GetDirectoryName(Path.GetFullPath projectPath)
+        let projText = File.ReadAllText projectPath
+
+        let includes =
+            System.Text.RegularExpressions.Regex.Matches(projText, "Compile\\s+Include=\"([^\"]+)\"")
+            |> Seq.map (fun m -> m.Groups.[1].Value)
+            |> List.ofSeq
+
+        if includes.IsEmpty || includes |> List.exists (fun i -> i.Contains '*') then
+            true // items come from elsewhere or globs: assume conditionals
+        else
+            includes
+            |> List.exists (fun rel ->
+                let path = Path.Combine(dir, rel)
+                not (File.Exists path) || (File.ReadAllText path).Contains "#if")
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+        true
+
+/// (lowercased full path, conditional-defines key) pairs already swept in
+/// THIS run. Shared-source solutions compile the same file into many
+/// projects; under identical defines the parse tree is identical, its
+/// fixes are already applied, and re-sweeping it is pure cost. Registered
+/// per file only when its TARGET completes (intra-target passes must
+/// re-sweep, because a pass-1 fix can enable a pass-2 one); cleared at
+/// the start of each run.
+let private sweptFiles = System.Collections.Generic.HashSet<string * string>()
+
+/// Every finding the run surfaced, for the --report SARIF file: fixable or
+/// not, applied or held back. Deduplicated because passes re-analyze and a
+/// multi-targeted project sweeps the same file once per framework.
+let private reportedFindings = ResizeArray<string * Message>()
+
+let private reportedKeys = System.Collections.Generic.HashSet<string>()
+
+/// Minimal SARIF 2.1.0, hand-built with System.Text.Json: enough for
+/// GitHub code scanning to render inline annotations, no Sarif.Sdk
+/// dependency. Paths are relativized against the working directory when
+/// they fall under it — that is what code-scanning matches blobs by.
+let private writeSarifReport (path: string) (findings: (string * Message) seq) =
+    let root = Directory.GetCurrentDirectory().Replace('\\', '/').TrimEnd('/') + "/"
+
+    let uriOf (file: string) =
+        let full = Path.GetFullPath(file).Replace('\\', '/')
+
+        if full.StartsWith(root, StringComparison.OrdinalIgnoreCase) then
+            full.Substring root.Length
+        else
+            // an absolute path is not a valid SARIF uri; a file outside the
+            // working directory gets the absolute scheme instead
+            Uri(Path.GetFullPath file).AbsoluteUri
+
+    let levelOf severity =
+        match severity with
+        | Severity.Error -> "error"
+        | Severity.Warning -> "warning"
+        | Severity.Info | Severity.Hint -> "note"
+
+    let results =
+        [ for file, msg in findings ->
+              dict
+                  [ "ruleId", box msg.Code
+                    "level", box (levelOf msg.Severity)
+                    "message", box (dict [ "text", box msg.Message ])
+                    "locations",
+                    box
+                        [ dict
+                              [ "physicalLocation",
+                                box (
+                                    dict
+                                        [ "artifactLocation", box (dict [ "uri", box (uriOf file) ])
+                                          "region",
+                                          box (
+                                              dict
+                                                  [ "startLine", box (max 1 msg.Range.StartLine)
+                                                    "startColumn", box (msg.Range.StartColumn + 1)
+                                                    "endLine", box (max 1 msg.Range.EndLine)
+                                                    "endColumn", box (msg.Range.EndColumn + 1) ]
+                                          ) ]
+                                ) ] ] ] ]
+
+    let report =
+        dict
+            [ "$schema", box "https://json.schemastore.org/sarif-2.1.0.json"
+              "version", box "2.1.0"
+              "runs",
+              box
+                  [ dict
+                        [ "tool",
+                          box (
+                              dict
+                                  [ "driver",
+                                    box (
+                                        dict
+                                            [ "name", box "fsharp-refactor"
+                                              "informationUri", box "https://github.com/Thorium/FSharp.Refactorings" ]
+                                    ) ]
+                          )
+                          "results", box results ] ] ]
+
+    File.WriteAllText(path, JsonSerializer.Serialize(report, JsonSerializerOptions(WriteIndented = true)))
+
+let private recordForReport (analyzedFile: string) (msg: Message) =
+    let file =
+        if String.IsNullOrEmpty msg.Range.FileName then
+            analyzedFile
+        else
+            msg.Range.FileName
+
+    lock reportedFindings (fun () ->
+        let key =
+            $"{msg.Code}|{file}|{msg.Range.StartLine}|{msg.Range.StartColumn}|{msg.Message}"
+
+        if reportedKeys.Add key then
+            reportedFindings.Add(file, msg))
+
+/// The conditional-compilation identity of a compilation: its sorted
+/// --define set. Same file, same defines — same tree.
+let private definesKey (options: FSharpProjectOptions) =
+    options.OtherOptions
+    |> Array.filter (fun o -> o.StartsWith "--define:")
+    |> Array.sort
+    |> String.concat ";"
+
+/// Mark every non-ignored source of a completed target as swept.
+let private markSwept (options: FSharpProjectOptions) =
+    let key = definesKey options
+
+    for f in options.SourceFiles do
+        if not (Configuration.isIgnoredPath f) then
+            sweptFiles.Add(Path.GetFullPath(f).ToLowerInvariant(), key) |> ignore
+
 let private runPass
     (checker: FSharpChecker)
     (options: FSharpProjectOptions)
@@ -854,7 +1144,11 @@ let private runPass
                       TypedTree = checkResults.ImplementationFile
                       CheckProjectResults = projectResults
                       ProjectOptions = AnalyzerProjectOptions.BackgroundCompilerOptions options
-                      AnalyzerIgnoreRanges = Map.empty }
+                      // `// fsharpanalyzer: ignore-line FR0031` and friends
+                      // (ignore-line-next, ignore-file, ignore-region-start/
+                      // end) — the SDK's own suppression comments, honored
+                      // here exactly as editors honor them
+                      AnalyzerIgnoreRanges = Ignore.getAnalyzerIgnoreRanges parseResults sourceText }
 
                 let timings = ResizeArray<string * int64>()
                 let collected = ResizeArray<Message>()
@@ -887,37 +1181,84 @@ let private runPass
                     timings.Add(m.Name, sw.ElapsedMilliseconds)
                     collected.AddRange produced
 
-                let messages =
+                // a suppressed finding is neither reported nor FIXED — for
+                // an apply tool the second half is the important one. Same
+                // semantics as the SDK's own filter (which its signature
+                // file keeps internal), so editors and this tool agree on
+                // what a suppression comment silences
+                let isSuppressed (msg: Message) =
+                    match context.AnalyzerIgnoreRanges |> Map.tryFind msg.Code with
+                    | None -> false
+                    | Some ranges ->
+                        ranges
+                        |> List.exists (function
+                            | AnalyzerIgnoreRange.File -> true
+                            | AnalyzerIgnoreRange.Range(commentStart, commentEnd) ->
+                                msg.Range.StartLine - 1 >= commentStart
+                                && msg.Range.EndLine - 1 <= commentEnd
+                            | AnalyzerIgnoreRange.NextLine line -> msg.Range.StartLine - 1 = line
+                            | AnalyzerIgnoreRange.CurrentLine line -> msg.Range.StartLine = line)
+
+                let reportable =
                     collected
                     |> Seq.filter (fun msg ->
-                        not msg.Fixes.IsEmpty
-                        && codes |> Option.forall (fun wanted -> wanted.Contains msg.Code))
+                        codes |> Option.forall (fun wanted -> wanted.Contains msg.Code)
+                        && not (isSuppressed msg))
                     |> List.ofSeq
+
+                for msg in reportable do
+                    recordForReport file msg
+
+                let messages, notes =
+                    reportable |> List.partition (fun msg -> not msg.Fixes.IsEmpty)
 
                 return
                     {| File = file
                        CheckMs = checkSw.ElapsedMilliseconds
                        Timings = List.ofSeq timings
                        HasErrors = OptionModule.hasErrors checkResults
-                       Messages = messages |}
+                       Messages = messages
+                       Notes = notes |}
             | FSharpCheckFileAnswer.Aborted ->
                 return
                     {| File = file
                        CheckMs = checkSw.ElapsedMilliseconds
                        Timings = []
                        HasErrors = true
-                       Messages = [] |}
+                       Messages = []
+                       Notes = [] |}
         }
 
     // naming one source file means analyzing its project — the references
     // and the files before it are what give its names meaning — but
     // sweeping only that file
-    let filesToSweep =
+    let named =
         match onlyFile with
         | Some only ->
             options.SourceFiles
             |> Array.filter (fun f -> String.Equals(Path.GetFullPath f, only, StringComparison.OrdinalIgnoreCase))
         | None -> options.SourceFiles
+
+    // vendored and generated code a compilation nonetheless includes —
+    // paket-files above all — is neither analyzed nor typechecked here:
+    // fixing someone else's vendored source is churn, and sweeping it in
+    // every project that includes it is where multi-project runs go to die
+    let filesToSweep =
+        named |> Array.filter (Configuration.isIgnoredPath >> not)
+
+    // files an earlier compilation of this RUN already swept under the
+    // same conditional-compilation defines: same defines, same parse tree,
+    // same fixes — which are already applied. Shared-source solutions
+    // (twenty projects compiling one Common) pay for each file once.
+    let alreadySwept, filesToSweep =
+        filesToSweep
+        |> Array.partition (fun f -> sweptFiles.Contains(Path.GetFullPath(f).ToLowerInvariant(), definesKey options))
+
+    if named.Length - alreadySwept.Length - filesToSweep.Length > 0 then
+        printfn $"  ({named.Length - alreadySwept.Length - filesToSweep.Length} ignored-path file(s) skipped)"
+
+    if alreadySwept.Length > 0 then
+        printfn $"  ({alreadySwept.Length} shared file(s) already swept in an earlier compilation)"
 
     printf $"sweeping {filesToSweep.Length} file(s)... "
     Console.Out.Flush()
@@ -945,6 +1286,20 @@ let private runPass
                  | true, existing -> existing
                  | false, _ -> 0L)
                 + ms
+
+        // fix-less findings (FR0055, FR0028...) have no edit to apply, so
+        // without this they would be invisible outside --report — the note
+        // IS the rule's entire output
+        for note in outcome.Notes do
+            let firstSentence =
+                let text = note.Message
+
+                match text.IndexOfAny [| '.'; '\n' |] with
+                | -1 -> text
+                | cut -> text.Substring(0, cut + 1)
+
+            printfn
+                $"  {note.Code} {kindColumn note.Code} {Path.GetFileName outcome.File}({note.Range.StartLine},{note.Range.StartColumn}) note: {firstSentence}"
 
         for msg in outcome.Messages do
             nextGroup <- nextGroup + 1
@@ -1373,7 +1728,7 @@ let private verifyPass
         false
 
 /// Analyze and fix one compilation; returns its exit code.
-let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
+let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool) (target: Target) =
     let onlyFile =
         match target with
         | Target.Project(_, only) -> only
@@ -1390,9 +1745,6 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
             | Target.Script s -> Path.GetFileName s
 
         printfn $"== {label}{frameworkLabel} =="
-
-    // analyzers may read the typed tree, which needs assembly contents
-    let checker = FSharpChecker.Create(keepAssemblyContents = true)
 
     match optionsFor checker opts.Framework target with
     | Error message ->
@@ -1511,6 +1863,7 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                     $"did not converge: fixes were still being applied after {opts.MaxPasses} pass(es) — rerun to continue, or raise --max-passes"
 
             if opts.DryRun then
+                markSwept options
                 0
             else
                 checker.InvalidateConfiguration options
@@ -1538,6 +1891,7 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                         match buildAllFrameworks project with
                         | Ok() ->
                             printfn "done; every target framework still builds"
+                            markSwept options
                             0
                         | Error output ->
                             // This pass changed code the other frameworks
@@ -1555,9 +1909,11 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
                             1
                     | Target.Script _ ->
                         printfn "done; project still checks clean"
+                        markSwept options
                         0
                 else
                     printfn "done; project still checks clean"
+                    markSwept options
                     0
 
 [<EntryPoint>]
@@ -1584,6 +1940,19 @@ let main argv =
             if several then
                 printfn $"{targets.Length} compilations to work through"
 
+            // ONE checker for the whole run: FCS caches parsed reference
+            // assemblies on the instance, and a twenty-project solution's
+            // flavors share nearly all of them — a fresh checker per
+            // compilation was paying that parse twenty times over.
+            // (Analyzers may read the typed tree, hence assembly contents.)
+            let checker = FSharpChecker.Create(keepAssemblyContents = true)
+            sweptFiles.Clear()
+            // the corpus harness runs main in-process, so per-run stores
+            // must not leak findings across invocations
+            lock reportedFindings (fun () ->
+                reportedFindings.Clear()
+                reportedKeys.Clear())
+
             // A multi-targeted project is really several compilations: each
             // framework activates its own #if branches, and code behind
             // another framework's is not in the parse tree at all. So work
@@ -1594,15 +1963,76 @@ let main argv =
             let runOne target =
                 match opts.Framework, frameworksOf target with
                 | "", (_ :: _ :: _ as frameworks) ->
-                    printfn $"{Path.GetFileName opts.Target}: {frameworks.Length} target frameworks"
+                    let conditionals =
+                        match target with
+                        | Target.Project(project, _) -> sourcesUseConditionals project
+                        | Target.Script _ -> true
 
-                    frameworks
-                    |> List.map (fun tfm -> runTarget { opts with Framework = tfm } true target)
-                    |> List.fold max 0
-                | _ -> runTarget opts several target
+                    if not conditionals then
+                        // no #if anywhere: every framework parses the same
+                        // tree, so one sweep covers them all — and the
+                        // final all-frameworks build still verifies the rest
+                        printfn
+                            $"{Path.GetFileName opts.Target}: {frameworks.Length} target frameworks, no conditional compilation — sweeping the narrowest only"
+
+                        runTarget checker { opts with Framework = List.head frameworks } true target
+                    else
+                        printfn $"{Path.GetFileName opts.Target}: {frameworks.Length} target frameworks"
+
+                        // legacy targets present AND the fsproj defines its
+                        // own modern-only constant: capability rules
+                        // (FR0038/FR0106) emit #if <that constant> pairs on
+                        // the modern passes instead of fixes the legacy
+                        // half cannot compile. No such constant, no dual
+                        // emission — nothing is invented.
+                        let isLegacy (tfm: string) =
+                            tfm.StartsWith "net4"
+                            || tfm.StartsWith "netstandard1"
+                            || tfm = "netstandard2.0"
+                            || tfm = "netcoreapp2.0"
+
+                        let legacyTfms, modernTfms = frameworks |> List.partition isLegacy
+
+                        let dualConstant =
+                            if opts.NoIfDefs || legacyTfms.IsEmpty then
+                                None
+                            else
+                                match target with
+                                | Target.Project(project, _) -> chooseDualConstant project modernTfms legacyTfms
+                                | Target.Script _ -> None
+
+                        match dualConstant with
+                        | Some constant ->
+                            printfn
+                                $"  (capability fixes will pair with the project's own #if {constant} for the legacy frameworks)"
+                        | None -> ()
+
+                        let results =
+                            frameworks
+                            |> List.map (fun tfm ->
+                                Environment.SetEnvironmentVariable(
+                                    "FSREF_DUAL_TFM",
+                                    (match dualConstant with
+                                     | Some c when not (isLegacy tfm) -> c
+                                     | _ -> null)
+                                )
+
+                                runTarget checker { opts with Framework = tfm } true target)
+
+                        Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", null)
+                        results |> List.fold max 0
+                | _ -> runTarget checker opts several target
 
             try
-                targets |> List.map runOne |> List.fold max 0
+                let exitCode = targets |> List.map runOne |> List.fold max 0
+
+                match opts.Report with
+                | Some reportPath ->
+                    writeSarifReport reportPath (lock reportedFindings (fun () -> List.ofSeq reportedFindings))
+                    printfn $"{reportedFindings.Count} finding(s) written to {reportPath}"
+                | None -> ()
+
+                exitCode
             finally
                 // runTarget sets these for the rule variants; the corpus
                 // harness runs main IN-PROCESS, so a leaked flag would make
@@ -1610,3 +2040,4 @@ let main argv =
                 // forced-code-scoped
                 Environment.SetEnvironmentVariable("FSREF_API_CHANGES", null)
                 Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", null)
+                Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", null)

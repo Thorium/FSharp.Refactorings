@@ -43,7 +43,7 @@ let private checkFile (options: FSharpProjectOptions) (ctx: Text.FileContext) =
 
     match answer with
     | FSharpCheckFileAnswer.Succeeded check -> check
-    | FSharpCheckFileAnswer.Aborted -> failwith "typechecking aborted"
+    | FSharpCheckFileAnswer.Aborted -> failwith $"typechecking aborted, calling checkFile with options: {options}, ctx: {ctx}"
 
 /// Write a definition file and a using file into a throwaway project, then
 /// hand the scaffolding a project-wide rule needs to `body`.

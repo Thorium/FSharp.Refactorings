@@ -10,7 +10,7 @@ let private adviceIn (source: string) =
 
 /// n `let! xi = Task.FromResult i` lines, enough to cross the size gate.
 let private awaits n =
-    [ for i in 1..n -> sprintf "    let! x%d = System.Threading.Tasks.Task.FromResult %d" i i ]
+    [ for i in 1..n -> $"    let! x%d{i} = System.Threading.Tasks.Task.FromResult %d{i}" ]
     |> String.concat "\n"
 
 [<Fact>]

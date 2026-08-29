@@ -34,6 +34,7 @@
     <Compile Include="Visibility.fs" />
     <Compile Include="AstIndex.fs" />
     <Compile Include="Configuration.fs" />
+    <Compile Include="CapabilityFix.fs" />
     <Compile Include="MatchToIf.fs" />
     <Compile Include="OptionModule.fs" />
     <Compile Include="Composition.fs" />
