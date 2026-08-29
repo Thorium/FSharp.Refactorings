@@ -81,6 +81,17 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree
     let suggestions = ResizeArray<Suggestion>()
 
+    // the argument-exception sites FIRST, once: they are rare, and the
+    // previous shape scanned every expression per binding — O(bindings ×
+    // expressions) — which put this rule at the top of the slow-analyzer
+    // list for files containing no argument exception at all
+    let paramNameSites =
+        index.Exprs
+        |> Array.choose (fun (_, e) ->
+            match e with
+            | ParamNameArg(used, litRange) when isIdentifierShaped used -> Some(used, litRange, e.Range)
+            | _ -> None)
+
     let checkBinding (SynBinding(attributes = attrs; expr = body) as binding) =
         let parameters = paramsOf binding
 
@@ -89,35 +100,30 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
         if not (hasAttributeNamed "CustomOperation" attrs || parameters.IsEmpty) then
             let names = Set.ofList parameters
 
-            for _, e in index.Exprs do
-                match e with
-                | ParamNameArg(used, litRange) when
-                    Range.rangeContainsRange body.Range e.Range
-                    && isIdentifierShaped used
-                    && not (names.Contains used)
-                    ->
+            for used, litRange, siteRange in paramNameSites do
+                if Range.rangeContainsRange body.Range siteRange && not (names.Contains used) then
                     suggestions.Add
                         { Range = litRange
                           UsedName = used
                           ParameterNames = parameters }
-                | _ -> ()
 
-    for _, decl in index.Decls do
-        match decl with
-        | SynModuleDecl.Let(bindings = bindings) -> bindings |> List.iter checkBinding
-        | SynModuleDecl.Types(typeDefns = defns) ->
-            for SynTypeDefn(typeRepr = repr; members = extra) in defns do
-                let members =
-                    match repr with
-                    | SynTypeDefnRepr.ObjectModel(members = ms) -> ms @ extra
-                    | _ -> extra
+    if not (Array.isEmpty paramNameSites) then
+        for _, decl in index.Decls do
+            match decl with
+            | SynModuleDecl.Let(bindings = bindings) -> bindings |> List.iter checkBinding
+            | SynModuleDecl.Types(typeDefns = defns) ->
+                for SynTypeDefn(typeRepr = repr; members = extra) in defns do
+                    let members =
+                        match repr with
+                        | SynTypeDefnRepr.ObjectModel(members = ms) -> ms @ extra
+                        | _ -> extra
 
-                // in a CE builder, name literals follow the DSL's keywords
-                // (a builder's Run validating "vpc"), not the F# signature
-                for m in (if instanceIsContract members then [] else members) do
-                    match m with
-                    | SynMemberDefn.Member(memberDefn = binding) -> checkBinding binding
-                    | _ -> ()
-        | _ -> ()
+                    // in a CE builder, name literals follow the DSL's keywords
+                    // (a builder's Run validating "vpc"), not the F# signature
+                    for m in (if instanceIsContract members then [] else members) do
+                        match m with
+                        | SynMemberDefn.Member(memberDefn = binding) -> checkBinding binding
+                        | _ -> ()
+            | _ -> ()
 
     List.ofSeq suggestions

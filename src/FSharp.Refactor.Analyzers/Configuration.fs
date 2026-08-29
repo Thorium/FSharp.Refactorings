@@ -237,7 +237,7 @@ let private forcedOn (code: string) (analyzerName: string) =
     | null
     | "" -> false
     | s ->
-        s.Split(',')
+        s.Split ','
         |> Array.exists (fun c ->
             let c = c.Trim()
 

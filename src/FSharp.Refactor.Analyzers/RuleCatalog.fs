@@ -120,6 +120,7 @@ let private categories =
       "FR0079", Category.Performance
       "FR0093", Category.Performance
       "FR0102", Category.Performance // list indexing in a loop is O(i) per access
+      "FR0106", Category.Performance // Substring copy fed to a parser; AsSpan is 2.6x and allocation-free
       "FR0104", Category.Performance // singleton append per recursive call is O(n²)
 
       // --- idiom: same behaviour, written the way F# writes it

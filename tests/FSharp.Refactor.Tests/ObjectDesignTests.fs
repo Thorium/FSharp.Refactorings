@@ -166,3 +166,20 @@ let ``copy-and-update of constructor state counts as instance use`` () =
 let ``a verbatim prefix chain becomes a verbatim interpolation`` () =
     // path chains are exactly where @-strings appear; the result is $@"..."
     assertConcat "let f (name: string) = @\"C:\out\\\" + name + \".txt\"" "$@\"C:\out\{name}.txt\""
+
+[<Fact>]
+let ``three or more holes keep the concat chain`` () =
+    // measured: the F# compiler turns SMALL interpolations into
+    // String.Concat, but a 3-hole one takes the String.Format path —
+    // 4.9x slower and 2.3x the allocation of the + chain it would
+    // replace, which is already a single String.Concat call
+    Assert.Empty(
+        concatIn
+            "let f (a: string) (b: string) (c: string) = \"[\" + a + \",\" + b + \",\" + c + \"]\""
+    )
+
+[<Fact>]
+let ``two holes still become an interpolation`` () =
+    assertConcat
+        "let f (a: string) (b: string) = \"x\" + a + \"-\" + b"
+        "$\"x{a}-{b}\""

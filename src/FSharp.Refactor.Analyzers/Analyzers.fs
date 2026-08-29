@@ -1440,13 +1440,18 @@ let private accumulationMessages
             if quadraticEnabled then
                 quadratics
                 |> List.map (fun s ->
-                    hint
-                        "FR0051"
-                        (sprintf
-                            "Appending to '%s' inside a loop copies it every iteration (O(n²)); accumulate into a ResizeArray, or cons with :: and List.rev once at the end."
-                            s.Name)
-                        s.Range
-                        [])
+                    let message =
+                        match s.Kind with
+                        | Accumulation.QuadraticKind.Collection ->
+                            sprintf
+                                "Appending to '%s' inside a loop copies it every iteration (O(n²)); accumulate into a ResizeArray, or cons with :: and List.rev once at the end."
+                                s.Name
+                        | Accumulation.QuadraticKind.Str ->
+                            sprintf
+                                "Building the string '%s' with + inside a loop copies it every iteration (O(n²)) — the slowest way to build a string (measured: 36x slower and 200x the allocation of a StringBuilder at 1000 pieces). Use a StringBuilder, or collect the pieces and String.concat once."
+                                s.Name
+
+                    hint "FR0051" message s.Range [])
             else
                 []
 
@@ -2437,3 +2442,26 @@ let checkedArithmeticEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
 let checkedArithmeticCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0105" "CheckedArithmetic" (fun () ->
         checkedArithmeticMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0106 SubstringSpan ----
+
+let private substringSpanMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    SubstringSpan.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0106"
+            (sprintf
+                "This Substring allocates a copy that %s immediately discards — AsSpan parses in place (measured 2.6x, allocation-free). The span overload is present in this compilation."
+                s.ParserName)
+            s.Range
+            [ fix s.Range "Substring" "AsSpan" ])
+
+[<EditorAnalyzer("SubstringSpan", "Parse from a span instead of a Substring copy", HelpBase)>]
+let substringSpanEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0106" "SubstringSpan" (fun () ->
+        whenChecked ctx (substringSpanMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("SubstringSpan", "Parse from a span instead of a Substring copy", HelpBase)>]
+let substringSpanCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0106" "SubstringSpan" (fun () ->
+        substringSpanMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)

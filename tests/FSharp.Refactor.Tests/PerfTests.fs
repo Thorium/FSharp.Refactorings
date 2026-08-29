@@ -129,3 +129,63 @@ let ``every analyzer stays fast on a large file`` () =
         "Pathologically slow analyzers:\n"
         + String.concat "\n" (slow |> List.map (fun (n, ms, _) -> sprintf "%s: %.0f ms" n ms))
     )
+
+// ---- FR0106 SubstringSpan ----
+
+let private substringSpansIn (source: string) =
+    let tree, sourceText, checkResults = FSharp.Refactor.Tests.Parsing.parseAndCheck source
+    FSharp.Refactor.SubstringSpan.find tree sourceText checkResults
+
+[<Fact>]
+let ``a Substring fed to Parse becomes AsSpan`` () =
+    let source =
+        "module Test\nopen System\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))"
+
+    match substringSpansIn source with
+    | [ sug ] ->
+        let patched = applyEdit source sug.Range "AsSpan"
+        Assert.Contains("Int32.Parse(s.AsSpan(6, 5))", patched)
+        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+    | other -> failwithf "Expected exactly one AsSpan suggestion, got %A" other
+
+[<Fact>]
+let ``a Substring fed to TryParse becomes AsSpan`` () =
+    let source =
+        "module Test\nopen System\nlet f (s: string) =\n    match Int32.TryParse(s.Substring 6) with\n    | true, v -> v\n    | _ -> 0"
+
+    match substringSpansIn source with
+    | [ sug ] ->
+        let patched = applyEdit source sug.Range "AsSpan"
+        Assert.True(typechecksCleanly patched, sprintf "Patched source does not typecheck:\n%s" patched)
+    | other -> failwithf "Expected exactly one TryParse suggestion, got %A" other
+
+[<Fact>]
+let ``a bound Substring escapes and is left alone`` () =
+    Assert.Empty(
+        substringSpansIn
+            "module Test\nopen System\nlet f (s: string) =\n    let part = s.Substring(6, 5)\n    Int32.Parse part"
+    )
+
+[<Fact>]
+let ``a parser without a span overload is left alone`` () =
+    // the availability gate: no ReadOnlySpan<char> overload proven in the
+    // compilation, no suggestion — this is how netstandard2.0/net4x
+    // compilations stay untouched without any TFM sniffing
+    Assert.Empty(
+        substringSpansIn
+            "module Test\ntype Money =\n    static member Parse(text: string) = text.Length\nlet f (s: string) = Money.Parse(s.Substring(6, 5))"
+    )
+
+[<Fact>]
+let ``a Substring on a non-string receiver is left alone`` () =
+    Assert.Empty(
+        substringSpansIn
+            "module Test\nopen System\ntype Doc(t: string) =\n    member _.Substring(a: int, b: int) = t.Substring(a, b)\nlet f (d: Doc) = Int32.Parse(d.Substring(6, 5))"
+    )
+
+[<Fact>]
+let ``byref TryParse spelling is deliberately untouched`` () =
+    Assert.Empty(
+        substringSpansIn
+            "module Test\nopen System\nlet f (s: string) =\n    let mutable r = 0\n    Int32.TryParse(s.Substring(6, 5), &r) |> ignore\n    r"
+    )

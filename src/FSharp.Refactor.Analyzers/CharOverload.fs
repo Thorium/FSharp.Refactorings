@@ -118,7 +118,11 @@ let private hasCharOverload (entity: FSharpEntity) (methodName: string) =
         with OptionModule.FcsSymbolFailure ->
             []
 
-    overloads.IsEmpty || overloads |> List.exists takesChar
+    // fail CLOSED: a blind member list is no proof the char overload
+    // exists, and this rule's fixes were exactly the ones a
+    // multi-framework build check had to put back on SQLProvider. Same
+    // policy as FR0106's span-overload gate — no proof, no fix.
+    overloads |> List.exists takesChar
 
 /// Does the method identifier resolve to one of the gated BCL types, with a
 /// char overload available in this compilation's references?

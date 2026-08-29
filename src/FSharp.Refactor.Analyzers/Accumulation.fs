@@ -33,11 +33,23 @@ type FoldSuggestion =
       OriginalText: string
       ReplacementText: string }
 
+/// What is being accumulated quadratically — the advice differs.
+[<RequireQualifiedAccess>]
+type QuadraticKind =
+    /// `acc <- acc @ [x]` / `Array.append acc [| x |]`: ResizeArray, or
+    /// cons and reverse once.
+    | Collection
+    /// `acc <- acc + s` on a STRING in a loop: the worst builder measured
+    /// (57.8µs and 1MB for 1000 pieces, against 1.6µs/4.6KB for a
+    /// StringBuilder) — StringBuilder, or collect and String.concat once.
+    | Str
+
 type QuadraticSuggestion =
     {
         Range: range
         /// The accumulator's name, for the message.
         Name: string
+        Kind: QuadraticKind
     }
 
 /// A loop pattern usable as a lambda parameter.
@@ -208,16 +220,13 @@ let find
                         && not (
                             Regex.IsMatch(textOfRange source rest.Range, @"\b" + Regex.Escape acc.idText + @"\b\s*<-")
                         )
-                        && (collectionModule check source src).IsSome
                         ->
-                        match lambdaPatText source pat with
-                        | ValueSome patText ->
+                        // one resolution, not one in the guard and another
+                        // for the module name — GetSymbolUseAtLocation is
+                        // the expensive step of this whole rule
+                        match lambdaPatText source pat, collectionModule check source src with
+                        | ValueSome patText, ValueSome m ->
                             let srcText = atomicText source src
-
-                            let m =
-                                match collectionModule check source src with
-                                | ValueSome name -> name
-                                | ValueNone -> "Seq"
 
                             let replacementBody =
                                 match rhs with
@@ -255,7 +264,15 @@ let find
                                             srcText
                                         | _ -> $"{srcText} |> {m}.map (fun {patText} -> {textOfRange source e.Range})"
 
-                                    let concatenated = $"{mapped} |> String.concat \"\""
+                                    // a LAZY seq through String.concat hits the slow
+                                    // IEnumerable path — measured 42.7µs/194KB for 1000
+                                    // pieces against 2.6µs/2KB once materialized — so a
+                                    // plain-seq source gets a Seq.toArray first
+                                    let concatenated =
+                                        if m = "Seq" then
+                                            $"{mapped} |> Seq.toArray |> String.concat \"\""
+                                        else
+                                            $"{mapped} |> String.concat \"\""
 
                                     match stripParens init with
                                     | SynExpr.Const(SynConst.String("", _, _), _) -> concatenated
@@ -271,7 +288,7 @@ let find
                                     { Range = editRange
                                       OriginalText = textOfRange source editRange
                                       ReplacementText = $"let {acc.idText} = {replacementBody}" }
-                        | ValueNone -> ()
+                        | _ -> ()
                     | _ -> ()
                 | _ -> ()
             // FR0051: quadratic append inside a loop — `acc <- acc @ [x]`,
@@ -313,7 +330,68 @@ let find
                 if quadratic then
                     quadratics.Add
                         { Range = expr.Range
-                          Name = acc.idText }
+                          Name = acc.idText
+                          Kind = QuadraticKind.Collection }
+                else
+                    // `acc <- acc + s` on a STRING: quadratic copying, the
+                    // worst string builder measured. `+` on numbers is the
+                    // most ordinary code there is, so the accumulator must
+                    // PROVABLY be a string (typed resolution)
+                    let stringQuadratic =
+                        match rhs with
+                        // the appended operand must not be a NUMERIC literal:
+                        // `i <- i + 1` is the most common statement in any
+                        // loop, and resolving symbols for every counter
+                        // increment put this rule at the top of the
+                        // slow-analyzer list. A string accumulator never has
+                        // a numeric literal on the right.
+                        | SynExpr.App(
+                            funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs)
+                            argExpr = appended) when
+                            op.idText = "op_Addition"
+                            && isAcc lhs
+                            && (match stripParens appended with
+                                | SynExpr.Const(constant = SynConst.Int32 _ | SynConst.Int64 _ | SynConst.Double _ | SynConst.Single _ | SynConst.Decimal _ | SynConst.Byte _ | SynConst.UInt32 _ | SynConst.UInt64 _ | SynConst.Int16 _ | SynConst.UInt16 _ | SynConst.SByte _) ->
+                                    false
+                                | _ -> true)
+                            ->
+                            // string-ness first: it is the selective check
+                            // (few accumulators are strings, almost every
+                            // (+) is FSharp.Core's), so the second
+                            // resolution rarely runs
+                            (let r = acc.idRange
+                             let lineText = source.GetLineString(r.EndLine - 1)
+
+                             match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ acc.idText ]) with
+                             | Some symbolUse ->
+                                 match symbolUse.Symbol with
+                                 | :? FSharpMemberOrFunctionOrValue as value ->
+                                     (try
+                                         let t = OptionModule.stripAbbreviations value.FullType
+
+                                         t.HasTypeDefinition
+                                         && t.TypeDefinition.TryFullName = Some "System.String"
+                                      with _ ->
+                                          false)
+                                 | _ -> false
+                             | None -> false)
+                            && OptionModule.resolvesToCoreOperator check source op
+                        | _ -> false
+
+                    if stringQuadratic then
+                        quadratics.Add
+                            { Range = expr.Range
+                              Name = acc.idText
+                              Kind = QuadraticKind.Str }
             | _ -> ()
+
+        // FR0050's fold fix already rewrites its exact shape into a single
+        // String.concat — a note on the same site would nag about code the
+        // fix is about to remove
+        let quadratics =
+            quadratics
+            |> Seq.filter (fun q ->
+                q.Kind = QuadraticKind.Collection
+                || not (folds |> Seq.exists (fun f -> Range.rangeContainsRange f.Range q.Range)))
 
         List.ofSeq folds, List.ofSeq quadratics

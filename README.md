@@ -74,7 +74,7 @@ NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT 
 Reference the package from the project you want analyzed:
 
 ```xml
-<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.6.1" PrivateAssets="all" />
+<PackageReference Include="FSharp.Refactor.Analyzers" Version="0.6.3" PrivateAssets="all" />
 ```
 
 then point Ionide at the restored analyzers in `.vscode/settings.json`:
@@ -83,7 +83,7 @@ then point Ionide at the restored analyzers in `.vscode/settings.json`:
 {
   "FSharp.enableAnalyzers": true,
   "FSharp.analyzersPath": [
-    "~/.nuget/packages/fsharp.refactor.analyzers/0.6.1/analyzers/dotnet/fs"
+    "~/.nuget/packages/fsharp.refactor.analyzers/0.6.2/analyzers/dotnet/fs"
   ]
 }
 ```
@@ -95,7 +95,7 @@ appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
 
 ```bash
 dotnet tool install --global fsharp-analyzers
-fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.6.1/analyzers/dotnet/fs --code-root . --report analysis.sarif
+fsharp-analyzers --project src/YourProject.fsproj --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/0.6.3/analyzers/dotnet/fs --code-root . --report analysis.sarif
 ```
 
 `fsharp-analyzers` is the analyzer HOST, and it is the dotnet tool you
@@ -151,7 +151,7 @@ Every rule is one of four kinds, shown in the last column of
 | Kind | | Count |
 |---|---|---|
 | `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 30 |
-| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 28 |
+| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 29 |
 | `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 32 |
 | `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 14 |
 
@@ -261,7 +261,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0028 | N+1 note (no fix): a `for` over an `IQueryable` nested inside another loop executes one database query per outer iteration; typed-gated so in-memory sequences never fire, and an outer loop batched with `chunkBySize` suppresses the note | performance |
 | FR0029 | Task state-machine advice (no fix; FS3511 itself is emitted at codegen, invisible to analyzers): a `let rec` in a resumable `task { }` body is flagged always (definite dynamic-fallback producer); oversized tasks (≥8 awaits or ≥60 lines) get the applicable shrinking moves — hoist plain leading `let`s out, split an if/match whose branches each await into per-branch tasks, extract a long non-awaiting tail into a plain function | performance |
 | FR0030 | A loop whose whole body is a single `ResizeArray.Add` becomes one `AddRange` call (`for x in xs do acc.Add(x * 2)` → `acc.AddRange(xs \|> Seq.map (fun x -> x * 2))`); `Add` is typed-gated to `List<'T>` so `HashSet.Add` never matches | performance |
-| FR0031 | String `+` chains mixing literals and string values → interpolated string (`"Hello " + name + "!"` → `$"Hello {name}!"`); every operand must be a literal or typed-`string` identifier/path and the `+` itself must resolve to FSharp.Core, so a custom `(+)` never rewrites; literals containing `{`/`}`/`%` leave the chain alone | idiom |
+| FR0031 | String `+` chains mixing literals and string values → interpolated string (`"Hello " + name + "!"` → `$"Hello {name}!"`); every operand must be a literal or typed-`string` identifier/path and the `+` itself must resolve to FSharp.Core, so a custom `(+)` never rewrites; literals containing `{`/`}`/`%` leave the chain alone. AT MOST TWO holes: a 3-hole interpolation falls off the compiler's String.Concat optimization onto String.Format — measured 4.9x slower with 2.3x the allocation of the + chain, which is itself already ONE String.Concat call | idiom |
 | FR0032 | A type that creates a disposable field (`let stream = new FileStream(...)`) without implementing `IDisposable` is noted (no fix); injected constructor parameters don't count — the injector owns them | correctness |
 | FR0033 | An instance member touching no instance state — no self identifier, instance `let` field, primary-constructor parameter, or `base` — can be `static member` (note only: call sites change) | idiom |
 | FR0034 | `if x.IsSome then x.Value + 1 else e` → `match x with \| Some v -> v + 1 \| None -> e` (`.Value` throws when misused; the match cannot); handles the `IsNone`/negated forms, else-less unit `if`, `x.Value.P` prefixes, and spells `ValueSome`/`ValueNone` when the receiver is a voption (typed-gated, so custom `IsSome`/`Value` members never match); boolean combos rewrite to combinators — `x.IsSome && p x.Value` → `Option.exists`, `x.IsNone \|\| p x.Value` → `Option.forall`, chains join inside the lambda | idiom |
@@ -281,7 +281,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0048 | `String.Format("{0} of {1}", x)` — a placeholder without an argument throws `FormatException` at runtime (CA2241, note); `{{` escapes handled, culture-first overload ignored | correctness |
 | FR0049 | Sync-over-async (CA1849/VSTHRD): `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, `Async.RunSynchronously`, `Thread.Sleep` **inside** `async`/`task { }` invite thread-pool starvation and deadlocks (typed-gated receivers; `Thread.Sleep n` gets a `do! Async.Sleep n` / `do! Task.Delay n` fix in statement position); `.Result`/`.Wait()`/`GetResult()` **outside** CEs get the boundary note — wrap in `task { }` or use the sync API (`Async.RunSynchronously` outside a CE is F#'s intended sync boundary and stays quiet) | correctness |
 | FR0050 | `let mutable total = 0` + `for x in xs do total <- total + x` → `let total = xs \|> List.sum` (fix); projections → `sumBy`, general combines → `fold (fun acc x -> ...) init` — same expression, same bindings, no mutable. The module matches the source's resolved kind: measured, `List.sum`/`Array.sum` run LEVEL with the loop while `Seq.sum` is ~50% slower on a list, so this is an idiom rule, and the rewrite never spells `Seq` when it knows better | idiom |
-| FR0051 | `acc <- acc @ [x]` / `acc <- Array.append acc [\|x\|]` inside a loop copies the accumulator per iteration — O(n²) (note): use a ResizeArray, or cons and `List.rev` | performance |
+| FR0051 | `acc <- acc @ [x]` / `acc <- Array.append acc [\|x\|]` inside a loop copies the accumulator per iteration — O(n²) (note): use a ResizeArray, or cons and `List.rev`. Also `acc <- acc + s` on a STRING (typed-proven) in any loop — the slowest string builder measured, 36x a StringBuilder at 1000 pieces; the note names StringBuilder or collect-then-`String.concat` | performance |
 | FR0052 | `q.Count = 0` on `ConcurrentQueue`/`Stack`/`Bag` → `q.IsEmpty` (CA1836, fix): their `Count` walks segments, `IsEmpty` peeks | performance |
 | FR0053 | `BitConverter.ToString(bytes).Replace("-", "")` → `System.Convert.ToHexString bytes` (CA1872, fix) | performance |
 | FR0054 | `raise`/`failwith` inside `Equals`/`GetHashCode`/`ToString`/`Dispose` overrides (CA1065, note): implicit callers (hash containers, debuggers, formatting, finalization) never expect them to throw; raises inside the member's own `try` stay quiet | correctness |
@@ -335,6 +335,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0103 | The Python isinstance ladder: an if/elif chain of `shape :? T` tests with `shape :?> T` casts in the branches becomes one `match` with `\| :? T as v ->` patterns — one type test per branch instead of test-plus-cast, and the unsafe `:?>` (an InvalidCastException waiting for a branch reorder) disappears. Needs two or more bare type-tests on the same plain identifier, single-line branches, and every cast targeting its own branch's type; a compound condition or a cross-cast keeps the chain | idiom |
 | FR0104 | A singleton append to an accumulator in a RECURSIVE call — `collect (acc @ [x]) rest` copies the whole accumulator every step, O(n²), and it is the shape first drafts produce more when told to avoid mutation. Note only: the repair is `x :: acc` with one `List.rev` in the base case, or an array/ResizeArray when the result is consumed positionally — the base case changes either way. A general `a @ b` merge is left alone | performance |
 | FR0105 | Arithmetic (`+`, `-`, `*`) on a NEAR-LIMIT integer constant — within a factor of two of `Int32.MaxValue`, or ten-ish digits into int64 territory. F# operators are unchecked by default, so overflow wraps silently and the corrupted value flows on. Note only: `open Microsoft.FSharp.Core.Operators.Checked` makes the scope throw instead, a wider type removes the ceiling, or the wraparound is intended and deserves saying so. Decimal spellings only (hex is a mask), unsigned skipped, and a file already opening Checked is left alone | correctness |
+| FR0106 | `Int32.Parse(s.Substring(6, 5))` → `Int32.Parse(s.AsSpan(6, 5))` (fix — a one-identifier swap). The Substring copy is discarded the moment the parser reads it; AsSpan parses in place, measured 2.6x and allocation-free. Fires only when the Substring is DIRECTLY the parser's argument (no escape), the receiver is typed-proven string, and the compilation actually offers the `ReadOnlySpan<char>` overload — which is how netstandard2.0/net4x stay untouched with no TFM sniffing. Framework methods (StartsWith, Contains, interpolation) already run on spans internally and need no rule | performance |
 | — | DU case payload → named record (cross-file) | needs FSAC codefix infra |
 
 ## Configuration
