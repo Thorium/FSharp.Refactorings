@@ -6,3 +6,4 @@ obj/
 TestResults/
 .tools/
 artifacts/
+*.log

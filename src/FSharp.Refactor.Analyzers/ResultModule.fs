@@ -171,6 +171,7 @@ let private findCandidates (parseTree: ParsedInput) (source: ISourceText) : Cand
                         && isPlainBody errorBody
                         && not (OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) okBody.Range)
                         && not (OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) errorBody.Range)
+                        && not (OptionModule.implicitYieldPosition path)
                         ->
                         match rewrite source scrutinee okVar okBody errorVar errorBody with
                         | Some(replacement, target) ->

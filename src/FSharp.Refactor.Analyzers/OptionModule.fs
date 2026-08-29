@@ -101,6 +101,37 @@ let private defaultCall (cfg: WrapperConfig) (source: ISourceText) (defaultBody:
         sprintf "%s.defaultWith (fun () -> %s)" cfg.ModuleName (textOfRange source defaultBody.Range),
         $"{cfg.ModuleName}.defaultWith"
 
+/// Is this expression in IMPLICIT-YIELD position of a list/array/seq
+/// comprehension or computation expression? There `| None -> ()` means
+/// "yield nothing" and a non-unit branch yields — the match is control
+/// flow, not a value. Rewriting it into a combinator breaks the
+/// comprehension: found on Fuuga, where
+///
+///     [ if a then "A"
+///       match g with Some g -> sprintf "G(%s)" g.Name | None -> () ]
+///
+/// became `Option.iter (fun g -> sprintf ...)` — Option.iter wants a
+/// unit-returning function and got a string one. Walking the path
+/// outward: a binding, lambda, application argument or explicit yield
+/// puts the expression back in VALUE position; reaching the
+/// comprehension first means implicit yield. Shared with ResultModule.
+let implicitYieldPosition (path: SyntaxNode list) =
+    path
+    |> List.tryPick (fun node ->
+        match node with
+        | SyntaxNode.SynExpr(SynExpr.ArrayOrListComputed _)
+        | SyntaxNode.SynExpr(SynExpr.ComputationExpr _) -> Some true
+        | SyntaxNode.SynBinding _
+        | SyntaxNode.SynExpr(SynExpr.Lambda _)
+        | SyntaxNode.SynExpr(SynExpr.MatchLambda _)
+        | SyntaxNode.SynExpr(SynExpr.App _)
+        // (let! / use! are LetOrUse with IsBang since FCS 43.12; their
+        // right-hand sides arrive through the SynBinding barrier above)
+        | SyntaxNode.SynExpr(SynExpr.YieldOrReturn _)
+        | SyntaxNode.SynExpr(SynExpr.YieldOrReturnFrom _) -> Some false
+        | _ -> None)
+    |> Option.defaultValue false
+
 /// A candidate found syntactically; the case idents still need to be resolved
 /// against the typed results before the suggestion is emitted.
 type private Candidate =
@@ -260,6 +291,7 @@ let private findCandidates (cfg: WrapperConfig) (parseTree: ParsedInput) (source
                         && isPlainBody noneBody
                         && not (capturesMutableLocal (AstIndex.ofTree parseTree) someBody.Range)
                         && not (capturesMutableLocal (AstIndex.ofTree parseTree) noneBody.Range)
+                        && not (implicitYieldPosition path)
                         ->
                         match rewrite cfg source scrutinee boundVar someBody noneBody with
                         | Some(replacement, target) ->

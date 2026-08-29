@@ -77,6 +77,11 @@ type private Options =
         Target: string
         ShowHelp: bool
         Codes: Set<string> option
+        /// The codes the user TYPED in --codes, before any --categories
+        /// expansion is folded into `Codes`. Only these outrank a rule's
+        /// default-off status or a config disable: naming a rule is an
+        /// ask, a category is merely a filter.
+        ExplicitCodes: Set<string> option
         /// Narrows `Codes` once parsing is done, so the two flags combine the
         /// same way whichever order they were given in.
         Categories: Set<RuleCatalog.Category> option
@@ -143,9 +148,12 @@ let rec private parseArgsLoop opts args =
     | "--project" :: path :: rest
     | "--script" :: path :: rest -> parseArgsLoop { opts with Target = path } rest
     | "--codes" :: codes :: rest ->
+        let parsed = codes.Split(',') |> Array.map _.Trim() |> Set.ofArray
+
         parseArgsLoop
             { opts with
-                Codes = Some(codes.Split(',') |> Array.map _.Trim() |> Set.ofArray) }
+                Codes = Some parsed
+                ExplicitCodes = Some parsed }
             rest
     | "--categories" :: names :: rest ->
         let parsed = names.Split(',') |> Array.map RuleCatalog.parse
@@ -199,6 +207,7 @@ let private parseArgs (argv: string[]) =
         { Target = ""
           ShowHelp = false
           Codes = None
+          ExplicitCodes = None
           Categories = None
           DryRun = false
           ApiChanges = false
@@ -1398,10 +1407,12 @@ let private runTarget (opts: Options) (showHeader: bool) (target: Target) =
         if opts.ApiChanges then
             Environment.SetEnvironmentVariable("FSREF_API_CHANGES", "1")
 
-        // an explicit --codes (or --categories expansion) outranks a rule's
-        // default-off status and a config disable — asking for FR0099 by
-        // name and getting silence would be a lie
-        match opts.Codes with
+        // only codes the user TYPED outrank a rule's default-off status and
+        // a config disable — asking for FR0099 by name and getting silence
+        // would be a lie. A --categories expansion deliberately does NOT
+        // qualify: a category is a filter, not an ask, and
+        // `--categories idiom` must not quietly turn on FR0002
+        match opts.ExplicitCodes with
         | Some codes -> Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", String.concat "," codes)
         | None -> ()
 

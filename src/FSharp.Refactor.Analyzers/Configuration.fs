@@ -62,14 +62,22 @@ let parse (json: string) : Map<string, bool> =
     | :? JsonException
     | :? InvalidOperationException -> Map.empty
 
-/// Is the rule enabled in a parsed rule map? An explicit code entry wins over
-/// a name entry; absent rules are enabled.
-/// Rules that are OFF unless the configuration turns them on. FR0099
-/// (trailing semicolons) lexes every file containing `;\n` and sat in the
-/// slowest-analyzer list on every run, for a finding that barely occurs in
-/// real code — cost out of proportion to value as a default.
-let private defaultOff = set [ "fr0099"; "trailingsemicolon" ]
+/// Rules that are OFF unless the configuration turns them on.
+///
+///   FR0099 (trailing semicolons) lexes every file containing `;\n` and
+///   sat in the slowest-analyzer list on every run, for a finding that
+///   barely occurs in real code — cost out of proportion to value.
+///
+///   FR0002 (match option → Option combinators) is the most expensive
+///   idiom rewrite on the measured board — the only one that makes the
+///   USER'S code slower (+53% and a 24-byte closure per call on the
+///   gate's pair) — and among the highest-churn. Nice to read, costs to
+///   run: an opt-in, not a default.
+let private defaultOff =
+    set [ "fr0002"; "optionmodule"; "fr0099"; "trailingsemicolon" ]
 
+/// Is the rule enabled in a parsed rule map? An explicit code entry wins
+/// over a name entry; absent rules are enabled unless default-off.
 let isEnabledIn (rules: Map<string, bool>) (code: string) (analyzerName: string) : bool =
     let code = code.ToLowerInvariant()
     let name = analyzerName.ToLowerInvariant()
@@ -220,9 +228,10 @@ let hintsFor (analyzedFile: string) : string list = (configFor analyzedFile).Hin
 let isGeneratedFile (analyzedFile: string) =
     analyzedFile.Contains @"\obj\" || analyzedFile.Contains "/obj/"
 
-/// Codes the apply tool's run explicitly asked for (--codes, or a
-/// --categories expansion). An explicit ask turns a rule on even when it
-/// is default-off or config-disabled — the command line outranks defaults.
+/// Codes the apply tool's run explicitly asked for — the ones TYPED in
+/// --codes, never a --categories expansion (a category is a filter, not
+/// an ask). An explicit ask turns a rule on even when it is default-off
+/// or config-disabled — naming it outranks defaults.
 let private forcedOn (code: string) (analyzerName: string) =
     match Environment.GetEnvironmentVariable "FSREF_FORCE_CODES" with
     | null
@@ -239,3 +248,6 @@ let isRuleEnabled (analyzedFile: string) (code: string) (analyzerName: string) :
     not (isGeneratedFile analyzedFile)
     && (forcedOn code analyzerName
         || isEnabledIn (rulesFor analyzedFile) code analyzerName)
+
+// Application-control reputation nudge: this comment exists to vary the
+// build hash when a freshly built analyzer DLL gets transiently blocked.

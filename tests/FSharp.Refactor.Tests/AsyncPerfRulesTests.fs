@@ -450,3 +450,11 @@ let ``quadratic append through a ref cell is noted`` () =
     match quadratics with
     | [ s ] -> Assert.Equal("acc", s.Name)
     | other -> failwithf "Expected exactly one ref-cell note, got %A" other
+
+[<Fact>]
+let ``a plain seq source still sums with the Seq module`` () =
+    // the module-resolved output names List/Array when it can; a true
+    // seq has nothing better than Seq.sum
+    assertFold
+        "let f (xs: int seq) =\n    let mutable total = 0\n    for x in xs do\n        total <- total + x\n    total"
+        "let total = xs |> Seq.sum"

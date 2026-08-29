@@ -10,4 +10,9 @@
     <Compile Include="Program.fs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FSharp.Refactor.Analyzers\FSharp.Refactor.Analyzers.fsproj" />
+    <PackageReference Update="FSharp.Core" Version="10.1.201" />
+  </ItemGroup>
+
 </Project>

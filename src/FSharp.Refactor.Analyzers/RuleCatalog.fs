@@ -61,7 +61,6 @@ let substantive = set [ Category.Correctness; Category.Performance ]
 /// decided where it belongs.
 let private categories =
     [ // --- correctness: the code does not do what it looks like it does
-      "FR0014", Category.Correctness // ContainsKey + indexer: races on ConcurrentDictionary
       "FR0017", Category.Correctness // Async discarded with ignore never runs
       "FR0018", Category.Correctness // check-then-add races
       "FR0019", Category.Correctness // Equals without GetHashCode
@@ -95,6 +94,7 @@ let private categories =
 
       // --- performance: correct, but doing work it need not
       "FR0004", Category.Performance
+      "FR0014", Category.Performance // ContainsKey + indexer: two lookups (measured 1.26x); the ConcurrentDictionary race is called out in the message
       "FR0011", Category.Performance
       "FR0015", Category.Performance
       "FR0016", Category.Performance

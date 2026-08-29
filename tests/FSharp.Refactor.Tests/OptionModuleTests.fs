@@ -184,3 +184,23 @@ let ``a branch writing a mutable local cannot become an iter lambda`` () =
     // on F# before 10 (FS0407)
     assertNoSuggestion
         "let f (x: int option) =\n    let mutable total = 0\n    match x with\n    | Some v -> total <- total + v\n    | None -> ()\n    total"
+
+[<Fact>]
+let ``a match in implicit-yield position of a comprehension is control flow`` () =
+    // from Fuuga's ConfigWizard: inside [ ... ], `| None -> ()` means
+    // "yield nothing" and the Some branch yields a string — rewriting to
+    // Option.iter hands a string-returning lambda to a unit-wanting
+    // combinator (FS0001 unit vs string)
+    Assert.Empty(
+        findIn
+            "module Test\nlet f (g: string option) =\n    [ if true then \"A\"\n      match g with Some v -> v | None -> () ]"
+    )
+
+[<Fact>]
+let ``a match bound inside a comprehension is a value again`` () =
+    match
+        findIn
+            "module Test\nlet f (g: int option) =\n    [ let v = match g with Some v -> v | None -> 0\n      string v ]"
+    with
+    | [ _ ] -> ()
+    | other -> failwithf "Expected exactly one suggestion for the bound match, got %A" other

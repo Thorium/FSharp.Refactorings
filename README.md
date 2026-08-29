@@ -150,8 +150,8 @@ Every rule is one of four kinds, shown in the last column of
 
 | Kind | | Count |
 |---|---|---|
-| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 31 |
-| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 27 |
+| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 30 |
+| `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 28 |
 | `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 32 |
 | `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 14 |
 
@@ -232,7 +232,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | Code | Refactoring | Kind |
 |------|-------------|--------|
 | FR0001 | Boolean `match` → `if-else` | idiom |
-| FR0002 | Manual `Some/None` (and `ValueSome/ValueNone`) match → `Option`/`ValueOption` `map`/`bind`/`flatten`/`defaultValue`/`defaultWith`/`isSome`/`isNone`/`iter`/`exists`/`forall` + map-then-default combos | idiom |
+| FR0002 | Manual `Some/None` (and `ValueSome/ValueNone`) match → `Option`/`ValueOption` `map`/`bind`/`flatten`/`defaultValue`/`defaultWith`/`isSome`/`isNone`/`iter`/`exists`/`forall` + map-then-default combos. OFF BY DEFAULT: the measured board's one rewrite that slows the rewritten code (+53%, one closure per call) — enable via `"FR0002": true` or `--codes FR0002` when the readability trade suits | idiom |
 | FR0003 | Extract function composition (`f >> g`) from pipeline/nested-application lambdas | idiom |
 | FR0004 | Move `List`/`Seq`/`Array` conversion past the next pipeline operation (or drop it before consuming ops) | performance |
 | FR0005 | Strip do-nothing CE wrapping (`async { return! c }`, rewrap identity, immediately-run wraps, `task { return x }` → `Task.FromResult`) | idiom |
@@ -244,7 +244,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0011 | Trivial partial active patterns → `[<return: Struct>]` `ValueSome`/`ValueNone` (perf: no allocation per match attempt) | performance |
 | FR0012 | Term-rewriting hints (fsharplint-style `lhs ===> rhs` rules): comparison flips, `x = true`, null checks via `isNull`, map fusion, `isEmpty (filter ...)` → `exists`, `sum (map ...)` → `sumBy`, `map id`, `id >>`, `compare ... = 0`, and more — extensible per repository | idiom |
 | FR0013 | Redundant parentheses around single atomic arguments to a *function*: `List.max([4; 3])` → `List.max [4; 3]`, `Some("x")` → `Some "x"` | cosmetic |
-| FR0014 | `ContainsKey` + indexer double lookup → single `TryGetValue` (race fix on `ConcurrentDictionary`); F# `Map` gets the `TryFind` option idiom | correctness |
+| FR0014 | `ContainsKey` + indexer double lookup → single `TryGetValue` (two lookups become one — measured 1.26x — and on `ConcurrentDictionary` also a race fix); F# `Map` gets the `TryFind` option idiom | performance |
 | FR0015 | Literal regex patterns → `StartsWith`/`EndsWith`/`Contains`; static `Regex` calls inside loops are hoisted to a `let private xRegex = Regex "..."` module binding (advice-only when the `open` is missing or the name is taken) | performance |
 | FR0016 | Small value-type-only unions → `[<Struct>]` (perf: no heap allocation per value) | performance |
 | FR0017 | `Async` discarded with `ignore` (never runs) — fix-less hint pointing at `Async.Ignore`/`Async.Start` | correctness |
@@ -321,7 +321,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0089 | `[ 1, 2 ]` is a SINGLE-tuple list — `,` builds a tuple, `;` separates elements (note; the classic paste trap, single-tuple lists are sometimes intended) | correctness |
 | FR0090 | Tupled → curried for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0008) | idiom |
 | FR0091 | Data-last parameter reorder for internal/public functions with every project call site rewritten (cross-file; `fsharp-refactor --api-changes` only, editors get the private-only FR0023). The two parameters must have different concrete types, so that a call site outside the project — which we can neither see nor fix — fails to compile rather than silently swapping two interchangeable arguments | idiom |
-| FR0092 | A constant `failwith "Error"` gains the enclosing function's arguments — `failwith $"Error, calling mymethod with x: {x}"` — so the log says which call failed, not just which line. Static messages only; an already-interpolated one was written deliberately, as was one that already names a parameter | idiom |
+| FR0092 | A constant `failwith "Error"` gains the enclosing function's arguments — `failwith $"Error, calling mymethod with x: {x}"` — so the log says which call failed, not just which line. Static messages only; an already-interpolated one was written deliberately, as was one that already names a parameter. NOTE: the exception TEXT is observable behavior — a test asserting the exact message will need updating (found the honest way: one such assertion in a 4,949-test suite) | idiom |
 | FR0093 | A private/internal record field `X: int * int` is a reference tuple — one heap object per value — where `struct (int * int)` stores it inline. At most four elements, since a struct tuple is copied by value. Note only: every construction and destructuring of the field needs the `struct` keyword too | performance |
 | FR0094 | Redundant parentheses around a single atomic argument to an instance *method*: `s.Contains("x")` → `s.Contains "x"`. Separate from FR0013 so either preference can be switched off alone. Left alone where the line continues into an application (`s.Contains("x") <> false` would read as if `"x" <> false` were the argument), under a projection, and for uppercase-headed paths — `System.Uri("x")` is a constructor, whose parens are load-bearing | cosmetic |
 | FR0095 | A lambda that restates a built-in: `fun x -> x` → `id`, `fun (a, b) -> a` → `fst`, `fun (a, b) -> b` → `snd`. One unannotated parameter only, and never as a direct argument to a .NET method, where the lambda-to-delegate conversion is doing work a function value may not | idiom |
@@ -359,12 +359,21 @@ performance lever on large codebases. Internally all analyzers share one
 memoized AST traversal per file version, so the editor pays for a single
 walk per keystroke regardless of how many rules are active.
 
-Every rule defaults to enabled except FR0099 (line-ending semicolons),
-which lexes every file containing one and rarely finds anything — cost out
-of proportion to a cosmetic default. Turn it on with `"FR0099": true`, or
-ask for it explicitly: the apply tool treats `--codes FR0099` (and a
-`--categories` expansion that includes it) as outranking both the
-default-off status and a config disable.
+Every rule defaults to enabled except two:
+
+- FR0099 (line-ending semicolons) lexes every file containing one and
+  rarely finds anything — cost out of proportion to a cosmetic default.
+- FR0002 (match option → Option combinators) is the one measured rewrite
+  that makes YOUR code slower — +53% and a closure allocation per call on
+  its benchmark pair. Nice to read, costs to run; opt in when that trade
+  suits the codebase.
+
+Turn either on with `"FR0099": true` / `"FR0002": true`, or ask
+explicitly: the apply tool treats `--codes FR0002` as outranking both the
+default-off status and a config disable — naming a rule is an ask. A
+`--categories` filter deliberately is not one: `--categories idiom` runs
+the idiom rules that are on, and does not quietly wake the default-off
+ones.
 
 The same file can add custom FR0012 term-rewriting rules using FSharpLint's
 hint syntax (single-letter identifiers are metavariables):

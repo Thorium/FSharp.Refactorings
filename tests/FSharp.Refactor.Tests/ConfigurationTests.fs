@@ -14,7 +14,7 @@ let ``rules default to enabled`` () =
 let ``rule disabled by code`` () =
     let rules = Configuration.parse """{ "rules": { "FR0001": false } }"""
     Assert.False(Configuration.isEnabledIn rules "FR0001" "MatchToIf")
-    Assert.True(Configuration.isEnabledIn rules "FR0002" "OptionModule")
+    Assert.True(Configuration.isEnabledIn rules "FR0004" "ConversionMove")
 
 [<Fact>]
 let ``rule disabled by analyzer name case-insensitively`` () =
@@ -60,9 +60,9 @@ let ``malformed json fails open`` () =
 [<Fact>]
 let ``unknown keys and non-boolean values are ignored`` () =
     let rules =
-        Configuration.parse """{ "ignoreFiles": ["x"], "rules": { "FR0002": "nope", "FR0003": false } }"""
+        Configuration.parse """{ "ignoreFiles": ["x"], "rules": { "FR0004": "nope", "FR0003": false } }"""
 
-    Assert.True(Configuration.isEnabledIn rules "FR0002" "OptionModule")
+    Assert.True(Configuration.isEnabledIn rules "FR0004" "ConversionMove")
     Assert.False(Configuration.isEnabledIn rules "FR0003" "Composition")
 
 [<Fact>]
@@ -78,7 +78,7 @@ let ``config file is discovered upward from the analyzed file`` () =
 
         let analyzed = Path.Combine(nested, "Code.fs")
         Assert.False(Configuration.isRuleEnabled analyzed "FR0001" "MatchToIf")
-        Assert.True(Configuration.isRuleEnabled analyzed "FR0002" "OptionModule")
+        Assert.True(Configuration.isRuleEnabled analyzed "FR0004" "ConversionMove")
     finally
         Directory.Delete(root, true)
 
@@ -92,11 +92,11 @@ let ``nearest config wins`` () =
 
     try
         File.WriteAllText(Path.Combine(root, Configuration.ConfigFileName), """{ "rules": { "FR0001": false } }""")
-        File.WriteAllText(Path.Combine(nested, Configuration.ConfigFileName), """{ "rules": { "FR0002": false } }""")
+        File.WriteAllText(Path.Combine(nested, Configuration.ConfigFileName), """{ "rules": { "FR0004": false } }""")
 
         let analyzed = Path.Combine(nested, "Code.fs")
         // the nested config is the effective one; the outer one is not merged
-        Assert.False(Configuration.isRuleEnabled analyzed "FR0002" "OptionModule")
+        Assert.False(Configuration.isRuleEnabled analyzed "FR0004" "ConversionMove")
         Assert.True(Configuration.isRuleEnabled analyzed "FR0001" "MatchToIf")
     finally
         Directory.Delete(root, true)
@@ -136,3 +136,15 @@ let ``an explicit --codes ask outranks the default-off status`` () =
         Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", null)
 
     Assert.False(Configuration.isRuleEnabled "Test.fs" "FR0099" "TrailingSemicolon")
+
+[<Fact>]
+let ``FR0002 is off by default`` () =
+    // the one measured rewrite that slows the rewritten code: +53% and a
+    // closure per call on its benchmark pair — opt-in, not a default
+    let rules = Configuration.parse "{}"
+    Assert.False(Configuration.isEnabledIn rules "FR0002" "OptionModule")
+
+[<Fact>]
+let ``the configuration can turn FR0002 back on`` () =
+    let rules = Configuration.parse """{ "rules": { "FR0002": true } }"""
+    Assert.True(Configuration.isEnabledIn rules "FR0002" "OptionModule")
