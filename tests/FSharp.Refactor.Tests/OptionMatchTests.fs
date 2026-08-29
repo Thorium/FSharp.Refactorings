@@ -131,3 +131,19 @@ let ``a predicate reading a mutable local stays a boolean chain`` () =
         optionMatchIn
             "let f (x: int option) =\n    let mutable total = 0\n    if x.IsSome && x.Value > total then total <- 1\n    total"
     )
+
+[<Fact>]
+let ``IsNone chains inside a query expression stay untouched`` () =
+    // inside query { } the property shape IS what the LINQ translator
+    // recognizes; Option.forall with a lambda is a tree it has never seen
+    Assert.Empty(
+        optionMatchIn
+            "open System.Linq\nlet f (xs: int list) (y: int option) =\n    query {\n        for x in xs.AsQueryable() do\n            where (y.IsNone || (y.Value > x))\n            select x\n    }"
+    )
+
+[<Fact>]
+let ``IsSome conditionals inside a quotation stay untouched`` () =
+    Assert.Empty(
+        optionMatchIn
+            "let f (y: int option) =\n    <@ if y.IsSome then y.Value + 1 else 0 @>"
+    )

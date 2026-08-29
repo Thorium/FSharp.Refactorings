@@ -114,19 +114,6 @@ let private resolvesToVectorizableArray (check: FSharpCheckFileResults) (source:
 
 /// Find scalar Array aggregations with a vectorized LINQ equivalent.
 /// Requires typed check results.
-/// Inside a query-style computation expression the code is a QUOTATION on
-/// its way to a provider's translator, not code that runs here: SQLProvider
-/// turns `ys |> Array.contains x` in a `where` into SQL IN, and the
-/// "vectorized" Enumerable.Contains spelling may not translate at all. The
-/// note stays quiet under any builder whose name says query.
-let private insideQuery (path: SyntaxNode list) =
-    path
-    |> List.exists (fun node ->
-        match node with
-        | SyntaxNode.SynExpr(SynExpr.App(funcExpr = SynExpr.Ident id)) ->
-            id.idText.EndsWith("query", System.StringComparison.OrdinalIgnoreCase)
-        | _ -> false)
-
 let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
     if OptionModule.hasErrors check then
         []
@@ -136,7 +123,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         [ for path, expr in index.Exprs do
               match expr with
               | ArrayAggregation(m, fn, arr, arrText) when
-                  not (insideQuery path) && resolvesToVectorizableArray check source arr
+                  not (insideQuotedCode path) && resolvesToVectorizableArray check source arr
                   ->
                   { Range = expr.Range
                     ModuleName = m

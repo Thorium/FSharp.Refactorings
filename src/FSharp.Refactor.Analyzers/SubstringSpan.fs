@@ -115,11 +115,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         let index = AstIndex.ofTree parseTree
 
-        [ for _, expr in index.Exprs do
+        [ for path, expr in index.Exprs do
               match expr with
               | SynExpr.App(isInfix = false; funcExpr = MethodNamed "Parse" parserIdent; argExpr = parserArg)
               | SynExpr.App(isInfix = false; funcExpr = MethodNamed "TryParse" parserIdent; argExpr = parserArg) when
                   parserNames.Contains parserIdent.idText
+                  // a quotation translator knows Substring, not AsSpan
+                  && not (insideQuotedCode path)
                   ->
                   match stripParens parserArg with
                   | SynExpr.App(isInfix = false; funcExpr = MethodNamed "Substring" substringIdent; argExpr = _) when

@@ -263,6 +263,15 @@ let has (s: string) =
 
 `--framework <tfm>` restricts a run to one framework if you want it.
 
+### Allow changes to public API like types
+
+Public types and function signature changes are not done by default.
+Sometimes they would make the program more efficient:
+
+Changing `type Item = { X: Option System.Guid }` to `type Item = { X: VOption System.Guid }`
+would often make sense because Guid is already a struct, so `ValueOption` is better here.
+But that could affect to external users and serialization.
+
 `--api-changes` opts into rewrites that change internal or public
 signatures — currying a tupled function (FR0090) and reordering its
 parameters data-last (FR0091) — rewriting every call site in the project.

@@ -57,3 +57,12 @@ let ``a verbatim single-char string is the char overload too`` () =
     // Contains, because StartsWith(string) is culture-sensitive and only
     // ever gets the advisory tier
     assertCharFix "let f (s: string) = s.Contains @\"\\\"" "'\\\\'"
+
+[<Fact>]
+let ``Contains inside a query expression keeps the string overload`` () =
+    // Contains(string) in a where clause is what SQL translators turn
+    // into LIKE; the char overload is not a recognized pattern
+    Assert.Empty(
+        charOverloadsIn
+            "open System.Linq\nlet f (xs: string list) =\n    query {\n        for x in xs.AsQueryable() do\n            where (x.Contains \"a\")\n            select x\n    }"
+    )

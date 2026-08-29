@@ -106,6 +106,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
               | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent opId; argExpr = _); argExpr = _) when
                   opId.idText = "op_Addition"
                   && not (isOperandOfPlus path)
+                  // string + translates in queries; String.Concat may not
+                  && not (insideQuotedCode path)
                   && isSingleLine expr.Range
                   ->
                   let operands = collectOperands [] expr

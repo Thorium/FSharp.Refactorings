@@ -145,6 +145,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
               // x.IsNone || p₁ || p₂ → x |> Option.forall (fun v -> p₁ || p₂)
               | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = _); argExpr = _) when
                   (op.idText = "op_BooleanAnd" || op.idText = "op_BooleanOr")
+                  // inside query { } / <@ @> the IsSome/IsNone property
+                  // shape IS what the quotation's translator recognizes
+                  && not (insideQuotedCode path)
                   && isSingleLine expr.Range
                   // only the OUTERMOST chain node; inner nodes re-visit it
                   && (match path with
@@ -204,6 +207,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   | _ -> ()
               | SynExpr.IfThenElse(ifExpr = OptionTest(x, negated); thenExpr = t; elseExpr = els; trivia = trivia) when
                   not trivia.IsElif
+                  && not (insideQuotedCode path)
                   // the branches must be single-line (the binder substitution
                   // is column-based); the `if` itself may span lines
                   && isSingleLine t.Range

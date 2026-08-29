@@ -159,9 +159,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         let index = AstIndex.ofTree parseTree
 
-        [ for _, expr in index.Exprs do
+        [ for path, expr in index.Exprs do
               match expr with
-              | SynExpr.App(isInfix = false; funcExpr = funcExpr; argExpr = arg) ->
+              // inside query { } / <@ @> the STRING overload is the shape
+              // a LINQ translator recognizes (Contains -> SQL LIKE); the
+              // char overload is a tree it has never seen
+              | SynExpr.App(isInfix = false; funcExpr = funcExpr; argExpr = arg) when not (insideQuotedCode path) ->
                   let methodId =
                       match funcExpr with
                       | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when ids.Length >= 2 ->

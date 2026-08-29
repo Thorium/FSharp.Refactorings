@@ -381,3 +381,19 @@ let lineTextAt (source: ISourceText) (zeroBasedLine: int) =
         ""
     else
         source.GetLineString zeroBasedLine
+
+/// Is the expression inside QUOTED code — a `query { }`-style builder (any
+/// builder whose name ends in "query") or an `<@ @>` quotation? Code there
+/// is data for a translator, not code that runs here: a LINQ provider
+/// recognizes `y.IsNone` or the string Contains overload in a where clause
+/// and turns them into SQL, while the "nicer" spelling — an Option-module
+/// call wrapping a lambda, a char overload, an AsSpan — is a tree shape it
+/// has never seen. Shape-changing rules stay quiet under either.
+let insideQuotedCode (path: SyntaxNode list) =
+    path
+    |> List.exists (fun node ->
+        match node with
+        | SyntaxNode.SynExpr(SynExpr.Quote _) -> true
+        | SyntaxNode.SynExpr(SynExpr.App(funcExpr = SynExpr.Ident id)) ->
+            id.idText.EndsWith("query", System.StringComparison.OrdinalIgnoreCase)
+        | _ -> false)
