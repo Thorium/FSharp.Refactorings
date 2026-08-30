@@ -114,8 +114,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       gRecv.idText = actRecv.idText
                       && textOfRange source gKey.Range = textOfRange source actKey.Range
                       && (match gMethod.idText, negated, actMethod.idText with
-                          | "ContainsKey", false, "Remove" -> true
-                          | "Contains", false, "Remove" -> true
+                          | "ContainsKey", false, "Remove"
+                          | "Contains", false, "Remove"
                           | "Contains", true, "Add" -> true
                           | _ -> false)
                       && resolvesToGated check source actMethod

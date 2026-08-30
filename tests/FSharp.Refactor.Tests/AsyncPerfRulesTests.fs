@@ -42,8 +42,8 @@ let ``RunSynchronously inside a task is flagged`` () =
 let ``Thread Sleep in an async gets the Async Sleep fix`` () =
     match blockingIn "let f () = async {\n    System.Threading.Thread.Sleep 100\n    return 1\n}" with
     | [ s ] ->
-        match s.Fix with
-        | Some(r, _, replacement) ->
+        match s.Fixes with
+        | [ (r, _, replacement) ] ->
             Assert.Equal("do! Async.Sleep 100", replacement)
 
             let source =
@@ -51,7 +51,7 @@ let ``Thread Sleep in an async gets the Async Sleep fix`` () =
 
             let patched = applyEdit source r replacement
             Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
-        | None -> failwith "Expected a fix for Thread.Sleep"
+        | _ -> failwith "Expected a fix for Thread.Sleep"
     | other -> failwithf "Expected exactly one Sleep site, got %A" other
 
 [<Fact>]
@@ -516,7 +516,7 @@ let ``a Thread.Sleep inside a nested seq gets no do-fix`` () =
             "let f () =\n    async {\n        let xs = seq {\n            System.Threading.Thread.Sleep 100\n            yield 1\n        }\n        return Seq.length xs\n    }"
 
     Assert.NotEmpty suggestions
-    Assert.True(suggestions |> List.forall (fun s -> s.Fix.IsNone))
+    Assert.True(suggestions |> List.forall (fun s -> s.Fixes.IsEmpty))
 
 [<Fact>]
 let ``a field-held concurrent queue count is an emptiness check too`` () =
@@ -623,3 +623,192 @@ let ``a mutable let in the body keeps the flag loop`` () =
         flagLoopsIn
             "let f (xs: int list) =\n    let mutable found = false\n    for x in xs do\n        let mutable y = x + 1\n        if y > 3 then found <- true\n    found"
     )
+
+[<Fact>]
+let ``a GetResult binding inside task becomes a let bang bind`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = task {\n    let x = t.GetAwaiter().GetResult()\n    return x + 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        match s.Fixes with
+        | [ (kwRange, _, "let!"); (rhsRange, _, receiver) ] ->
+            Assert.Equal("t", receiver)
+            let patched = applyEdit (applyEdit source rhsRange receiver) kwRange "let!"
+            Assert.Contains("let! x = t", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | other -> failwithf "Expected the let!-bind pair, got %A" other
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``a GetResult boundary call swaps to a provable sync sibling`` () =
+    // File.ReadAllTextAsync has the synchronous File.ReadAllText sibling
+    // with the same argument count — verified via the typed tree
+    let source =
+        "let f (path: string) = System.IO.File.ReadAllTextAsync(path).GetAwaiter().GetResult()"
+
+    match blockingIn source with
+    | [ s ] ->
+        // toward-sync is an ALTERNATIVE (editor action / config opt-in),
+        // never the auto-applied fix: async-in-sync is usually a waypoint
+        // toward full async, and the tool must not walk it backward
+        Assert.Empty s.Fixes
+
+        match s.AlternativeFixes with
+        | [ (nameRange, "ReadAllTextAsync", "ReadAllText"); (dropRange, _, "") ] ->
+            let patched = applyEdit (applyEdit source dropRange "") nameRange "ReadAllText"
+            Assert.Contains("System.IO.File.ReadAllText(path)", patched)
+            Assert.DoesNotContain("GetAwaiter", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | other -> failwithf "Expected the sibling swap pair, got %A" other
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``a GetResult call with no sync sibling stays advice`` () =
+    // HttpClient has no synchronous GetString — the note must carry no fix
+    let source =
+        "let f (c: System.Net.Http.HttpClient) (u: string) = c.GetStringAsync(u).GetAwaiter().GetResult()"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.Empty s.Fixes
+        Assert.Empty s.AlternativeFixes
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``draining a plain task value outside a CE stays advice`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = t.GetAwaiter().GetResult()"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.Empty s.Fixes
+        Assert.Empty s.AlternativeFixes
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``a ValueTask GetResult binding inside async is not rewritten`` () =
+    // async { } binds a Task via Async.AwaitTask — but AwaitTask has no
+    // ValueTask overload, so a ValueTaskAwaiter drain stays advice
+    let source =
+        "let f (t: System.Threading.Tasks.ValueTask<int>) = async {\n    let x = t.GetAwaiter().GetResult()\n    return x + 1\n}"
+
+    for s in blockingIn source do
+        Assert.Empty s.Fixes
+
+[<Fact>]
+let ``a GetResult binding in a finally block keeps its hands off`` () =
+    // let!/do! are illegal inside finally — the pre-existing Sleep fix
+    // shared this hole
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = task {\n    try\n        return 1\n    finally\n        let x = t.GetAwaiter().GetResult()\n        ignore x\n}"
+
+    for s in blockingIn source do
+        Assert.Empty s.Fixes
+
+[<Fact>]
+let ``Thread Sleep in a finally block keeps its blocking form`` () =
+    let source =
+        "let f () = task {\n    try\n        return 1\n    finally\n        System.Threading.Thread.Sleep 100\n}"
+
+    for s in blockingIn source do
+        Assert.Empty s.Fixes
+
+[<Fact>]
+let ``a type-annotated GetResult binding stays advice`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = task {\n    let x: int = t.GetAwaiter().GetResult()\n    return x + 1\n}"
+
+    for s in blockingIn source do
+        Assert.Empty s.Fixes
+
+// ---- the bind matrix: {Task, Async} receivers x {task, async} builders ----
+
+let private applyAll (source: string) (fixes: (FSharp.Compiler.Text.range * string * string) list) =
+    fixes
+    |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+    |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+[<Fact>]
+let ``RunSynchronously binding inside async becomes a native bind`` () =
+    let source =
+        "let f (comp: Async<int>) = async {\n    let x = comp |> Async.RunSynchronously\n    return x + 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fixes
+        let patched = applyAll source s.Fixes
+        Assert.Contains("let! x = comp", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one RunSynchronously site, got %A" other
+
+[<Fact>]
+let ``RunSynchronously binding inside task binds the async directly`` () =
+    // the task builder's medium-priority overload binds Async<'T> with a
+    // plain let! — no StartAsTask adapter needed
+    let source =
+        "let f (comp: Async<int>) = task {\n    let x = Async.RunSynchronously comp\n    return x + 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fixes
+        let patched = applyAll source s.Fixes
+        Assert.Contains("let! x = comp", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one RunSynchronously site, got %A" other
+
+[<Fact>]
+let ``RunSynchronously with a timeout tuple stays advice`` () =
+    let source =
+        "let f (comp: Async<int>) = async {\n    let x = Async.RunSynchronously(comp, timeout = 100)\n    return x + 1\n}"
+
+    for s in blockingIn source do
+        Assert.Empty s.Fixes
+
+[<Fact>]
+let ``a GetResult binding inside async binds via AwaitTask`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = async {\n    let x = t.GetAwaiter().GetResult()\n    return x + 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fixes
+        let patched = applyAll source s.Fixes
+        Assert.Contains("let! x = Async.AwaitTask t", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``a Result binding inside task becomes a plain bind`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = task {\n    let x = t.Result\n    return x + 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fixes
+        let patched = applyAll source s.Fixes
+        Assert.Contains("let! x = t", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one Result site, got %A" other
+
+[<Fact>]
+let ``a Result binding on a call inside async parenthesizes the AwaitTask arg`` () =
+    let source =
+        "let g () = System.Threading.Tasks.Task.FromResult 2\nlet f () = async {\n    let x = (g ()).Result\n    return x + 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fixes
+        let patched = applyAll source s.Fixes
+        Assert.Contains("Async.AwaitTask (", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one Result site, got %A" other
+
+[<Fact>]
+let ``a ValueTask Result binding inside async stays advice`` () =
+    // Async.AwaitTask has no ValueTask overload — no fix to offer there
+    let source =
+        "let f (t: System.Threading.Tasks.ValueTask<int>) = async {\n    let x = t.Result\n    return x + 1\n}"
+
+    for s in blockingIn source do
+        Assert.Empty s.Fixes

@@ -91,7 +91,7 @@ let private isPlaceholder (e: SynExpr) =
         match c with
         | SynConst.String(text = "") -> true
         | SynConst.Int32 0
-        | SynConst.Int64 0L -> true
+        | SynConst.Int64 0L
         | SynConst.Double 0.0 -> true
         // `| X -> false // Not supported yet` — the comment gate keeps
         // ordinary boolean tables quiet, so both literals may accuse

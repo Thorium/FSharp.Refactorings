@@ -68,7 +68,7 @@ let private (|LengthFunc|_|) (e: SynExpr) =
     match e with
     | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])) ->
         match m.idText, f.idText with
-        | ("List" | "Seq" | "Array"), "length" -> ValueSome(m.idText, f)
+        | ("List" | "Seq" | "Array"), "length"
         | ("Set" | "Map"), "count" -> ValueSome(m.idText, f)
         | _ -> ValueNone
     | _ -> ValueNone

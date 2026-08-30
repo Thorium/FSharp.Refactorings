@@ -1047,7 +1047,7 @@ let cases =
 let notApplicable =
     [ // performance
       "FR0028", "N+1 query batching: the cost is in the database round trips"
-      "FR0029", "task-vs-async is scheduler-bound; not stable in-process"
+      "FR0029", "state-machine size at codegen; fixes verified by typecheck, not stopwatch"
       "FR0079", "awaiting one awaitable: scheduler-bound"
       // idiom
       "FR0006", "extracting an active pattern: same code, new name"
@@ -1065,7 +1065,8 @@ let notApplicable =
       "FR0092", "failwith message content: diagnostic quality"
       "FR0114", "branch reorder: identical branches, swapped positions"
       "FR0115", "advice on match arm order: no fix to measure"
-      "FR0116", "rec-group membership: same compiled calls either way" ]
+      "FR0116", "rec-group membership: same compiled calls either way"
+      "FR0117", "or-pattern fold: identical decision tree after compilation" ]
 
 [<EntryPoint>]
 let main argv =

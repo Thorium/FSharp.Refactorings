@@ -665,6 +665,7 @@ let private parseOnlySafeAnalyzers =
           "RedundantParens"
           "RedundantSyntax"
           "RegexUsage"
+          "MatchArmMerge"
           "SecurityRules"
           "StructDu"
           "StructHints"

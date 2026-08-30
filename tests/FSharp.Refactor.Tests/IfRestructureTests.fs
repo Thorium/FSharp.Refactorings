@@ -502,3 +502,79 @@ let ``commentSafeOnly keeps a fix that carries the comment along`` () =
         // re-emits it: message-level accounting keeps the fix
         Assert.Equal(1, (Analyzers.commentSafeOnly tree sourceText messages).Length)
     | other -> failwithf "Expected the doc-carrying extraction, got %A" other
+
+// ---- FR0117 match arm merge ----
+
+let private armMergesIn (source: string) =
+    let tree, sourceText = parse source
+    MissingCases.findMergeableArms tree sourceText
+
+[<Fact>]
+let ``adjacent same-result arms fold into an or-pattern`` () =
+    let source =
+        "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    | 2 -> true\n    | 3 -> true\n    | 4 -> true\n    | _ -> false"
+
+    match armMergesIn source with
+    | [ s ] ->
+        Assert.Equal(4, s.Count)
+        Assert.Equal("| 1\n    | 2\n    | 3\n    | 4 -> true", s.NewText)
+    | other -> failwithf "Expected one merge, got %A" other
+
+[<Fact>]
+let ``the merged or-pattern applies to a compiling result`` () =
+    let source =
+        "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    | 2 -> true\n    | 3 -> true\n    | _ -> false"
+
+    match armMergesIn source with
+    | [ s ] ->
+        let lines = source.Split '\n'
+
+        let offsetOf (line: int) (col: int) =
+            (lines |> Seq.take (line - 1) |> Seq.sumBy (fun l -> l.Length + 1)) + col
+
+        let s0 = offsetOf s.ReplaceRange.StartLine s.ReplaceRange.StartColumn
+        let e0 = offsetOf s.ReplaceRange.EndLine s.ReplaceRange.EndColumn
+        let patched = source.Substring(0, s0) + s.NewText + source.Substring e0
+        Assert.Contains("| 1\n    | 2\n    | 3 -> true", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one merge, got %A" other
+
+[<Fact>]
+let ``non-adjacent same-result arms stay apart: order is semantics`` () =
+    // 2 sits between the two `true` arms — merging around it would
+    // reorder the match
+    Assert.Empty(
+        armMergesIn
+            "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    | 2 -> false\n    | 3 -> true\n    | _ -> false"
+    )
+
+[<Fact>]
+let ``a when-guarded arm never joins a merge`` () =
+    Assert.Empty(
+        armMergesIn
+            "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    | n when n > 10 -> true\n    | _ -> false"
+    )
+
+[<Fact>]
+let ``binder arms never merge: or-patterns demand identical bindings`` () =
+    Assert.Empty(
+        armMergesIn "module Test\nlet f (o: int option) =\n    match o with\n    | Some x -> x > 0\n    | None -> false"
+    )
+
+[<Fact>]
+let ``union cases with literal payloads merge`` () =
+    let source =
+        "module Test\nlet f (o: int option) =\n    match o with\n    | Some 1 -> true\n    | Some 2 -> true\n    | Some _ -> false\n    | None -> false"
+
+    match armMergesIn source with
+    | [ s ] ->
+        Assert.Equal(2, s.Count)
+        Assert.Contains("| Some 1\n    | Some 2 -> true", s.NewText)
+    | other -> failwithf "Expected one payload merge, got %A" other
+
+[<Fact>]
+let ``differing bodies do not merge even when adjacent`` () =
+    Assert.Empty(
+        armMergesIn
+            "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    | 2 -> not false\n    | _ -> false"
+    )

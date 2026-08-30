@@ -72,7 +72,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
     for _, expr in index.Exprs do
         match expr with
-        | SynExpr.IfThenElse _ when not (isElifItself expr) && not (spansDirective source expr.Range) ->
+        | SynExpr.IfThenElse _ when not ((isElifItself expr) || (spansDirective source expr.Range)) ->
             match chain source [] expr with
             | Some((_ :: _ :: _ as branches), finalElse) ->
                 let subject = let (s, _, _) = List.head branches in s

@@ -154,6 +154,7 @@ let private categories =
       "FR0114", Category.Idiom // pyramid flip: short exit first (default off - house style)
       "FR0115", Category.Idiom // base case first behind a compound guard: advice on arm order
       "FR0116", Category.Idiom // a non-recursive member leaves its let rec group
+      "FR0117", Category.Idiom // adjacent same-result match arms fold into an or-pattern
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

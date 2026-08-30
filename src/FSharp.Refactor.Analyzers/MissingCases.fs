@@ -22,6 +22,19 @@
 ///     that, a wildcard arm was probably the intent
 ///   - multi-line matches only: each clause starts its own line, and the
 ///     new arms adopt the last clause's `|` column
+///
+/// This module also hosts FR0117 (fix): ADJACENT arms with identical
+/// single-line bodies and no guards fold into one or-pattern arm —
+///
+///     | 1 -> true                 | 1
+///     | 2 -> true            →    | 2
+///     | 3 -> true                 | 3 -> true
+///     | _ -> false                | _ -> false
+///
+/// Match order is semantics in F#: only a CONTIGUOUS run merges, in
+/// place, so the same patterns are tried in the same order. Patterns
+/// must provably bind nothing (or-patterns demand identical bindings,
+/// and a lowercase lone identifier is conventionally a binder).
 module FSharp.Refactor.MissingCases
 
 open FSharp.Compiler.CodeAnalysis
@@ -194,3 +207,106 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           | None -> ()
                       | [] -> ()
               | _ -> () ]
+
+// ---- FR0117: adjacent same-result arms fold into one or-pattern ----
+
+type ArmMerge =
+    {
+        /// From the first merged clause's `|` to the last clause's end.
+        ReplaceRange: range
+        NewText: string
+        /// How many arms folded.
+        Count: int
+    }
+
+/// A pattern that provably binds nothing — or-patterns demand identical
+/// bindings across alternatives, so only these may merge. A lone
+/// identifier is a union case only by convention (uppercase); a
+/// lowercase one is treated as a binder and refused.
+let rec private bindsNothing (p: SynPat) =
+    match p with
+    | SynPat.Const _ -> true
+    | SynPat.Paren(pat = inner) -> bindsNothing inner
+    | SynPat.Or(lhsPat = l; rhsPat = r) -> bindsNothing l && bindsNothing r
+    | SynPat.Tuple(elementPats = els) -> els |> List.forall bindsNothing
+    | SynPat.LongIdent(longDotId = SynLongIdent(id = ids); argPats = SynArgPats.Pats args) when
+        args |> List.forall bindsNothing
+        ->
+        match ids with
+        | [ single ] -> single.idText.Length > 0 && System.Char.IsUpper single.idText.[0]
+        | _ -> not ids.IsEmpty
+    | _ -> false
+
+/// Adjacent guard-free arms whose single-line bodies read identically:
+/// each contiguous run becomes one or-pattern arm, order untouched.
+let findMergeableArms (parseTree: ParsedInput) (source: ISourceText) : ArmMerge list =
+    let index = AstIndex.ofTree parseTree
+
+    let clauseView (SynMatchClause(pat = p; whenExpr = w; resultExpr = r; trivia = t) as clause) =
+        let barOnOwnLine =
+            match t.BarRange with
+            | Some bar ->
+                bar.StartColumn = 0
+                || (source.GetLineString(bar.StartLine - 1)).Substring(0, bar.StartColumn).Trim() = ""
+            | None -> false
+
+        let qualifies = w.IsNone && bindsNothing p && isSingleLine r.Range && barOnOwnLine
+
+        clause, p, r, t, qualifies
+
+    // contiguous qualifying runs sharing one body text
+    let rec runs
+        acc
+        (views: (SynMatchClause * SynPat * SynExpr * FSharp.Compiler.SyntaxTrivia.SynMatchClauseTrivia * bool) list)
+        =
+        match views with
+        | [] -> List.rev acc
+        | ((_, _, r0, _, true) as head) :: rest ->
+            let body = (textOfRange source r0.Range).Trim()
+
+            let sameBody =
+                rest
+                |> List.takeWhile (fun (_, _, rj, _, qj) -> qj && (textOfRange source rj.Range).Trim() = body)
+
+            let run = head :: sameBody
+            runs (run :: acc) (rest |> List.skip sameBody.Length)
+        | _ :: rest -> runs acc rest
+
+    [ for _, expr in index.Exprs do
+          let clauses =
+              match expr with
+              | SynExpr.Match(clauses = cs)
+              | SynExpr.MatchBang(clauses = cs) -> cs
+              | _ -> []
+
+          if clauses.Length >= 2 then
+              for run in runs [] (clauses |> List.map clauseView) do
+                  if run.Length >= 2 then
+                      let (SynMatchClause(trivia = firstTrivia), _, _, _, _) = List.head run
+                      let (lastClause, _, lastResult, _, _) = List.last run
+
+                      match firstTrivia.BarRange with
+                      | Some bar ->
+                          let replaceRange = Range.mkRange bar.FileName bar.Start lastClause.Range.End
+
+                          if not (spansDirective source replaceRange) then
+                              let indent = String.replicate bar.StartColumn " "
+                              let body = (textOfRange source lastResult.Range).Trim()
+
+                              let alternatives =
+                                  run |> List.map (fun (_, p, _, _, _) -> textOfRange source p.Range)
+
+                              let lines =
+                                  alternatives
+                                  |> List.mapi (fun i pat ->
+                                      let prefix = if i = 0 then "" else indent
+
+                                      if i = alternatives.Length - 1 then
+                                          $"{prefix}| {pat} -> {body}"
+                                      else
+                                          $"{prefix}| {pat}")
+
+                              { ReplaceRange = replaceRange
+                                NewText = String.concat "\n" lines
+                                Count = run.Length }
+                      | None -> () ]

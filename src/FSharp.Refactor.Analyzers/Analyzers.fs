@@ -161,6 +161,28 @@ let missingCasesCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0110" "MissingCases" (fun () ->
         missingCasesMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
+// ---- FR0117 MatchArmMerge ----
+
+let private matchArmMergeMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    MissingCases.findMergeableArms parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0117"
+            $"{s.Count} adjacent arms return the same result; one or-pattern arm says it once — same patterns, same order."
+            s.ReplaceRange
+            [ fix s.ReplaceRange (Text.textOfRange source s.ReplaceRange) s.NewText ])
+
+[<EditorAnalyzer("MatchArmMerge", "Fold adjacent same-result match arms into an or-pattern", HelpBase)>]
+let matchArmMergeEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0117" "MatchArmMerge" (fun () ->
+        matchArmMergeMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("MatchArmMerge", "Fold adjacent same-result match arms into an or-pattern", HelpBase)>]
+let matchArmMergeCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0117" "MatchArmMerge" (fun () ->
+        matchArmMergeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
 // ---- FR0111 / FR0112 / FR0113 IfRestructure ----
 
 let private ifRestructureMessages
@@ -1068,21 +1090,26 @@ let private taskStateMachineMessages (parseTree: ParsedInput) (source: ISourceTe
                 "A let rec inside task { } cannot be compiled into the static state machine (FS3511 at build time); move the recursive function out of the task."
             | TaskStateMachine.AdviceKind.HoistPlainLets count ->
                 sprintf
-                    "This task is large enough to risk the dynamic state-machine fallback (FS3511): %d plain let binding(s) before the first await can move out of the task."
+                    "This task is large enough to risk the dynamic state-machine fallback (FS3511): %d plain let binding(s) before the first await can move out of the task (note: a throw in hoisted code then surfaces at the call instead of faulting the Task)."
                     count
             | TaskStateMachine.AdviceKind.SplitBranches ->
-                "This task is large enough to risk the dynamic state-machine fallback (FS3511): several branches await work, and each branch can become its own smaller task { }."
+                "This task is large enough to risk the dynamic state-machine fallback (FS3511): each branch can become its own smaller task { } — a branch without awaits becomes a trivially static one."
             | TaskStateMachine.AdviceKind.ExtractTail lines ->
                 sprintf
                     "This task is large enough to risk the dynamic state-machine fallback (FS3511): %d lines of non-awaiting code follow the last await and can extract into a plain function."
                     lines
+            | TaskStateMachine.AdviceKind.ExtractAwaitingSuffix lines ->
+                sprintf
+                    "This task is large enough to risk the dynamic state-machine fallback (FS3511): its closing %d lines await in shapes a plain function cannot carry, but they can become their own task-returning function consumed with return! — two smaller state machines instead of one large."
+                    lines
 
-        hint "FR0029" message s.Range [])
+        hint "FR0029" message s.Range (s.Edits |> List.map (fun (r, t) -> fix r (Text.textOfRange source r) t)))
 
 [<EditorAnalyzer("TaskStateMachine", "Advice for shrinking oversized task expressions", HelpBase)>]
 let taskStateMachineEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0029" "TaskStateMachine" (fun () ->
-        taskStateMachineMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        taskStateMachineMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("TaskStateMachine", "Advice for shrinking oversized task expressions", HelpBase)>]
 let taskStateMachineCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -1627,7 +1654,13 @@ let formatArgsCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0049 SyncOverAsync ----
 
-let private syncOverAsyncMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+let private syncOverAsyncMessages
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (fileName: string)
+    (offerSyncSwap: bool)
+    checkResults
+    : Message list =
     SyncOverAsync.find parseTree source checkResults
     |> List.map (fun s ->
         let message =
@@ -1658,22 +1691,28 @@ let private syncOverAsyncMessages (parseTree: ParsedInput) (source: ISourceText)
                     what
                     builder
 
+        // the sync-sibling swap walks code AWAY from async — an editor
+        // action the author picks, or a config opt-in for the CLI:
+        //     { "FR0049": { "syncSwap": 1 } }
+        let swapAllowed =
+            offerSyncSwap
+            || Configuration.parameterInt fileName "FR0049" "SyncOverAsync" "syncSwap" 0 = 1
+
         let fixes =
-            match s.Fix with
-            | Some(r, original, replacement) -> [ fix r original replacement ]
-            | None -> []
+            (s.Fixes @ (if swapAllowed then s.AlternativeFixes else []))
+            |> List.map (fun (r, original, replacement) -> fix r original replacement)
 
         hint "FR0049" message s.Range fixes)
 
 [<EditorAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
 let syncOverAsyncEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0049" "SyncOverAsync" (fun () ->
-        whenChecked ctx (syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.FileName true))
 
 [<CliAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
 let syncOverAsyncCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0049" "SyncOverAsync" (fun () ->
-        syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.FileName false ctx.CheckFileResults)
 
 // ---- FR0050 / FR0051 Accumulation ----
 
@@ -2623,7 +2662,7 @@ let private indexedLoopMessages (parseTree: ParsedInput) (source: ISourceText) :
     |> List.map (fun s ->
         hint
             "FR0101"
-            (sprintf "The index only ever reads '%s.[i]'; iterate '%s' directly." s.CollectionText s.CollectionText)
+            ($"The index only ever reads '%s{s.CollectionText}.[i]'; iterate '%s{s.CollectionText}' directly.")
             s.Range
             (s.Edits
              |> List.map (fun (r, original, replacement) -> fix r original replacement)))
