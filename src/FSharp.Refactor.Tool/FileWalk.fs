@@ -56,9 +56,7 @@ let files (pattern: string) (root: string) : string seq =
                 // walk forever — reparse points are not followed
                 let isReparse =
                     try
-                        File
-                            .GetAttributes(subdirectory)
-                            .HasFlag System.IO.FileAttributes.ReparsePoint
+                        File.GetAttributes(subdirectory).HasFlag System.IO.FileAttributes.ReparsePoint
                     with
                     | :? System.IO.IOException
                     | :? System.UnauthorizedAccessException -> true

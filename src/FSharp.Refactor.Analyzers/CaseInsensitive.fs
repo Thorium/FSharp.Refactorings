@@ -109,9 +109,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
         [ for _, expr in index.Exprs do
               match expr with
-              | SynExpr.App(
-                  funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs)
-                  argExpr = rhs) when op.idText = "op_Equality" || op.idText = "op_Inequality" ->
+              | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs); argExpr = rhs) when
+                  op.idText = "op_Equality" || op.idText = "op_Inequality"
+                  ->
                   let lowered =
                       match stripParens lhs, stripParens rhs with
                       | (LoweredCall m as call), other

@@ -95,8 +95,7 @@ let private (|IdentEqualsLiteral|_|) (source: ISourceText) (e: SynExpr) =
             | SynConst.Int32 _
             | SynConst.Int64 _
             | SynConst.Char _
-            | SynConst.String(synStringKind = SynStringKind.Regular) ->
-                ValueSome(op, id, textOfRange source lit.Range)
+            | SynConst.String(synStringKind = SynStringKind.Regular) -> ValueSome(op, id, textOfRange source lit.Range)
             | _ -> ValueNone
         | _ -> ValueNone
     | _ -> ValueNone
@@ -231,7 +230,12 @@ let findNestedIfMerges (parseTree: ParsedInput) (source: ISourceText) : Suggesti
 /// puts the short exit first. `not` conditions unwrap instead of double
 /// negating. Default OFF: happy-path-first is the opposite house style in
 /// plenty of teams.
-let findPyramidFlips (thenAtLeast: int) (elseAtMost: int) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+let findPyramidFlips
+    (thenAtLeast: int)
+    (elseAtMost: int)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    : Suggestion list =
     let index = AstIndex.ofTree parseTree
 
     [ for _, expr in index.Exprs do
@@ -282,14 +286,16 @@ let findGuardOrderNotes (parseTree: ParsedInput) (source: ISourceText) : GuardOr
 
     [ for _, expr in index.Exprs do
           match expr with
-          | SynExpr.Match(clauses = [ SynMatchClause(pat = SynPat.Named(ident = SynIdent(ident = v)); whenExpr = Some guard)
-                                      SynMatchClause(pat = SynPat.Wild _) ]) ->
+          | SynExpr.Match(
+              clauses = [ SynMatchClause(pat = SynPat.Named(ident = SynIdent(ident = v)); whenExpr = Some guard)
+                          SynMatchClause(pat = SynPat.Wild _) ]) ->
               match stripParens guard with
               | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs); argExpr = rhs) when
                   op.idText = "op_BooleanAnd"
                   && textOfRange source lhs.Range |> fun t -> t.Contains v.idText
                   && textOfRange source rhs.Range |> fun t -> t.Contains v.idText
                   ->
-                  { Range = expr.Range; Variable = v.idText }
+                  { Range = expr.Range
+                    Variable = v.idText }
               | _ -> ()
           | _ -> () ]

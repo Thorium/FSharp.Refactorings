@@ -95,7 +95,9 @@ let private findCandidatesIn (scope: Visibility.Scope) (parseTree: ParsedInput) 
                             longDotId = SynLongIdent(id = [ ident ])
                             accessibility = accessibility
                             argPats = SynArgPats.Pats [ SynPat.Paren(pat = SynPat.Tuple(elementPats = elements)) as paren ]) when
-                            elements.Length >= 2 && isSingleLine paren.Range && scopeMatches path accessibility
+                            elements.Length >= 2
+                            && isSingleLine paren.Range
+                            && scopeMatches path accessibility
                             ->
                             candidates.Add
                                 { Ident = ident

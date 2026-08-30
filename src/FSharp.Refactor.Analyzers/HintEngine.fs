@@ -489,10 +489,8 @@ let private resolvedOperandType
         | _ -> ValueNone
 
     match stripParens e with
-    | SynExpr.App(funcExpr = f) ->
-        (lastIdentOf f) |> ValueOption.bind (fun id -> resolve id)
-    | stripped ->
-        (lastIdentOf stripped) |> ValueOption.bind (fun id -> resolve id)
+    | SynExpr.App(funcExpr = f) -> (lastIdentOf f) |> ValueOption.bind (fun id -> resolve id)
+    | stripped -> (lastIdentOf stripped) |> ValueOption.bind (fun id -> resolve id)
 
 /// Is the expression provably of type bool — syntactically boolean (a
 /// comparison, a logical operator, `not`, a literal), or a name or call
@@ -523,7 +521,10 @@ let private isProvablyNotFloat (check: FSharpCheckFileResults) (source: ISourceT
     // generic (list<int> would strip to FSharpList<'T>, losing the int),
     // and the generic arguments are exactly what this check needs
     let rec stripInstance (t: FSharpType) =
-        if t.IsAbbreviation then stripInstance t.AbbreviatedType else t
+        if t.IsAbbreviation then
+            stripInstance t.AbbreviatedType
+        else
+            t
 
     let rec notFloatType (t: FSharpType) =
         try
@@ -548,7 +549,8 @@ let private isProvablyNotFloat (check: FSharpCheckFileResults) (source: ISourceT
         | SynConst.Single _ -> false
         | _ -> true
     | _ ->
-        (resolvedOperandType check source e) |> ValueOption.exists (fun t -> notFloatType t)
+        (resolvedOperandType check source e)
+        |> ValueOption.exists (fun t -> notFloatType t)
 
 /// Find all expressions matched by a rule. `extraRules` come from the
 /// repository configuration; results are cached per distinct rule list.
@@ -574,6 +576,7 @@ let find
 
     let inAttributeArg (r: range) =
         attributeArgRanges |> Array.exists (fun a -> Range.rangeContainsRange a r)
+
     let index = extraCache.GetOrAdd(extraRules, indexHints)
     let suggestions = ResizeArray<Suggestion>()
     let matchedRanges = HashSet<string>()

@@ -115,8 +115,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       clauses |> List.filter (fun (SynMatchClause(whenExpr = g)) -> g.IsNone)
 
                   let covered =
-                      unguarded
-                      |> List.map (fun (SynMatchClause(pat = p)) -> coveredLoop [] [ p ])
+                      unguarded |> List.map (fun (SynMatchClause(pat = p)) -> coveredLoop [] [ p ])
 
                   // guarded clauses must still be PLAIN case patterns, or
                   // coverage of the whole match is beyond this rule
@@ -160,7 +159,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               // (same-named cases of another DU would slip
                               // through the name-set comparison otherwise)
                               if
-                                  coveredNames |> Set.forall (fun n -> allCases |> List.exists (fun (c, _) -> c = n))
+                                  coveredNames
+                                  |> Set.forall (fun n -> allCases |> List.exists (fun (c, _) -> c = n))
                                   && not missing.IsEmpty
                                   && missing.Length <= 3
                                   // multi-line matches only, clause starting

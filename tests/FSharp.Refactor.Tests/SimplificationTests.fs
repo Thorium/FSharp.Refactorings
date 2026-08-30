@@ -134,9 +134,7 @@ let ``elif branch is never simplified`` () =
 let ``a shadowed collection module does not get isEmpty`` () =
     // a user module named Seq with its own length means something else —
     // with typed results at hand the symbol proves which one this is
-    Assert.Empty(
-        findChecked "module Seq =\n    let length (s: string) = 99\nlet f (s: string) = Seq.length s = 0"
-    )
+    Assert.Empty(findChecked "module Seq =\n    let length (s: string) = 99\nlet f (s: string) = Seq.length s = 0")
 
 [<Fact>]
 let ``the genuine List.length still simplifies under the typed gate`` () =

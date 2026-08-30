@@ -121,7 +121,10 @@ let private (|SourcePathLastIdent|_|) (e: SynExpr) =
 /// falls back to Seq for a plain seq.
 let private collectionModule (check: FSharpCheckFileResults) (source: ISourceText) (src: SynExpr) : string voption =
     let rec stripInstance (t: FSharpType) =
-        if t.IsAbbreviation then stripInstance t.AbbreviatedType else t
+        if t.IsAbbreviation then
+            stripInstance t.AbbreviatedType
+        else
+            t
 
     let moduleOfType (ident: Ident) =
         let r = ident.idRange
@@ -217,9 +220,7 @@ let find
                         && isSingleLine init.Range
                         && isSafeInline rhs
                         // acc must not be re-assigned in the continuation
-                        && not (
-                            Regex.IsMatch(textOfRange source rest.Range, identifierPattern acc.idText + @"\s*<-")
-                        )
+                        && not (Regex.IsMatch(textOfRange source rest.Range, identifierPattern acc.idText + @"\s*<-"))
                         ->
                         // one resolution, not one in the guard and another
                         // for the module name — GetSymbolUseAtLocation is
@@ -346,12 +347,12 @@ let find
                         // slow-analyzer list. A string accumulator never has
                         // a numeric literal on the right.
                         | SynExpr.App(
-                            funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs)
-                            argExpr = appended) when
+                            funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs); argExpr = appended) when
                             op.idText = "op_Addition"
                             && isAcc lhs
                             && (match stripParens appended with
-                                | SynExpr.Const(constant = SynConst.Int32 _ | SynConst.Int64 _ | SynConst.Double _ | SynConst.Single _ | SynConst.Decimal _ | SynConst.Byte _ | SynConst.UInt32 _ | SynConst.UInt64 _ | SynConst.Int16 _ | SynConst.UInt16 _ | SynConst.SByte _) ->
+                                | SynExpr.Const(
+                                    constant = SynConst.Int32 _ | SynConst.Int64 _ | SynConst.Double _ | SynConst.Single _ | SynConst.Decimal _ | SynConst.Byte _ | SynConst.UInt32 _ | SynConst.UInt64 _ | SynConst.Int16 _ | SynConst.UInt16 _ | SynConst.SByte _) ->
                                     false
                                 | _ -> true)
                             ->
@@ -369,8 +370,7 @@ let find
                                      (try
                                          let t = OptionModule.stripAbbreviations value.FullType
 
-                                         t.HasTypeDefinition
-                                         && t.TypeDefinition.TryFullName = Some "System.String"
+                                         t.HasTypeDefinition && t.TypeDefinition.TryFullName = Some "System.String"
                                       with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                                           false)
                                  | _ -> false
@@ -453,8 +453,7 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                   match lou.Bindings, lou.Body with
                   | [ SynBinding(isMutable = true; headPat = SynPat.Named(ident = SynIdent(ident = flag)); expr = init) ],
                     SynExpr.Sequential(
-                        expr1 = SynExpr.ForEach(pat = pat; enumExpr = src; bodyExpr = loopBody) as forEach
-                        expr2 = rest) ->
+                        expr1 = SynExpr.ForEach(pat = pat; enumExpr = src; bodyExpr = loopBody) as forEach; expr2 = rest) ->
                       let loopBody =
                           match loopBody with
                           | SynExpr.Do(expr = inner) -> inner
@@ -505,10 +504,7 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                               && effectFreeIn index cond.Range
                               // the flag must not be re-assigned in the continuation
                               && not (
-                                  Regex.IsMatch(
-                                      textOfRange source rest.Range,
-                                      identifierPattern flag.idText + @"\s*<-"
-                                  )
+                                  Regex.IsMatch(textOfRange source rest.Range, identifierPattern flag.idText + @"\s*<-")
                               )
                               ->
                               match lambdaPatText source pat, collectionModule check source src with
@@ -537,8 +533,7 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                                       else
                                           $"{srcText} |> {m}.exists (fun {patText} -> {lets}{condText})"
 
-                                  let editRange =
-                                      Range.mkRange expr.Range.FileName expr.Range.Start forEach.Range.End
+                                  let editRange = Range.mkRange expr.Range.FileName expr.Range.Start forEach.Range.End
 
                                   if not (spansDirective source editRange) then
                                       { Range = editRange

@@ -47,9 +47,10 @@ let private isSingletonLiteral (e: SynExpr) =
 [<return: Struct>]
 let private (|SingletonAppendTo|_|) (paramNames: Set<string>) (e: SynExpr) =
     match stripParens e with
-    | SynExpr.App(
-        funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = SynExpr.Ident p); argExpr = appended) when
-        op.idText = "op_Append" && paramNames.Contains p.idText && isSingletonLiteral appended
+    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = SynExpr.Ident p); argExpr = appended) when
+        op.idText = "op_Append"
+        && paramNames.Contains p.idText
+        && isSingletonLiteral appended
         ->
         ValueSome p
     | SynExpr.App(

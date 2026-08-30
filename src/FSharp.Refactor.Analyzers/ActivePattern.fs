@@ -85,11 +85,7 @@ let private capitalize (name: string) =
 /// then fails resolution — found live on Fuuga. An F# function infers
 /// fine; a member gets its resolved parameter type spelled out; an
 /// unresolvable guard skips the suggestion.
-let private inputParameter
-    (check: FSharpCheckFileResults)
-    (source: ISourceText)
-    (fnExpr: SynExpr)
-    : string voption =
+let private inputParameter (check: FSharpCheckFileResults) (source: ISourceText) (fnExpr: SynExpr) : string voption =
     let lastIdent =
         match fnExpr with
         | SynExpr.Ident id -> Some id
@@ -166,38 +162,40 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                 let patternName = capitalize fnName
 
                                 if not (fileText.Value.Contains $"(|{patternName}|") then
-                                  match inputParameter check source fnExpr with
-                                  | ValueNone -> ()
-                                  | ValueSome inputParam ->
-                                    let fnText = textOfRange source fnExpr.Range
-                                    let indent = String(' ', decl.Range.StartColumn)
+                                    match inputParameter check source fnExpr with
+                                    | ValueNone -> ()
+                                    | ValueSome inputParam ->
+                                        let fnText = textOfRange source fnExpr.Range
+                                        let indent = String(' ', decl.Range.StartColumn)
 
-                                    // new code gets the best form directly:
-                                    // private (no new API surface), inline
-                                    // (tiny body, FS1113-safe because the
-                                    // pattern is as private as any guard it
-                                    // references), and struct-returning (no
-                                    // allocation per match attempt)
-                                    let binding =
-                                        sprintf
-                                            "[<return: Struct>]\n%slet inline private (|%s|_|) %s =\n%s    if %s input then ValueSome input else ValueNone"
-                                            indent
-                                            patternName
-                                            inputParam
-                                            indent
-                                            fnText
+                                        // new code gets the best form directly:
+                                        // private (no new API surface), inline
+                                        // (tiny body, FS1113-safe because the
+                                        // pattern is as private as any guard it
+                                        // references), and struct-returning (no
+                                        // allocation per match attempt)
+                                        let binding =
+                                            sprintf
+                                                "[<return: Struct>]\n%slet inline private (|%s|_|) %s =\n%s    if %s input then ValueSome input else ValueNone"
+                                                indent
+                                                patternName
+                                                inputParam
+                                                indent
+                                                fnText
 
-                                    let insertAt = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
+                                        let insertAt =
+                                            Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
 
-                                    let clauseRange = Range.mkRange pat.Range.FileName pat.Range.Start guard.Range.End
+                                        let clauseRange =
+                                            Range.mkRange pat.Range.FileName pat.Range.Start guard.Range.End
 
-                                    suggestions.Add
-                                        { PatternName = patternName
-                                          InsertRange = insertAt
-                                          InsertText = $"{binding}\n{indent}"
-                                          ClauseRange = clauseRange
-                                          OriginalClauseText = textOfRange source clauseRange
-                                          ClauseText = $"{patternName} {var.idText}" }
+                                        suggestions.Add
+                                            { PatternName = patternName
+                                              InsertRange = insertAt
+                                              InsertText = $"{binding}\n{indent}"
+                                              ClauseRange = clauseRange
+                                              OriginalClauseText = textOfRange source clauseRange
+                                              ClauseText = $"{patternName} {var.idText}" }
                             | _ -> ()
                 | _ -> () }
 

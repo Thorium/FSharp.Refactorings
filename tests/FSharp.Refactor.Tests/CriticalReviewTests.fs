@@ -207,14 +207,16 @@ let ``FR0011: return Struct goes below the doc comment too`` () : unit =
 let ``a struct DU needs same-named fields to agree on type`` () : unit =
     // FS3585: `A of value: float | B of value: int` refuses [<Struct>]
     let tree, sourceText =
-        parse "module Test\nmodule private Impl =\n    type Mixed =\n        | A of value: float\n        | B of value: int"
+        parse
+            "module Test\nmodule private Impl =\n    type Mixed =\n        | A of value: float\n        | B of value: int"
 
     Assert.Empty(StructDu.find false tree sourceText)
 
 [<Fact>]
 let ``same-named fields of one type still take the attribute`` () : unit =
     let tree, sourceText =
-        parse "module Test\nmodule private Impl =\n    type Same =\n        | A of value: int\n        | B of value: int"
+        parse
+            "module Test\nmodule private Impl =\n    type Same =\n        | A of value: int\n        | B of value: int"
 
     match StructDu.find false tree sourceText with
     | [ s ] -> Assert.Equal("Same", s.TypeName)

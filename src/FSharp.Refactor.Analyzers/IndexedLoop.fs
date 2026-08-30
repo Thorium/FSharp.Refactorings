@@ -48,9 +48,7 @@ let private (|Path|_|) (e: SynExpr) =
 [<return: Struct>]
 let private (|LengthOfColl|_|) (e: SynExpr) =
     match stripParens e with
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
-        ids.Length >= 2 && (List.last ids).idText = "Length"
-        ->
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when ids.Length >= 2 && (List.last ids).idText = "Length" ->
         ValueSome(identText (ids |> List.take (ids.Length - 1)))
     | SynExpr.App(
         isInfix = false
@@ -121,9 +119,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         ->
                         Some(e.Range, (stripParens idx).Range)
                     | SynExpr.App(
-                        flag = ExprAtomicFlag.Atomic
-                        funcExpr = o
-                        argExpr = SynExpr.ArrayOrListComputed(expr = idx)) when
+                        flag = ExprAtomicFlag.Atomic; funcExpr = o; argExpr = SynExpr.ArrayOrListComputed(expr = idx)) when
                         inBody e.Range && sameColl o && isIndexIdent idx
                         ->
                         Some(e.Range, (stripParens idx).Range)
@@ -173,8 +169,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 |> Array.exists (fun (_, p) ->
                     Range.rangeContainsRange body.Range p.Range
                     && (match p with
-                        | SynPat.Named(ident = SynIdent(ident = id)) ->
-                            id.idText = i.idText || id.idText = collRoot
+                        | SynPat.Named(ident = SynIdent(ident = id)) -> id.idText = i.idText || id.idText = collRoot
                         | _ -> false))
 
             let disqualified = mutates || rebinds
@@ -196,7 +191,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                     let useEdits =
                         indexedUses
-                        |> Array.map (fun (useRange, _) -> useRange, textOfRange source useRange, element) |> Array.toList
+                        |> Array.map (fun (useRange, _) -> useRange, textOfRange source useRange, element)
+                        |> Array.toList
 
                     suggestions.Add
                         { Range = expr.Range

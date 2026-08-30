@@ -133,7 +133,9 @@ let ``every analyzer stays fast on a large file`` () =
 // ---- FR0106 SubstringSpan ----
 
 let private substringSpansIn (source: string) =
-    let tree, sourceText, checkResults = FSharp.Refactor.Tests.Parsing.parseAndCheck source
+    let tree, sourceText, checkResults =
+        FSharp.Refactor.Tests.Parsing.parseAndCheck source
+
     FSharp.Refactor.SubstringSpan.find tree sourceText checkResults
 
 [<Fact>]
@@ -201,7 +203,8 @@ let private withDualTfm (f: unit -> unit) =
         Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", null)
 
 let private dualFixFor (source: string) =
-    let tree, sourceText, checkResults = FSharp.Refactor.Tests.Parsing.parseAndCheck source
+    let tree, sourceText, checkResults =
+        FSharp.Refactor.Tests.Parsing.parseAndCheck source
 
     match FSharp.Refactor.SubstringSpan.find tree sourceText checkResults with
     | [ s ] -> FSharp.Refactor.CapabilityFix.make sourceText s.Range "Substring" "AsSpan"
@@ -223,7 +226,9 @@ let ``a dual-framework run wraps the fix in an if-else pair`` () =
 [<Fact>]
 let ``a file without conditionals keeps the plain fix even on a dual run`` () =
     withDualTfm (fun () ->
-        let fix = dualFixFor "module Test\nopen System\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))"
+        let fix =
+            dualFixFor "module Test\nopen System\nlet f (s: string) = Int32.Parse(s.Substring(6, 5))"
+
         Assert.Equal("AsSpan", fix.ToText))
 
 [<Fact>]

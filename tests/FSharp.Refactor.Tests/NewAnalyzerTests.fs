@@ -286,8 +286,7 @@ let ``direct ignore of a call result is flagged`` () =
 let ``a partially applied async function is a different mistake`` () =
     // `save2 1` is a FUNCTION, not an Async — this rule stays quiet
     Assert.Empty(
-        discardedAsyncIn
-            "let save2 (a: int) (b: int) : Async<unit> = async { return () }\nlet f () = save2 1 |> ignore"
+        discardedAsyncIn "let save2 (a: int) (b: int) : Async<unit> = async { return () }\nlet f () = save2 1 |> ignore"
     )
 
 [<Fact>]

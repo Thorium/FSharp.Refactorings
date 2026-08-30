@@ -66,9 +66,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         // a single NAMED argument parses as an op_Equality
                         // application — `Exception(message = "boom")` must
                         // not become `failwith (message = "boom")`
-                        | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent eq)) when
-                            eq.idText = "op_Equality"
-                            ->
+                        | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent eq)) when eq.idText = "op_Equality" ->
                             ()
                         | message ->
                             suggestions.Add

@@ -160,120 +160,122 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         []
     else
 
-    let index = AstIndex.ofTree parseTree
+        let index = AstIndex.ofTree parseTree
 
-    [ for _, expr in index.Exprs do
-          match expr with
-          | SynExpr.ObjExpr(objType = objType; members = members; extraImpls = impls; newExprRange = newExprRange) when
-              not members.IsEmpty
-              ->
-              // the interface's name ident, e.g. IDbConnection in
-              // `IDbConnection` or `IEnumerable<int>`
-              let typeIdent =
-                  match objType with
-                  | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
-                  | SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty ->
-                      Some(List.last ids)
-                  | _ -> None
+        [ for _, expr in index.Exprs do
+              match expr with
+              | SynExpr.ObjExpr(objType = objType; members = members; extraImpls = impls; newExprRange = newExprRange) when
+                  not members.IsEmpty
+                  ->
+                  // the interface's name ident, e.g. IDbConnection in
+                  // `IDbConnection` or `IEnumerable<int>`
+                  let typeIdent =
+                      match objType with
+                      | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
+                      | SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty ->
+                          Some(List.last ids)
+                      | _ -> None
 
-              match typeIdent with
-              | Some typeIdent ->
-                  let r = typeIdent.idRange
-                  let lineText = source.GetLineString(r.EndLine - 1)
+                  match typeIdent with
+                  | Some typeIdent ->
+                      let r = typeIdent.idRange
+                      let lineText = source.GetLineString(r.EndLine - 1)
 
-                  let entity =
-                      match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ typeIdent.idText ]) with
-                      | Some symbolUse ->
-                          match symbolUse.Symbol with
-                          | :? FSharpEntity as e when e.IsInterface -> Some e
-                          | _ -> None
-                      | None -> None
-
-                  match entity with
-                  | Some entity ->
-                      let implementedMain = implementedNames members
-
-                      let implementedPerInterface =
-                          impls
-                          |> List.map (fun (SynInterfaceImpl(interfaceTy = t; members = ms)) ->
-                              (match t with
-                               | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty ->
-                                   (List.last ids).idText
-                               | _ -> ""),
-                              implementedNames ms)
-
-                      // the main interface's own missing members
-                      let mainMissing =
-                          match requiredMembers entity with
-                          | Some(_, required) ->
-                              required |> List.filter (nameOf >> implementedMain.Contains >> not) |> Some
+                      let entity =
+                          match
+                              check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ typeIdent.idText ])
+                          with
+                          | Some symbolUse ->
+                              match symbolUse.Symbol with
+                              | :? FSharpEntity as e when e.IsInterface -> Some e
+                              | _ -> None
                           | None -> None
 
-                      // inherited interfaces stub in their own sections
-                      let inheritedMissing =
-                          try
-                              [ for baseType in entity.AllInterfaces do
-                                    // AllInterfaces includes the entity itself
-                                    if
-                                        baseType.HasTypeDefinition
-                                        && not (baseType.TypeDefinition.IsEffectivelySameAs entity)
-                                    then
-                                        let baseEntity = baseType.TypeDefinition
+                      match entity with
+                      | Some entity ->
+                          let implementedMain = implementedNames members
 
-                                        // members implemented in the MAIN block satisfy inherited
-                                        // interfaces too: `{ new IDbConnection with ...
-                                        // member _.Dispose() = ... }` compiles, Dispose covering
-                                        // IDisposable — stubbing it again would double-implement
-                                        let implemented =
-                                            implementedPerInterface
-                                            |> List.tryPick (fun (n, ns) ->
-                                                if n = baseEntity.DisplayName then Some ns else None)
-                                            |> Option.defaultValue Set.empty
-                                            |> Set.union implementedMain
+                          let implementedPerInterface =
+                              impls
+                              |> List.map (fun (SynInterfaceImpl(interfaceTy = t; members = ms)) ->
+                                  (match t with
+                                   | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty ->
+                                       (List.last ids).idText
+                                   | _ -> ""),
+                                  implementedNames ms)
 
-                                        match requiredMembers baseEntity with
-                                        | Some(baseName, required) ->
-                                            let missing =
-                                                required |> List.filter (nameOf >> implemented.Contains >> not)
+                          // the main interface's own missing members
+                          let mainMissing =
+                              match requiredMembers entity with
+                              | Some(_, required) ->
+                                  required |> List.filter (nameOf >> implementedMain.Contains >> not) |> Some
+                              | None -> None
 
-                                            if not missing.IsEmpty then
-                                                yield Some(baseName, missing)
-                                        | None -> yield None ]
-                          with OptionModule.FcsSymbolFailure ->
-                              [ None ]
+                          // inherited interfaces stub in their own sections
+                          let inheritedMissing =
+                              try
+                                  [ for baseType in entity.AllInterfaces do
+                                        // AllInterfaces includes the entity itself
+                                        if
+                                            baseType.HasTypeDefinition
+                                            && not (baseType.TypeDefinition.IsEffectivelySameAs entity)
+                                        then
+                                            let baseEntity = baseType.TypeDefinition
 
-                      match mainMissing with
-                      | Some mainMissing when inheritedMissing |> List.forall Option.isSome ->
-                          let inherited = inheritedMissing |> List.choose id
+                                            // members implemented in the MAIN block satisfy inherited
+                                            // interfaces too: `{ new IDbConnection with ...
+                                            // member _.Dispose() = ... }` compiles, Dispose covering
+                                            // IDisposable — stubbing it again would double-implement
+                                            let implemented =
+                                                implementedPerInterface
+                                                |> List.tryPick (fun (n, ns) ->
+                                                    if n = baseEntity.DisplayName then Some ns else None)
+                                                |> Option.defaultValue Set.empty
+                                                |> Set.union implementedMain
 
-                          if not (mainMissing.IsEmpty && inherited.IsEmpty) then
-                              // anchors: main-member stubs at the members'
-                              // indentation; `interface Base with` sections
-                              // dedent to the `new` keyword's column, as the
-                              // object-expression grammar requires
-                              let lastMember = List.last members
-                              let memberIndent = System.String(' ', lastMember.Range.StartColumn)
-                              let interfaceIndent = System.String(' ', newExprRange.StartColumn)
+                                            match requiredMembers baseEntity with
+                                            | Some(baseName, required) ->
+                                                let missing =
+                                                    required |> List.filter (nameOf >> implemented.Contains >> not)
 
-                              let insertText =
-                                  [ for m in mainMissing -> $"\n{memberIndent}{stubFor m}"
-                                    for baseName, missing in inherited do
-                                        yield $"\n{interfaceIndent}interface {baseName} with"
+                                                if not missing.IsEmpty then
+                                                    yield Some(baseName, missing)
+                                            | None -> yield None ]
+                              with OptionModule.FcsSymbolFailure ->
+                                  [ None ]
 
-                                        for m in missing do
-                                            yield $"\n{interfaceIndent}    {stubFor m}" ]
-                                  |> String.concat ""
+                          match mainMissing with
+                          | Some mainMissing when inheritedMissing |> List.forall Option.isSome ->
+                              let inherited = inheritedMissing |> List.choose id
 
-                              let insertAt =
-                                  Range.mkRange expr.Range.FileName lastMember.Range.End lastMember.Range.End
+                              if not (mainMissing.IsEmpty && inherited.IsEmpty) then
+                                  // anchors: main-member stubs at the members'
+                                  // indentation; `interface Base with` sections
+                                  // dedent to the `new` keyword's column, as the
+                                  // object-expression grammar requires
+                                  let lastMember = List.last members
+                                  let memberIndent = System.String(' ', lastMember.Range.StartColumn)
+                                  let interfaceIndent = System.String(' ', newExprRange.StartColumn)
 
-                              { Range = insertAt
-                                InsertText = insertText
-                                InterfaceName = entity.DisplayName
-                                MissingNames =
-                                  (mainMissing |> List.map nameOf)
-                                  @ (inherited |> List.collect (fun (_, ms) -> ms |> List.map nameOf)) }
-                      | _ -> ()
+                                  let insertText =
+                                      [ for m in mainMissing -> $"\n{memberIndent}{stubFor m}"
+                                        for baseName, missing in inherited do
+                                            yield $"\n{interfaceIndent}interface {baseName} with"
+
+                                            for m in missing do
+                                                yield $"\n{interfaceIndent}    {stubFor m}" ]
+                                      |> String.concat ""
+
+                                  let insertAt =
+                                      Range.mkRange expr.Range.FileName lastMember.Range.End lastMember.Range.End
+
+                                  { Range = insertAt
+                                    InsertText = insertText
+                                    InterfaceName = entity.DisplayName
+                                    MissingNames =
+                                      (mainMissing |> List.map nameOf)
+                                      @ (inherited |> List.collect (fun (_, ms) -> ms |> List.map nameOf)) }
+                          | _ -> ()
+                      | None -> ()
                   | None -> ()
-              | None -> ()
-          | _ -> () ]
+              | _ -> () ]

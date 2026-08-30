@@ -121,10 +121,16 @@ let ``a call feeding the dynamic operator keeps its parens`` () =
 
 [<Fact>]
 let ``a method call that is a tuple element keeps its parens`` () =
-    Assert.Empty(findIn "module Test
-let f (s: string) (y: int) = s.Trim(' '), y")
+    Assert.Empty(
+        findIn
+            "module Test
+let f (s: string) (y: int) = s.Trim(' '), y"
+    )
 
 [<Fact>]
 let ``the same method call outside a tuple still sheds them`` () =
-    Assert.NotEmpty(findIn "module Test
-let f (s: string) = s.Trim(' ')")
+    Assert.NotEmpty(
+        findIn
+            "module Test
+let f (s: string) = s.Trim(' ')"
+    )

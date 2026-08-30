@@ -192,7 +192,9 @@ let ``field-carrying cases arrive with a wildcard`` () =
 
 [<Fact>]
 let ``too many missing cases means a wildcard was the intent`` () =
-    Assert.Empty(missingIn "module Test\ntype N = A | B | C | D | E | F\nlet f (n: N) =\n    match n with\n    | A -> 0")
+    Assert.Empty(
+        missingIn "module Test\ntype N = A | B | C | D | E | F\nlet f (n: N) =\n    match n with\n    | A -> 0"
+    )
 
 [<Fact>]
 let ``guarded arms do not count as coverage`` () =
@@ -256,7 +258,8 @@ let ``a compound guard on the first arm before a wildcard is noted`` () =
 [<Fact>]
 let ``a simple guard is not noted`` () =
     Assert.Empty(
-        guardNotesIn "module Test\nlet f (v: int) (lo: int) =\n    match v with\n    | x when x >= lo -> \"base\"\n    | _ -> \"err\""
+        guardNotesIn
+            "module Test\nlet f (v: int) (lo: int) =\n    match v with\n    | x when x >= lo -> \"base\"\n    | _ -> \"err\""
     )
 
 // ---- FR0116 rec group extraction ----
@@ -313,7 +316,9 @@ let ``the extraction applies to a compiling result`` () =
         let insertAt = offsetOf s.InsertRange.StartLine s.InsertRange.StartColumn
 
         let patched =
-            afterRemove.Substring(0, insertAt) + s.InsertText + afterRemove.Substring insertAt
+            afterRemove.Substring(0, insertAt)
+            + s.InsertText
+            + afterRemove.Substring insertAt
 
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected one extraction, got %A" other

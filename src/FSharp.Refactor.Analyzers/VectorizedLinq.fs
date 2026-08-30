@@ -77,9 +77,7 @@ let private (|ArrayAggregation|_|) (e: SynExpr) =
         funcExpr = SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])))
         argExpr = ArrPath(arr, text)) when aggregationModules.Contains m.idText && f.idText = "contains" ->
         ValueSome(m.idText, f.idText, arr, text)
-    | PipeApp(
-        ArrPath(arr, text),
-        SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])))) when
+    | PipeApp(ArrPath(arr, text), SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])))) when
         aggregationModules.Contains m.idText && f.idText = "contains"
         ->
         ValueSome(m.idText, f.idText, arr, text)

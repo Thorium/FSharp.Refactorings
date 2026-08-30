@@ -130,7 +130,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           | SyntaxNode.SynExpr(SynExpr.For _)
                           | SyntaxNode.SynExpr(SynExpr.While _) -> loops.Add None
                           | SyntaxNode.SynExpr(SynExpr.Lambda _) -> sawLambda <- true
-                          | SyntaxNode.SynExpr(SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = m :: _))) as app) when
+                          | SyntaxNode.SynExpr(SynExpr.App(
+                              funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = m :: _))) as app) when
                               sawLambda && (m.idText = "List" || m.idText = "Array" || m.idText = "Seq")
                               ->
                               loops.Add(Some(widen app))

@@ -72,10 +72,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
     for _, expr in index.Exprs do
         match expr with
-        | SynExpr.IfThenElse _ when
-            not (isElifItself expr)
-            && not (spansDirective source expr.Range)
-            ->
+        | SynExpr.IfThenElse _ when not (isElifItself expr) && not (spansDirective source expr.Range) ->
             match chain source [] expr with
             | Some((_ :: _ :: _ as branches), finalElse) ->
                 let subject = let (s, _, _) = List.head branches in s
@@ -92,8 +89,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     |> List.append (Option.toList finalElse)
 
                 let bodiesInline =
-                    bodies
-                    |> List.forall (fun b -> isSingleLine b.Range && isSafeInline b)
+                    bodies |> List.forall (fun b -> isSingleLine b.Range && isSafeInline b)
 
                 // casts of the subject inside each branch, and proof that
                 // each targets that branch's own type
@@ -102,8 +98,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     |> Array.choose (fun (_, e) ->
                         match e with
                         | SynExpr.Downcast(expr = SynExpr.Ident castSubj; targetType = ty) when
-                            castSubj.idText = subject.idText
-                            && Range.rangeContainsRange body.Range e.Range
+                            castSubj.idText = subject.idText && Range.rangeContainsRange body.Range e.Range
                             ->
                             Some(e, textOfRange source ty.Range)
                         | _ -> None)
@@ -118,13 +113,18 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     |> Array.exists (fun (_, e) ->
                         match e with
                         | SynExpr.LongIdentSet(SynLongIdent(id = first :: _), _, _) when
-                            first.idText = subject.idText
-                            && Range.rangeContainsRange expr.Range e.Range
+                            first.idText = subject.idText && Range.rangeContainsRange expr.Range e.Range
                             ->
                             true
                         | _ -> false)
 
-                if sameSubject && distinctTypes && bodiesInline && castsAgree && not subjectAssigned then
+                if
+                    sameSubject
+                    && distinctTypes
+                    && bodiesInline
+                    && castsAgree
+                    && not subjectAssigned
+                then
                     let wholeText = textOfRange source expr.Range
 
                     let binder =

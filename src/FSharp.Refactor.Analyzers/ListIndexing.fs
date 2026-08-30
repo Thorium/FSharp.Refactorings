@@ -60,7 +60,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             let lineText = source.GetLineString(r.EndLine - 1)
 
             let rec stripInstance (t: FSharpType) =
-                if t.IsAbbreviation then stripInstance t.AbbreviatedType else t
+                if t.IsAbbreviation then
+                    stripInstance t.AbbreviatedType
+                else
+                    t
 
             let isListType (t: FSharpType) =
                 try

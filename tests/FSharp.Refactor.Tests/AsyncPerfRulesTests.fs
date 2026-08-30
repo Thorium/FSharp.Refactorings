@@ -492,8 +492,7 @@ let ``a non-empty seed prefixes the concatenation`` () =
 let ``ValueTask Result blocks like Task Result`` () =
     // post-core BCL async I/O returns ValueTask everywhere
     let suggestions =
-        blockingIn
-            "let f (vt: System.Threading.Tasks.ValueTask<int>) =\n    task {\n        return vt.Result\n    }"
+        blockingIn "let f (vt: System.Threading.Tasks.ValueTask<int>) =\n    task {\n        return vt.Result\n    }"
 
     match suggestions with
     | [ s ] -> Assert.Equal(SyncOverAsync.BlockKind.TaskResult, s.Kind)

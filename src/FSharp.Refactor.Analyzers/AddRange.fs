@@ -115,9 +115,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                   // the element moves into a fabricated
                                   // Seq.map lambda: capturing a mutable
                                   // local there was FS0407 before F# 10
-                                  && not (
-                                      OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) element.Range
-                                  )
+                                  && not (OptionModule.capturesMutableLocal (AstIndex.ofTree parseTree) element.Range)
                                   ->
                                   Some(
                                       receiverText

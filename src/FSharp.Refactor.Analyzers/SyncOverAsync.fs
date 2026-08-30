@@ -162,8 +162,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       else
                           None
                   | SynExpr.DotGet(longDotId = SynLongIdent(id = [ id ])) when
-                      id.idText = "Result"
-                      && (enclosingEntityOf check source id) |> taskFamily
+                      id.idText = "Result" && (enclosingEntityOf check source id) |> taskFamily
                       ->
                       Some(BlockKind.TaskResult, None)
                   | SynExpr.App(isInfix = false; funcExpr = CallIdent id) when

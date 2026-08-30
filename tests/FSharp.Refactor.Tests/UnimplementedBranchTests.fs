@@ -104,7 +104,8 @@ let ``false with a stub comment is accused`` () =
 [<Fact>]
 let ``false without a comment is an ordinary value`` () =
     Assert.Empty(
-        findIn "module Test\ntype M = A | B\nlet f (x: int) = x > 0\nlet g m =\n    match m with\n    | A -> f 1\n    | B -> false"
+        findIn
+            "module Test\ntype M = A | B\nlet f (x: int) = x > 0\nlet g m =\n    match m with\n    | A -> f 1\n    | B -> false"
     )
 
 [<Fact>]

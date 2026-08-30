@@ -44,9 +44,7 @@ let private resolvesToGatedCount (check: FSharpCheckFileResults) (source: ISourc
 [<return: Struct>]
 let private (|CountAccess|_|) (e: SynExpr) =
     match e with
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
-        ids.Length >= 2 && (List.last ids).idText = "Count"
-        ->
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when ids.Length >= 2 && (List.last ids).idText = "Count" ->
         let recvIds = ids |> List.take (ids.Length - 1)
         ValueSome(identText recvIds, List.last ids)
     | _ -> ValueNone

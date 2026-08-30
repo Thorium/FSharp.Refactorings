@@ -696,7 +696,8 @@ let ``a File factory result leaks like a bare constructor`` () =
 
 [<Fact>]
 let ``ignore applied directly still finds the map`` () =
-    let suggestions = mapIgnoresIn "let f (xs: int list) = ignore (xs |> List.map string)"
+    let suggestions =
+        mapIgnoresIn "let f (xs: int list) = ignore (xs |> List.map string)"
 
     match suggestions with
     | [ s ] -> Assert.Equal(Some "xs |> List.iter (string >> ignore)", s.ReplacementText)

@@ -39,7 +39,15 @@ type Suggestion =
 
 /// BCL factories whose result the caller owns, by enclosing type.
 let private bclFactories =
-    [ "System.IO.File", set [ "Open"; "OpenRead"; "OpenWrite"; "OpenText"; "Create"; "CreateText"; "AppendText" ]
+    [ "System.IO.File",
+      set
+          [ "Open"
+            "OpenRead"
+            "OpenWrite"
+            "OpenText"
+            "Create"
+            "CreateText"
+            "AppendText" ]
       "System.Xml.XmlReader", set [ "Create" ]
       "System.Xml.XmlWriter", set [ "Create" ] ]
 

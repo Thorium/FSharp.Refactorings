@@ -101,9 +101,7 @@ let private hasSpanOverload (check: FSharpCheckFileResults) (source: ISourceText
 let private (|MethodNamed|_|) (name: string) (e: SynExpr) =
     match e with
     | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
-    | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when
-        not ids.IsEmpty && (List.last ids).idText = name
-        ->
+    | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty && (List.last ids).idText = name ->
         ValueSome(List.last ids)
     | _ -> ValueNone
 

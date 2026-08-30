@@ -134,7 +134,8 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                                |> List.choose (fun (SynField(idOpt = idOpt; fieldType = t)) ->
                                    idOpt |> Option.map (fun id -> id.idText, textOfRange source t.Range))
                                |> List.groupBy fst
-                               |> List.forall (fun (_, group) -> group |> List.map snd |> List.distinct |> List.length <= 1)
+                               |> List.forall (fun (_, group) ->
+                                   group |> List.map snd |> List.distinct |> List.length <= 1)
 
                         if not fields.IsEmpty && allSmall && namingOk && sameNameSameType then
                             // below any XML doc, so the attribute sits

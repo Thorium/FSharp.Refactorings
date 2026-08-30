@@ -75,8 +75,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let decls =
         match parseTree with
         | ParsedInput.ImplFile(ParsedImplFileInput(contents = modules)) ->
-            modules
-            |> List.collect (fun (SynModuleOrNamespace(decls = ds)) -> declsOf ds)
+            modules |> List.collect (fun (SynModuleOrNamespace(decls = ds)) -> declsOf ds)
         | _ -> []
 
     [ for decl in decls do
@@ -122,8 +121,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                               if
                                   above.StartsWith "///"
-                                  || (above.StartsWith "//"
-                                      && Regex.IsMatch(above, identifierPattern name))
+                                  || (above.StartsWith "//" && Regex.IsMatch(above, identifierPattern name))
                               then
                                   first <- first - 1
                               else
@@ -139,10 +137,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                       let block =
                           if commentStartLine < keywordLine then
-                              Range.mkRange
-                                  plainBlock.FileName
-                                  (Position.mkPos commentStartLine 0)
-                                  plainBlock.End
+                              Range.mkRange plainBlock.FileName (Position.mkPos commentStartLine 0) plainBlock.End
                           else
                               plainBlock
 
@@ -158,8 +153,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       // its own name beyond the header means self-recursion:
                       // the member still leaves, but as its own `let rec` —
                       // a plain `let` would not compile
-                      let isSelfRecursive =
-                          Regex.Matches(bindingText, identifierPattern name).Count >= 2
+                      let isSelfRecursive = Regex.Matches(bindingText, identifierPattern name).Count >= 2
 
                       if
                           attrs.IsEmpty
@@ -192,6 +186,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
           | _ -> () ]
 
 let private letRecKeywordRegex = Regex @"^let\s+rec$"
+
 /// Head extraction: the FIRST binding of the group references no member
 /// (itself included). Unlike an `and` extraction nothing moves — the
 /// head already sits above the rest — so the fix is two keyword
@@ -206,8 +201,7 @@ let findHeadRecrowns (parseTree: ParsedInput) (source: ISourceText) : HeadSugges
     let decls =
         match parseTree with
         | ParsedInput.ImplFile(ParsedImplFileInput(contents = modules)) ->
-            modules
-            |> List.collect (fun (SynModuleOrNamespace(decls = ds)) -> declsOf ds)
+            modules |> List.collect (fun (SynModuleOrNamespace(decls = ds)) -> declsOf ds)
         | _ -> []
 
     [ for decl in decls do
@@ -247,7 +241,7 @@ let findHeadRecrowns (parseTree: ParsedInput) (source: ISourceText) : HeadSugges
                   if
                       not referencesAnyMember
                       && isSingleLine headKeyword
-                      && letRecKeywordRegex.IsMatch (textOfRange source headKeyword)
+                      && letRecKeywordRegex.IsMatch(textOfRange source headKeyword)
                       && textOfRange source andKeyword = "and"
                       && startsOwnLine headKeyword
                       && startsOwnLine andKeyword

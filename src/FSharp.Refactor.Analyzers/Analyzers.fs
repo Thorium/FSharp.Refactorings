@@ -100,7 +100,8 @@ let matchToIfCliAnalyzer (ctx: CliContext) : Async<Message list> =
 // ---- FR0108 / FR0109 BooleanSimplify ----
 
 let private booleanSimplifyMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    let identityEnabled = Configuration.isRuleEnabled fileName "FR0108" "BooleanIdentity"
+    let identityEnabled =
+        Configuration.isRuleEnabled fileName "FR0108" "BooleanIdentity"
 
     let duplicateEnabled =
         Configuration.isRuleEnabled fileName "FR0109" "BooleanDuplicate"
@@ -162,7 +163,12 @@ let missingCasesCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0111 / FR0112 / FR0113 IfRestructure ----
 
-let private ifRestructureMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+let private ifRestructureMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
     let elseIfEnabled = Configuration.isRuleEnabled fileName "FR0111" "ElseIfFlatten"
 
     let chainEnabled =
@@ -172,8 +178,7 @@ let private ifRestructureMessages (fileName: string) (parseTree: ParsedInput) (s
 
     let flipEnabled = Configuration.isRuleEnabled fileName "FR0114" "PyramidFlip"
 
-    let guardOrderEnabled =
-        Configuration.isRuleEnabled fileName "FR0115" "GuardOrder"
+    let guardOrderEnabled = Configuration.isRuleEnabled fileName "FR0115" "GuardOrder"
 
     // configurable knobs, FR0114's per-rule parameters:
     //     { "FR0114": { "enabled": true, "thenAtLeast": 30, "elseAtMost": 2 } }
@@ -524,7 +529,11 @@ let private hintMessages
 [<EditorAnalyzer("Hints", "Term-rewriting hints (fsharplint-style rules)", HelpBase)>]
 let hintsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0012" "Hints" (fun () ->
-        hintMessages (Configuration.hintsFor ctx.FileName) ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        hintMessages
+            (Configuration.hintsFor ctx.FileName)
+            ctx.ParseFileResults.ParseTree
+            ctx.SourceText
+            ctx.CheckFileResults)
 
 [<CliAnalyzer("Hints", "Term-rewriting hints (fsharplint-style rules)", HelpBase)>]
 let hintsCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -2614,12 +2623,10 @@ let private indexedLoopMessages (parseTree: ParsedInput) (source: ISourceText) :
     |> List.map (fun s ->
         hint
             "FR0101"
-            (sprintf
-                "The index only ever reads '%s.[i]'; iterate '%s' directly."
-                s.CollectionText
-                s.CollectionText)
+            (sprintf "The index only ever reads '%s.[i]'; iterate '%s' directly." s.CollectionText s.CollectionText)
             s.Range
-            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+            (s.Edits
+             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
 
 [<EditorAnalyzer("IndexedLoop", "Index-based loops that only ever index the bound collection", HelpBase)>]
 let indexedLoopEditorAnalyzer (ctx: EditorContext) : Async<Message list> =

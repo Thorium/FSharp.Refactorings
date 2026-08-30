@@ -238,8 +238,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             Some(shifted |> List.choose id |> String.concat "\n")
 
     let handleCandidate (whole: SynExpr) (containerIds: Ident list) (keyExpr: SynExpr) thenExpr elseExpr =
-        let elseIsInline =
-            isSingleLine (elseExpr: SynExpr).Range && isSafeInline elseExpr
+        let elseIsInline = isSingleLine (elseExpr: SynExpr).Range && isSafeInline elseExpr
 
         if
             isPureAtom keyExpr

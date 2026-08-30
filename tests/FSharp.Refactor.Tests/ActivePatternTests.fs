@@ -90,7 +90,12 @@ let ``an overloaded method guard annotates the extracted input`` () =
     | [ s ] ->
         Assert.Contains("(input: string)", s.InsertText)
 
-        let patched = applyEdit "module Test\nopen System.IO\nlet f (p: string) =\n    match p with\n    | q when Path.IsPathRooted q -> q\n    | q -> q" s.ClauseRange s.ClauseText
+        let patched =
+            applyEdit
+                "module Test\nopen System.IO\nlet f (p: string) =\n    match p with\n    | q when Path.IsPathRooted q -> q\n    | q -> q"
+                s.ClauseRange
+                s.ClauseText
+
         let patched = applyEdit patched s.InsertRange s.InsertText
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one annotated suggestion, got %A" other

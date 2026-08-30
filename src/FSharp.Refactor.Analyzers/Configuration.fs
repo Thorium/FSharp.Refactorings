@@ -77,7 +77,13 @@ let parse (json: string) : Map<string, bool> =
 ///   first — that plenty of teams hold exactly the other way around
 ///   (happy path first). An opt-in, not a default.
 let private defaultOff =
-    set [ "fr0002"; "optionmodule"; "fr0099"; "trailingsemicolon"; "fr0114"; "pyramidflip" ]
+    set
+        [ "fr0002"
+          "optionmodule"
+          "fr0099"
+          "trailingsemicolon"
+          "fr0114"
+          "pyramidflip" ]
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins
 /// over a name entry; absent rules are enabled unless default-off.
@@ -171,21 +177,23 @@ let parseIgnorePaths (json: string) : string list =
 
 /// The parsed content of one config file.
 type ConfigData =
-    { Rules: Map<string, bool>
-      Hints: string list
-      IgnorePaths: string list
-      /// Numeric knobs per rule, from object-valued rule entries:
-      ///     { "FR0114": { "enabled": true, "thenAtLeast": 30 } }
-      /// Keys are lowercased rule code (or analyzer name) then parameter
-      /// name; every rule documents its own knobs and their defaults.
-      Parameters: Map<string, Map<string, int>>
-      /// The team's suppression-comment policy, `"suppressions"`:
-      ///   "all"            every suppression comment silences its finding
-      ///                    (the default, and what editors do regardless)
-      ///   "no-correctness" comments on correctness-category rules are
-      ///                    reported anyway (though never auto-fixed)
-      ///   "none"           every suppression comment is reported anyway
-      Suppressions: string }
+    {
+        Rules: Map<string, bool>
+        Hints: string list
+        IgnorePaths: string list
+        /// Numeric knobs per rule, from object-valued rule entries:
+        ///     { "FR0114": { "enabled": true, "thenAtLeast": 30 } }
+        /// Keys are lowercased rule code (or analyzer name) then parameter
+        /// name; every rule documents its own knobs and their defaults.
+        Parameters: Map<string, Map<string, int>>
+        /// The team's suppression-comment policy, `"suppressions"`:
+        ///   "all"            every suppression comment silences its finding
+        ///                    (the default, and what editors do regardless)
+        ///   "no-correctness" comments on correctness-category rules are
+        ///                    reported anyway (though never auto-fixed)
+        ///   "none"           every suppression comment is reported anyway
+        Suppressions: string
+    }
 
 /// The `"suppressions"` policy string; unknown values read as "all" so a
 /// typo cannot silently harden a run.
@@ -372,7 +380,8 @@ let private defaultIgnoredSegments = [ "paket-files"; ".paket"; "node_modules" ]
 /// path SEGMENT; an entry containing a slash matches as a normalized
 /// substring; an entry containing `*` is a glob (`*` within a segment,
 /// `**` across segments: `*.g.fs`, `src/generated/**`).
-let private globCache = ConcurrentDictionary<string, Text.RegularExpressions.Regex>()
+let private globCache =
+    ConcurrentDictionary<string, Text.RegularExpressions.Regex>()
 
 let private globRegex (pattern: string) =
     globCache.GetOrAdd(

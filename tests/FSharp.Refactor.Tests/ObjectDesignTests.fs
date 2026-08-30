@@ -173,16 +173,11 @@ let ``three or more holes keep the concat chain`` () =
     // String.Concat, but a 3-hole one takes the String.Format path —
     // 4.9x slower and 2.3x the allocation of the + chain it would
     // replace, which is already a single String.Concat call
-    Assert.Empty(
-        concatIn
-            "let f (a: string) (b: string) (c: string) = \"[\" + a + \",\" + b + \",\" + c + \"]\""
-    )
+    Assert.Empty(concatIn "let f (a: string) (b: string) (c: string) = \"[\" + a + \",\" + b + \",\" + c + \"]\"")
 
 [<Fact>]
 let ``two holes still become an interpolation`` () =
-    assertConcat
-        "let f (a: string) (b: string) = \"x\" + a + \"-\" + b"
-        "$\"x{a}-{b}\""
+    assertConcat "let f (a: string) (b: string) = \"x\" + a + \"-\" + b" "$\"x{a}-{b}\""
 
 [<Fact>]
 let ``an attributed member is framework territory and stays instance`` () =
@@ -207,7 +202,8 @@ let ``the concat alternative of a plus chain also typechecks`` () =
 
 [<Fact>]
 let ``the concat alternative uses the short spelling under open System`` () =
-    let source = "module Test\nopen System\nlet f (a: string) (b: string) = \"x\" + a + \"-\" + b"
+    let source =
+        "module Test\nopen System\nlet f (a: string) (b: string) = \"x\" + a + \"-\" + b"
 
     match concatIn source with
     | [ s ] -> Assert.Equal(Some "String.Concat(\"x\", a, \"-\", b)", s.ConcatAlternative)

@@ -29,15 +29,17 @@ open FSharp.Compiler.Text
 open FSharp.Refactor.Text
 
 type Suggestion =
-    { Range: range
-      OriginalText: string
-      ReplacementText: string
-      /// The String.Concat spelling of the same chain, for editors that
-      /// offer both. Every operand is PROVEN a string here, so the two are
-      /// exactly equivalent; the interpolation stays the primary because it
-      /// reads better, and at the rule's 1–2 hole cap the compiler turns it
-      /// into the same String.Concat call anyway.
-      ConcatAlternative: string option }
+    {
+        Range: range
+        OriginalText: string
+        ReplacementText: string
+        /// The String.Concat spelling of the same chain, for editors that
+        /// offer both. Every operand is PROVEN a string here, so the two are
+        /// exactly equivalent; the interpolation stays the primary because it
+        /// reads better, and at the rule's 1–2 hole cap the compiler turns it
+        /// into the same String.Concat call anyway.
+        ConcatAlternative: string option
+    }
 
 /// One operand of the chain: literal source text (flagged verbatim when it
 /// was an @-string) or an interpolation hole.

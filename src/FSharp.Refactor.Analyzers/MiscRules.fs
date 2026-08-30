@@ -84,10 +84,7 @@ let find
         // FR0067: single-argument Parse on culture-sensitive types
         | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) ->
             match List.rev ids with
-            | parseId :: owner :: _ when
-                parseId.idText = "Parse"
-                && cultureSensitiveOwners.Contains owner.idText
-                ->
+            | parseId :: owner :: _ when parseId.idText = "Parse" && cultureSensitiveOwners.Contains owner.idText ->
                 match stripParens arg with
                 | SynExpr.Tuple _ -> () // culture already supplied
                 | _ ->
