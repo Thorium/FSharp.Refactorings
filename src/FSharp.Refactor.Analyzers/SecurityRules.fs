@@ -93,16 +93,19 @@ let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion l
         | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))) when
             ids.Length >= 2 && (List.last ids).idText = "Create"
             ->
-            let owner = ids.[ids.Length - 2].idText
+            match List.rev ids with
+            | _create :: ownerId :: _ ->
+                let owner = ownerId.idText
 
-            if weakHashes.Contains owner then
-                crypto.Add
-                    { Range = e.Range
-                      Kind = WeakKind.Hash owner }
-            elif weakCiphers.Contains owner then
-                crypto.Add
-                    { Range = e.Range
-                      Kind = WeakKind.Cipher owner }
+                if weakHashes.Contains owner then
+                    crypto.Add
+                        { Range = e.Range
+                          Kind = WeakKind.Hash owner }
+                elif weakCiphers.Contains owner then
+                    crypto.Add
+                        { Range = e.Range
+                          Kind = WeakKind.Cipher owner }
+            | _ -> ()
         // new MD5CryptoServiceProvider() and friends
         | SynExpr.New(targetType = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty ->
             let name = (List.last ids).idText

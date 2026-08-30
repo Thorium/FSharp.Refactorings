@@ -223,3 +223,29 @@ let ``match form on Map uses TryFind`` () =
 let ``match with a when-guard is not rewritten`` () =
     assertNoSuggestion
         "open System.Collections.Generic\nlet f (d: Dictionary<string, int>) k (go: bool) = match d.ContainsKey k with | true when go -> d.[k] | _ -> 0"
+
+[<Fact>]
+let ``an elif chain peels one TryGetValue level per pass`` () =
+    // the outer if rewrites alone; the elif comes along VERBATIM as the
+    // fallthrough arm with its elif spelled back to if, which the next
+    // fix-then-reanalyze pass rewrites in turn
+    let source =
+        "module Test\nopen System.Collections.Generic\nlet f (mapped: Dictionary<string, obj>) =\n    if mapped.ContainsKey \"FragmentId\" then\n        Some(mapped.[\"FragmentId\"].ToString())\n    elif mapped.ContainsKey \"Id\" then\n        Some(mapped.[\"Id\"].ToString())\n    else None"
+
+    match findIn source with
+    | [ s ] ->
+        Assert.Contains("match mapped.TryGetValue \"FragmentId\" with", s.ReplacementText)
+        Assert.Contains("| true, value -> Some(value.ToString())", s.ReplacementText)
+        Assert.Contains("if mapped.ContainsKey \"Id\"", s.ReplacementText)
+        Assert.DoesNotContain("elif", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+        // second pass over the patched text peels the next level
+        match findIn patched with
+        | [ s2 ] ->
+            Assert.Contains("match mapped.TryGetValue \"Id\" with", s2.ReplacementText)
+            let patched2 = applyEdit patched s2.Range s2.ReplacementText
+            Assert.True(typechecksCleanly patched2, $"Second pass does not typecheck:\n%s{patched2}")
+        | other -> failwithf "Expected the second level on pass two, got %A" other
+    | other -> failwithf "Expected exactly one chain suggestion, got %A" other

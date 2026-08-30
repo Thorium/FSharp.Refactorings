@@ -110,3 +110,15 @@ let ``doubly parenthesized operator reference keeps one paren pair`` () =
 [<Fact>]
 let ``operator method call keeps its parens`` () =
     assertNoSuggestion "module Test\nlet f (x: float32) = TorchSharp.Scalar.op_Implicit(x)"
+
+[<Fact>]
+let ``an application that is a tuple element keeps its parens`` () =
+    // ValueSome(x), y bare parses identically, but a comma beside a
+    // spaced application makes the reader check who owns it
+    Assert.Empty(findIn "module Test
+let f (score: float) (ts: string) = ValueSome(score), ts")
+
+[<Fact>]
+let ``the same application outside a tuple still sheds them`` () =
+    Assert.NotEmpty(findIn "module Test
+let f (score: float) = ValueSome(score)")

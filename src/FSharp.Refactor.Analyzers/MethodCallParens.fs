@@ -100,6 +100,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         | SyntaxNode.SynExpr(SynExpr.DotGet _) :: _
                         | SyntaxNode.SynExpr(SynExpr.DotIndexedGet _) :: _
                         | SyntaxNode.SynExpr(SynExpr.Dynamic _) :: _ -> true
+                        // a direct tuple element keeps its parens:
+                        // `M(x), y` bare is the same parse, but the comma
+                        // next to a spaced application makes the reader run
+                        // the precedence table to see which side owns it
+                        | SyntaxNode.SynExpr(SynExpr.Tuple _) :: _ -> true
                         | _ -> false
 
                     if not projected then

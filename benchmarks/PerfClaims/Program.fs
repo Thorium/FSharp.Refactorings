@@ -144,6 +144,15 @@ let rec descendRefSeq (d: int) : int seq =
 // ---- fixtures --------------------------------------------------------------
 
 let xsList = List.init 1000 id
+
+// FR0090's pair: a saturated curried call compiles to the same direct
+// static invocation as the tupled call — no intermediate partial
+// applications exist unless a partial ESCAPES (and even a
+// constant-capturing escapee is cached as a static singleton)
+let private tupled8 (a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) = a + b + c + d + e + f + g + h
+
+let private curried8 (a: int) (b: int) (c: int) (d: int) (e: int) (f: int) (g: int) (h: int) =
+    a + b + c + d + e + f + g + h
 let xsArr = Array.init 1000 id
 let bigArr = Array.init 100_000 (fun i -> i % 100)
 let sq = Seq.init 1000 id
@@ -748,6 +757,109 @@ let cases =
               t
         After = fun () -> List.sum xsList }
 
+      { Code = "FR0108"
+        Name = "x && true -> x"
+        Cat = Idiom
+        Iters = 5_000_000
+        Before =
+          fun () ->
+              let x = xsArr
+
+              if x.[0] < x.[1] && true then 1 else 0
+        After =
+          fun () ->
+              let x = xsArr
+
+              if x.[0] < x.[1] then 1 else 0 }
+
+      { Code = "FR0109"
+        Name = "a || a -> a"
+        Cat = Idiom
+        Iters = 5_000_000
+        Before =
+          fun () ->
+              let x = xsArr
+
+              if x.[0] > x.[1] || x.[0] > x.[1] then 1 else 0
+        After =
+          fun () ->
+              let x = xsArr
+
+              if x.[0] > x.[1] then 1 else 0 }
+
+      { Code = "FR0112"
+        Name = "if/elif equality chain -> match"
+        Cat = Idiom
+        Iters = 1_000_000
+        // sum over varied inputs so neither side constant-folds and every
+        // arm is exercised — the first fixture compared a folded chain
+        // against a live match and passed on gate slack alone
+        Before =
+          fun () ->
+              let mutable acc = 0
+
+              for i in 0..7 do
+                  let x = xsArr.[i]
+
+                  acc <-
+                      acc
+                      + (if x = 1 then 10
+                         elif x = 2 then 20
+                         elif x = 3 then 30
+                         else 0)
+
+              acc
+        After =
+          fun () ->
+              let mutable acc = 0
+
+              for i in 0..7 do
+                  let x = xsArr.[i]
+
+                  acc <-
+                      acc
+                      + (match x with
+                         | 1 -> 10
+                         | 2 -> 20
+                         | 3 -> 30
+                         | _ -> 0)
+
+              acc }
+
+      { Code = "FR0113"
+        Name = "nested ifs, same else -> one &&"
+        Cat = Idiom
+        Iters = 5_000_000
+        Before =
+          fun () ->
+              let x = xsArr
+
+              if x.[0] < x.[1] then
+                  if x.[1] < x.[2] then 1 else 3
+              else
+                  3
+        After =
+          fun () ->
+              let x = xsArr
+
+              if x.[0] < x.[1] && x.[1] < x.[2] then 1 else 3 }
+
+      { Code = "FR0090"
+        Name = "tupled f(a,..,h) -> curried f a .. h (saturated)"
+        Cat = Idiom
+        Iters = 2_000_000
+        // arguments read from the array so neither side constant-folds
+        Before =
+          fun () ->
+              let x = xsArr
+
+              tupled8 (x.[0], x.[1], x.[2], x.[3], x.[4], x.[5], x.[6], x.[7])
+        After =
+          fun () ->
+              let x = xsArr
+
+              curried8 x.[0] x.[1] x.[2] x.[3] x.[4] x.[5] x.[6] x.[7] }
+
       // the predicate never hits, so exists gets NO short-circuit help:
       // this is the rewrite's worst case, a full scan against a full scan.
       // Any real match only widens the gap in exists's favor
@@ -949,9 +1061,11 @@ let notApplicable =
       "FR0074", "nested record update: identical construction"
       "FR0078", "while! sugar: identical desugaring"
       "FR0081", "path separators: correctness of behavior, not speed"
-      "FR0090", "cross-file signature change"
-      "FR0091", "cross-file signature change"
-      "FR0092", "failwith message content: diagnostic quality" ]
+      "FR0091", "cross-file signature change: data-last is idiom, not speed"
+      "FR0092", "failwith message content: diagnostic quality"
+      "FR0114", "branch reorder: identical branches, swapped positions"
+      "FR0115", "advice on match arm order: no fix to measure"
+      "FR0116", "rec-group membership: same compiled calls either way" ]
 
 [<EntryPoint>]
 let main argv =

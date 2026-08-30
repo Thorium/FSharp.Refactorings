@@ -47,6 +47,34 @@ let private whenEnabled (fileName: string) (code: string) (name: string) (produc
                 []
     }
 
+/// The EDITOR-side twin of the apply tool's comment guard: a fix whose
+/// span contains a comment that no fix of the same message re-emits would
+/// silently DELETE it through the light bulb — and unlike the CLI, the
+/// editor has no build check or hold-back behind it. Messages carrying
+/// such fixes are dropped from editor results entirely; the CLI keeps its
+/// own guard, which also REPORTS the hold-back. Applied by the editor
+/// wrappers of every rule whose fixes can span multiple lines.
+let commentSafeOnly (parseTree: ParsedInput) (source: ISourceText) (messages: Message list) : Message list =
+    match messages |> List.filter (fun m -> not m.Fixes.IsEmpty) with
+    | [] -> messages
+    | _ ->
+        let comments = Text.commentsWithText parseTree source
+
+        if comments.IsEmpty then
+            messages
+        else
+            messages
+            |> List.filter (fun m ->
+                m.Fixes.IsEmpty
+                || (let toTexts = m.Fixes |> List.map (fun f -> f.ToText)
+
+                    m.Fixes
+                    |> List.forall (fun f ->
+                        comments
+                        |> List.forall (fun (r, text) ->
+                            not (Range.rangeContainsRange f.FromRange r)
+                            || toTexts |> List.exists (fun t -> t.Contains text)))))
+
 // ---- FR0001 MatchToIf ----
 
 let private matchToIfMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
@@ -61,12 +89,191 @@ let private matchToIfMessages (parseTree: ParsedInput) (source: ISourceText) : M
 [<EditorAnalyzer("MatchToIf", "Rewrite a boolean match expression as if-else", HelpBase)>]
 let matchToIfEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0001" "MatchToIf" (fun () ->
-        matchToIfMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        matchToIfMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("MatchToIf", "Rewrite a boolean match expression as if-else", HelpBase)>]
 let matchToIfCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0001" "MatchToIf" (fun () ->
         matchToIfMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0108 / FR0109 BooleanSimplify ----
+
+let private booleanSimplifyMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let identityEnabled = Configuration.isRuleEnabled fileName "FR0108" "BooleanIdentity"
+
+    let duplicateEnabled =
+        Configuration.isRuleEnabled fileName "FR0109" "BooleanDuplicate"
+
+    if not (identityEnabled || duplicateEnabled) then
+        []
+    else
+        BooleanSimplify.find parseTree source
+        |> List.choose (fun s ->
+            match s.Kind with
+            | BooleanSimplify.Kind.Identity when identityEnabled ->
+                Some(
+                    hint
+                        "FR0108"
+                        "The boolean literal contributes nothing here; the expression is the other operand."
+                        s.Range
+                        [ fix s.Range s.OriginalText s.ReplacementText ]
+                )
+            | BooleanSimplify.Kind.Duplicate when duplicateEnabled ->
+                Some(
+                    hint
+                        "FR0109"
+                        "Both operands are the same expression; one suffices — unless the duplicate was meant to be something else, which is worth a look."
+                        s.Range
+                        [ fix s.Range s.OriginalText s.ReplacementText ]
+                )
+            | _ -> None)
+
+[<EditorAnalyzer("BooleanSimplify", "Drop boolean identity literals and duplicated operands", HelpBase)>]
+let booleanSimplifyEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async { return booleanSimplifyMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+[<CliAnalyzer("BooleanSimplify", "Drop boolean identity literals and duplicated operands", HelpBase)>]
+let booleanSimplifyCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async { return booleanSimplifyMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+
+// ---- FR0110 MissingCases ----
+
+let private missingCasesMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    MissingCases.find parseTree source checkResults
+    |> List.map (fun s ->
+        let names = s.MissingCases |> String.concat ", "
+
+        hint
+            "FR0110"
+            $"This match has no arm for {names} and no wildcard (FS0025); the fix adds the missing arm(s) raising NotImplementedException, so the gap reports itself."
+            s.Range
+            [ fix s.Range "" s.InsertText ])
+
+[<EditorAnalyzer("MissingCases", "Complete an incomplete DU match with explicit raising arms", HelpBase)>]
+let missingCasesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0110" "MissingCases" (fun () ->
+        whenChecked ctx (missingCasesMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("MissingCases", "Complete an incomplete DU match with explicit raising arms", HelpBase)>]
+let missingCasesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0110" "MissingCases" (fun () ->
+        missingCasesMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0111 / FR0112 / FR0113 IfRestructure ----
+
+let private ifRestructureMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    let elseIfEnabled = Configuration.isRuleEnabled fileName "FR0111" "ElseIfFlatten"
+
+    let chainEnabled =
+        Configuration.isRuleEnabled fileName "FR0112" "EqualityChainToMatch"
+
+    let mergeEnabled = Configuration.isRuleEnabled fileName "FR0113" "NestedIfMerge"
+
+    let flipEnabled = Configuration.isRuleEnabled fileName "FR0114" "PyramidFlip"
+
+    let guardOrderEnabled =
+        Configuration.isRuleEnabled fileName "FR0115" "GuardOrder"
+
+    // configurable knobs, FR0114's per-rule parameters:
+    //     { "FR0114": { "enabled": true, "thenAtLeast": 30, "elseAtMost": 2 } }
+    let thenAtLeast =
+        Configuration.parameterInt fileName "FR0114" "PyramidFlip" "thenAtLeast" 20
+
+    let elseAtMost =
+        Configuration.parameterInt fileName "FR0114" "PyramidFlip" "elseAtMost" 3
+
+    [ if flipEnabled then
+          for s in IfRestructure.findPyramidFlips thenAtLeast elseAtMost parseTree source do
+              hint
+                  "FR0114"
+                  "A large then-branch behind a small else reads bottom-heavy; flipping the condition puts the short exit first."
+                  s.Range
+                  [ fix s.Range s.OriginalText s.ReplacementText ]
+      if guardOrderEnabled then
+          for s in IfRestructure.findGuardOrderNotes parseTree source do
+              hint
+                  "FR0115"
+                  $"The base case sits FIRST behind a compound guard on '{s.Variable}'; every new error condition must be threaded into it. Inverted — error guards first, the base case as the final arm — the match reads top-down and extends by appending."
+                  s.Range
+                  []
+      if elseIfEnabled then
+          for s in IfRestructure.findElseIf parseTree source do
+              hint
+                  "FR0111"
+                  "This `else` holds a whole nested if; `elif` says the same thing one level flatter."
+                  s.Range
+                  [ fix s.Range s.OriginalText s.ReplacementText ]
+      if chainEnabled then
+          for s in IfRestructure.findEqualityChains parseTree source checkResults do
+              hint
+                  "FR0112"
+                  "This if/elif chain compares one identifier against distinct literals; a match states the same dispatch directly."
+                  s.Range
+                  [ fix s.Range s.OriginalText s.ReplacementText ]
+      if mergeEnabled then
+          for s in IfRestructure.findNestedIfMerges parseTree source do
+              hint
+                  "FR0113"
+                  "The nested if can merge into one `&&` condition — the branches are unchanged, one level of nesting is gone."
+                  s.Range
+                  [ fix s.Range s.OriginalText s.ReplacementText ] ]
+
+[<EditorAnalyzer("IfRestructure", "Flatten else-if, chain-to-match, nested-if merges", HelpBase)>]
+let ifRestructureEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    async {
+        return
+            whenChecked ctx (ifRestructureMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
+            |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText
+    }
+
+[<CliAnalyzer("IfRestructure", "Flatten else-if, chain-to-match, nested-if merges", HelpBase)>]
+let ifRestructureCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    async {
+        return ifRestructureMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+    }
+
+// ---- FR0116 RecGroup ----
+
+let private recGroupMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    let extractions =
+        RecGroup.find parseTree source
+        |> List.map (fun s ->
+            let explanation =
+                if s.IsSelfRecursive then
+                    $"'{s.MemberName}' calls only itself, no other member of its `let rec` group; its own `let rec` above the group narrows the knot."
+                else
+                    $"'{s.MemberName}' references no member of its `let rec` group; a plain `let` above the group says it takes part in no recursion."
+
+            hint
+                "FR0116"
+                explanation
+                s.RemoveRange
+                [ fix s.InsertRange "" s.InsertText
+                  fix s.RemoveRange (Text.textOfRange source s.RemoveRange) "" ])
+
+    let recrowns =
+        RecGroup.findHeadRecrowns parseTree source
+        |> List.map (fun s ->
+            hint
+                "FR0116"
+                $"'{s.MemberName}' heads its `let rec` group but references no member; a plain `let` with the group re-crowned below says it takes part in no recursion."
+                s.LetRecRange
+                [ fix s.LetRecRange (Text.textOfRange source s.LetRecRange) "let"
+                  fix s.AndRange (Text.textOfRange source s.AndRange) "let rec" ])
+
+    extractions @ recrowns
+
+[<EditorAnalyzer("RecGroup", "Pull non-recursive members out of let rec groups", HelpBase)>]
+let recGroupEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0116" "RecGroup" (fun () ->
+        recGroupMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("RecGroup", "Pull non-recursive members out of let rec groups", HelpBase)>]
+let recGroupCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0116" "RecGroup" (fun () ->
+        recGroupMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 // ---- FR0002 OptionModule ----
 
@@ -84,7 +291,8 @@ let private optionModuleMessages (parseTree: ParsedInput) (source: ISourceText) 
 [<EditorAnalyzer("OptionModule", "Rewrite Some/None matching with Option-module functions", HelpBase)>]
 let optionModuleEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0002" "OptionModule" (fun () ->
-        whenChecked ctx (optionModuleMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (optionModuleMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("OptionModule", "Rewrite Some/None matching with Option-module functions", HelpBase)>]
 let optionModuleCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -105,7 +313,8 @@ let private compositionMessages (parseTree: ParsedInput) (source: ISourceText) :
 [<EditorAnalyzer("Composition", "Extract a function composition from a lambda", HelpBase)>]
 let compositionEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0003" "Composition" (fun () ->
-        compositionMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        compositionMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("Composition", "Extract a function composition from a lambda", HelpBase)>]
 let compositionCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -128,7 +337,8 @@ let private conversionMoveMessages (parseTree: ParsedInput) (source: ISourceText
 [<EditorAnalyzer("ConversionMove", "Move or drop List/Seq/Array conversions in pipelines", HelpBase)>]
 let conversionMoveEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0004" "ConversionMove" (fun () ->
-        conversionMoveMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        conversionMoveMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("ConversionMove", "Move or drop List/Seq/Array conversions in pipelines", HelpBase)>]
 let conversionMoveCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -503,7 +713,8 @@ let private dictTryGetMessages (parseTree: ParsedInput) (source: ISourceText) ch
 [<EditorAnalyzer("DictTryGet", "Replace ContainsKey-plus-indexer with TryGetValue", HelpBase)>]
 let dictTryGetEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0014" "DictTryGet" (fun () ->
-        whenChecked ctx (dictTryGetMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (dictTryGetMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("DictTryGet", "Replace ContainsKey-plus-indexer with TryGetValue", HelpBase)>]
 let dictTryGetCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -892,24 +1103,40 @@ let addRangeCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0031 StringConcat ----
 
-let private stringConcatMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+let private stringConcatMessages
+    (offerAlternatives: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
     StringConcat.find parseTree source checkResults
-    |> List.map (fun s ->
-        hint
-            "FR0031"
-            "This string concatenation chain can be an interpolated string."
-            s.Range
-            [ fix s.Range s.OriginalText s.ReplacementText ])
+    |> List.collect (fun s ->
+        let primary =
+            hint
+                "FR0031"
+                "This string concatenation chain can be an interpolated string."
+                s.Range
+                [ fix s.Range s.OriginalText s.ReplacementText ]
+
+        match s.ConcatAlternative with
+        | Some concat when offerAlternatives ->
+            [ primary
+              hint
+                  "FR0031"
+                  "…or as one explicit String.Concat call — the same thing the compiler emits for the interpolation, spelled out."
+                  s.Range
+                  [ fix s.Range s.OriginalText concat ] ]
+        | _ -> [ primary ])
 
 [<EditorAnalyzer("StringConcat", "Rewrite string + chains as interpolated strings", HelpBase)>]
 let stringConcatEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0031" "StringConcat" (fun () ->
-        whenChecked ctx (stringConcatMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (stringConcatMessages true ctx.ParseFileResults.ParseTree ctx.SourceText))
 
 [<CliAnalyzer("StringConcat", "Rewrite string + chains as interpolated strings", HelpBase)>]
 let stringConcatCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0031" "StringConcat" (fun () ->
-        stringConcatMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        stringConcatMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 // ---- FR0032 / FR0033 ObjectDesign ----
 
@@ -1003,7 +1230,8 @@ let private optionMatchMessages (parseTree: ParsedInput) (source: ISourceText) c
 [<EditorAnalyzer("OptionMatch", "Rewrite IsSome/.Value conditionals as pattern matches", HelpBase)>]
 let optionMatchEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0034" "OptionMatch" (fun () ->
-        whenChecked ctx (optionMatchMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (optionMatchMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("OptionMatch", "Rewrite IsSome/.Value conditionals as pattern matches", HelpBase)>]
 let optionMatchCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -1138,11 +1366,20 @@ let charOverloadCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0039 CaseInsensitive ----
 
-let private caseInsensitiveMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+let private caseInsensitiveMessages
+    (offerAlternatives: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
     CaseInsensitive.find parseTree source checkResults
-    |> List.map (fun s ->
+    |> List.collect (fun s ->
         let message =
             match s.Kind with
+            | CaseInsensitive.CaseKind.Equality when s.Replacement.IsSome ->
+                sprintf
+                    "%s() allocates a copy just to compare with an ASCII literal; String.Equals(..., OrdinalIgnoreCase) is allocation-free and agrees with it on every input except two Unicode compatibility characters (KELVIN SIGN, LONG S)."
+                    s.LoweringName
             | CaseInsensitive.CaseKind.Equality ->
                 sprintf
                     "%s() allocates a copy just to compare; String.Equals(a, b, StringComparison...IgnoreCase) is allocation-free — pick the comparison type deliberately (Ordinal vs Culture)."
@@ -1154,17 +1391,35 @@ let private caseInsensitiveMessages (parseTree: ParsedInput) (source: ISourceTex
                     method
                     method
 
-        hint "FR0039" message s.Range [])
+        let fixes =
+            match s.Replacement with
+            | Some replacement -> [ fix s.Range (Text.textOfRange source s.Range) replacement ]
+            | None -> []
+
+        let primary = hint "FR0039" message s.Range fixes
+
+        // ALTERNATIVE spellings ride as separate messages so an editor
+        // offers each as its own code action; the CLI never sees them and
+        // auto-applies only the primary
+        match s.CultureReplacement with
+        | Some culture when offerAlternatives && s.Replacement.IsSome ->
+            [ primary
+              hint
+                  "FR0039"
+                  "…or culture-aware: InvariantCultureIgnoreCase compares by linguistic rules (ligatures, accents) where ordinal compares code points."
+                  s.Range
+                  [ fix s.Range (Text.textOfRange source s.Range) culture ] ]
+        | _ -> [ primary ])
 
 [<EditorAnalyzer("CaseInsensitive", "Allocation-free case-insensitive comparisons", HelpBase)>]
 let caseInsensitiveEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0039" "CaseInsensitive" (fun () ->
-        whenChecked ctx (caseInsensitiveMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (caseInsensitiveMessages true ctx.ParseFileResults.ParseTree ctx.SourceText))
 
 [<CliAnalyzer("CaseInsensitive", "Allocation-free case-insensitive comparisons", HelpBase)>]
 let caseInsensitiveCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0039" "CaseInsensitive" (fun () ->
-        caseInsensitiveMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        caseInsensitiveMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 // ---- FR0040 RedundantGuard ----
 
@@ -1478,7 +1733,11 @@ let private accumulationMessages
 
 [<EditorAnalyzer("Accumulation", "Mutable accumulator loops and quadratic appends", HelpBase)>]
 let accumulationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
-    async { return whenChecked ctx (accumulationMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText) }
+    async {
+        return
+            whenChecked ctx (accumulationMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
+            |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText
+    }
 
 [<CliAnalyzer("Accumulation", "Mutable accumulator loops and quadratic appends", HelpBase)>]
 let accumulationCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -1955,7 +2214,8 @@ let private matchBangMessages (parseTree: ParsedInput) (source: ISourceText) : M
 [<EditorAnalyzer("MatchBang", "Collapse let!-then-match into match!", HelpBase)>]
 let matchBangEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0073" "MatchBang" (fun () ->
-        matchBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        matchBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("MatchBang", "Collapse let!-then-match into match!", HelpBase)>]
 let matchBangCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -2003,6 +2263,7 @@ let whileBangEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0078" "WhileBang" (fun () ->
         if langVersionAtLeast 8.0 ctx.ProjectOptions then
             whileBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+            |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText
         else
             [])
 

@@ -82,17 +82,19 @@ let find
     for _, e in index.Exprs do
         match e with
         // FR0067: single-argument Parse on culture-sensitive types
-        | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) when
-            ids.Length >= 2
-            && (List.last ids).idText = "Parse"
-            && cultureSensitiveOwners.Contains ids.[ids.Length - 2].idText
-            ->
-            match stripParens arg with
-            | SynExpr.Tuple _ -> () // culture already supplied
-            | _ ->
-                parses.Add
-                    { Range = e.Range
-                      CallName = ids.[ids.Length - 2].idText + ".Parse" }
+        | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) ->
+            match List.rev ids with
+            | parseId :: owner :: _ when
+                parseId.idText = "Parse"
+                && cultureSensitiveOwners.Contains owner.idText
+                ->
+                match stripParens arg with
+                | SynExpr.Tuple _ -> () // culture already supplied
+                | _ ->
+                    parses.Add
+                        { Range = e.Range
+                          CallName = owner.idText + ".Parse" }
+            | _ -> ()
         | _ -> ()
 
     // FR0068: duplicate literal enum values

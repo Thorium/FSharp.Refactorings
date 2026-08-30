@@ -183,3 +183,32 @@ let ``two holes still become an interpolation`` () =
     assertConcat
         "let f (a: string) (b: string) = \"x\" + a + \"-\" + b"
         "$\"x{a}-{b}\""
+
+[<Fact>]
+let ``an attributed member is framework territory and stays instance`` () =
+    // [<Fact>] tests, [<Benchmark>] methods (BenchmarkDotNet REQUIRES
+    // instance), controller actions: reflective dispatch owns the shape
+    let _, statics, _ =
+        designIn
+            "module Test\nopen Xunit\ntype Suite() =\n    [<Fact>]\n    member _.``adds up`` () = Assert.True(1 + 1 = 2)"
+
+    Assert.Empty statics
+
+[<Fact>]
+let ``the concat alternative of a plus chain also typechecks`` () =
+    let source = "module Test\nlet f (a: string) (b: string) = \"x\" + a + \"-\" + b"
+
+    match concatIn source with
+    | [ s ] ->
+        Assert.Equal(Some "System.String.Concat(\"x\", a, \"-\", b)", s.ConcatAlternative)
+        let patched = applyEdit source s.Range s.ConcatAlternative.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``the concat alternative uses the short spelling under open System`` () =
+    let source = "module Test\nopen System\nlet f (a: string) (b: string) = \"x\" + a + \"-\" + b"
+
+    match concatIn source with
+    | [ s ] -> Assert.Equal(Some "String.Concat(\"x\", a, \"-\", b)", s.ConcatAlternative)
+    | other -> failwithf "Expected one suggestion, got %A" other

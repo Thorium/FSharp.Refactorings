@@ -31,7 +31,13 @@ open FSharp.Refactor.Text
 type Suggestion =
     { Range: range
       OriginalText: string
-      ReplacementText: string }
+      ReplacementText: string
+      /// The String.Concat spelling of the same chain, for editors that
+      /// offer both. Every operand is PROVEN a string here, so the two are
+      /// exactly equivalent; the interpolation stays the primary because it
+      /// reads better, and at the rule's 1–2 hole cap the compiler turns it
+      /// into the same String.Concat call anyway.
+      ConcatAlternative: string option }
 
 /// One operand of the chain: literal source text (flagged verbatim when it
 /// was an @-string) or an interpolation hole.
@@ -195,7 +201,21 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                   | Hole text -> "{" + text + "}")
                               |> String.concat ""
 
+                          let concatAlternative =
+                              // `String` alone binds to FSharp.Core's module
+                              // without `open System`; qualify when the file
+                              // does not open it
+                              let prefix = if opensSystemNamespace source then "" else "System."
+
+                              let args =
+                                  operands
+                                  |> List.map (fun operand -> textOfRange source operand.Range)
+                                  |> String.concat ", "
+
+                              Some $"{prefix}String.Concat({args})"
+
                           { Range = expr.Range
                             OriginalText = textOfRange source expr.Range
-                            ReplacementText = if anyVerbatim then $"$@\"{body}\"" else $"$\"{body}\"" }
+                            ReplacementText = if anyVerbatim then $"$@\"{body}\"" else $"$\"{body}\""
+                            ConcatAlternative = concatAlternative }
               | _ -> () ]

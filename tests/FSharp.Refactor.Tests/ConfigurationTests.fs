@@ -223,3 +223,49 @@ let ``an auto-generated header disables every rule`` () =
         Assert.True(Configuration.isRuleEnabled (Path.Combine(root, "Missing.fs")) "FR0001" "MatchToIf")
     finally
         Directory.Delete(root, true)
+
+[<Fact>]
+let ``rule parameters read from object-valued entries`` () =
+    let root =
+        Path.Combine(Path.GetTempPath(), "fsref-param-" + Guid.NewGuid().ToString "N")
+
+    Directory.CreateDirectory root |> ignore
+
+    try
+        File.WriteAllText(
+            Path.Combine(root, Configuration.ConfigFileName),
+            """{ "FR0114": { "enabled": true, "thenAtLeast": 30 } }"""
+        )
+
+        let file = Path.Combine(root, "Code.fs")
+        Assert.Equal(30, Configuration.parameterInt file "FR0114" "PyramidFlip" "thenAtLeast" 20)
+        // an unset knob falls back to the rule's default
+        Assert.Equal(3, Configuration.parameterInt file "FR0114" "PyramidFlip" "elseAtMost" 3)
+        // and the object-valued entry still toggles the rule on
+        Assert.True(Configuration.isRuleEnabled file "FR0114" "PyramidFlip")
+    finally
+        Directory.Delete(root, true)
+
+[<Fact>]
+let ``suppressions policy parses and defaults to all`` () =
+    Assert.Equal("all", Configuration.parseSuppressions "{}")
+    Assert.Equal("no-correctness", Configuration.parseSuppressions """{ "suppressions": "no-correctness" }""")
+    Assert.Equal("none", Configuration.parseSuppressions """{ "suppressions": "NONE" }""")
+    // a typo cannot silently harden a run
+    Assert.Equal("all", Configuration.parseSuppressions """{ "suppressions": "strict" }""")
+    Assert.Equal("all", Configuration.parseSuppressions "{ not json")
+
+[<Fact>]
+let ``suppressions policy is discovered like any other setting`` () =
+    let root =
+        Path.Combine(Path.GetTempPath(), "fsref-sup-" + Guid.NewGuid().ToString "N")
+
+    Directory.CreateDirectory root |> ignore
+
+    try
+        File.WriteAllText(Path.Combine(root, Configuration.ConfigFileName), """{ "suppressions": "no-correctness" }""")
+
+        Assert.Equal("no-correctness", Configuration.suppressionPolicy (Path.Combine(root, "Code.fs")))
+        Assert.Equal("all", Configuration.suppressionPolicy (Path.Combine(Path.GetTempPath(), "nowhere.fs")))
+    finally
+        Directory.Delete(root, true)

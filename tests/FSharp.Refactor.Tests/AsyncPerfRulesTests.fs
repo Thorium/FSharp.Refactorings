@@ -609,3 +609,18 @@ let ``a seq source materializes before String concat`` () =
     assertFold
         "let render (xs: int seq) =\n    let mutable acc = \"\"\n    for x in xs do\n        acc <- acc + string x\n    acc"
         "let acc = xs |> Seq.map (fun x -> string x) |> Seq.toArray |> String.concat \"\""
+
+[<Fact>]
+let ``a pure let prefix folds into the exists lambda`` () =
+    // the opensSystem shape from our own code review: a let-bound
+    // projection before the flag test is still an exists question
+    assertFlagRewrite
+        "let f (lines: string list) =\n    let mutable found = false\n    for l in lines do\n        let t = l.Trim()\n        if t = \"open System\" then found <- true\n    found"
+        "let found = lines |> List.exists (fun l -> let t = l.Trim() in t = \"open System\")"
+
+[<Fact>]
+let ``a mutable let in the body keeps the flag loop`` () =
+    Assert.Empty(
+        flagLoopsIn
+            "let f (xs: int list) =\n    let mutable found = false\n    for x in xs do\n        let mutable y = x + 1\n        if y > 3 then found <- true\n    found"
+    )

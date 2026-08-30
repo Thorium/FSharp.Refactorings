@@ -224,6 +224,7 @@ let find
                         | SynMemberDefn.Member(
                             memberDefn = SynBinding(
                                 valData = SynValData(memberFlags = Some flags)
+                                attributes = attrs
                                 headPat = SynPat.LongIdent(
                                     longDotId = SynLongIdent(id = [ selfId; nameId ]); argPats = SynArgPats.Pats args)
                                 expr = bodyExpr)) when
@@ -231,6 +232,13 @@ let find
                             && not flags.IsOverrideOrExplicitImpl
                             && not flags.IsDispatchSlot
                             && not args.IsEmpty
+                            // an ATTRIBUTED member is framework-contract
+                            // territory: [<Fact>] tests, [<Benchmark>]
+                            // methods (BenchmarkDotNet REQUIRES instance),
+                            // [<GlobalSetup>], controller actions — the
+                            // framework dispatches reflectively and
+                            // instance-ness is part of its protocol
+                            && attrs.IsEmpty
                             ->
                             let memberParamNames = args |> List.collect patNames |> Set.ofList
 

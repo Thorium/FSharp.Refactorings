@@ -32,6 +32,23 @@ type Suggestion =
         Kind: CaseKind
         /// The lowering method used, for the message.
         LoweringName: string
+        /// A ready replacement, when the rewrite is provably safe: the
+        /// other operand is a pure-ASCII string literal. Measured across
+        /// ALL of Unicode, `x.ToLowerInvariant() = "ascii"` and
+        /// String.Equals(x, "ascii", OrdinalIgnoreCase) diverge for
+        /// exactly ONE input character (U+212A KELVIN SIGN, literals
+        /// containing k) and the upper direction for one more (U+017F
+        /// LONG S, literals containing s) — compatibility characters
+        /// that do not occur in the config values and role strings this
+        /// pattern compares. Non-ASCII literals and non-literal
+        /// comparisons stay advice.
+        Replacement: string option
+        /// The culture-aware alternative (InvariantCultureIgnoreCase), for
+        /// editors that offer both spellings side by side. The CLI applies
+        /// only the primary: ordinal is the right comparison for the config
+        /// values and role strings this pattern compares, and a bulk tool
+        /// should not guess at linguistics.
+        CultureReplacement: string option
     }
 
 let private loweringMethods =
@@ -77,22 +94,58 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         let index = AstIndex.ofTree parseTree
 
+        // the receiver's source text, for the String.Equals rewrite
+        let receiverTextOf (loweredCall: SynExpr) =
+            match loweredCall with
+            | SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))) when ids.Length >= 2 ->
+                Some(ids.[.. ids.Length - 2] |> List.map (fun i -> i.idText) |> String.concat ".")
+            | SynExpr.App(funcExpr = SynExpr.DotGet(expr = receiver)) -> Some(textOfRange source receiver.Range)
+            | _ -> None
+
+        let isAsciiLiteral (e: SynExpr) =
+            match e with
+            | SynExpr.Const(SynConst.String(text = text), _) -> text |> Seq.forall (fun c -> int c < 128)
+            | _ -> false
+
         [ for _, expr in index.Exprs do
               match expr with
               | SynExpr.App(
-                  funcExpr = SynExpr.App(funcExpr = IdentName("op_Equality" | "op_Inequality"); argExpr = lhs)
-                  argExpr = rhs) ->
+                  funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs)
+                  argExpr = rhs) when op.idText = "op_Equality" || op.idText = "op_Inequality" ->
                   let lowered =
                       match stripParens lhs, stripParens rhs with
-                      | LoweredCall m, _
-                      | _, LoweredCall m -> Some m
+                      | (LoweredCall m as call), other
+                      | other, (LoweredCall m as call) -> Some(m, call, other)
                       | _ -> None
 
                   match lowered with
-                  | Some m when resolvesToStringMethod check source m ->
+                  | Some(m, call, other) when resolvesToStringMethod check source m ->
+                      let replacementWith (comparison: string) =
+                          if isAsciiLiteral other && isSingleLine expr.Range then
+                              receiverTextOf call
+                              |> Option.map (fun receiver ->
+                                  let literal = textOfRange source other.Range
+
+                                  // without `open System` in the file the
+                                  // short spelling would not compile — the
+                                  // qualified one always does
+                                  let prefix = if opensSystemNamespace source then "" else "System."
+
+                                  let equals =
+                                      $"{prefix}String.Equals({receiver}, {literal}, {prefix}StringComparison.{comparison})"
+
+                                  if op.idText = "op_Inequality" then
+                                      $"not ({equals})"
+                                  else
+                                      equals)
+                          else
+                              None
+
                       { Range = expr.Range
                         Kind = CaseKind.Equality
-                        LoweringName = m.idText }
+                        LoweringName = m.idText
+                        Replacement = replacementWith "OrdinalIgnoreCase"
+                        CultureReplacement = replacementWith "InvariantCultureIgnoreCase" }
                   | _ -> ()
               | SynExpr.App(
                   isInfix = false
@@ -100,7 +153,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   comparisonMethods.Contains methodId.idText
                   ->
                   if resolvesToStringMethod check source lowering then
+                      // the comparison-taking Contains/StartsWith overloads
+                      // are netstandard2.1+, so this form stays advice until
+                      // it grows a capability gate like FR0038's
                       { Range = expr.Range
                         Kind = CaseKind.MethodCall methodId.idText
-                        LoweringName = lowering.idText }
+                        LoweringName = lowering.idText
+                        Replacement = None
+                        CultureReplacement = None }
               | _ -> () ]

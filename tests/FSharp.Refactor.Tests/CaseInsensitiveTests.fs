@@ -96,3 +96,72 @@ let ``a collection outside the whitelist is left alone`` () =
         guardsIn
             "open System.Collections.Generic\nlet f (xs: List<int>) x = if xs.Contains x then xs.Remove x |> ignore"
     )
+
+[<Fact>]
+let ``an ASCII literal comparison gets the OrdinalIgnoreCase fix`` () =
+    let source =
+        "module Test\nopen System\nlet f (role: string) = role.ToLowerInvariant() = \"user\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(Some "String.Equals(role, \"user\", StringComparison.OrdinalIgnoreCase)", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``inequality wraps the fix in not`` () =
+    let source =
+        "module Test\nopen System\nlet f (role: string) = role.ToUpperInvariant() <> \"USER\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(Some "not (String.Equals(role, \"USER\", StringComparison.OrdinalIgnoreCase))", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``a file without open System gets the qualified spelling`` () =
+    let source =
+        "module Test\nlet f (role: string) = role.ToLowerInvariant() = \"user\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(
+            Some "System.String.Equals(role, \"user\", System.StringComparison.OrdinalIgnoreCase)",
+            s.Replacement
+        )
+
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``a non-ASCII literal stays advice`` () =
+    // outside ASCII the invariant mapping and ordinal folding genuinely
+    // drift apart; the note asks for a deliberate choice
+    match caseIn "module Test\nopen System\nlet f (s: string) = s.ToLowerInvariant() = \"straße\"" with
+    | [ s ] -> Assert.Equal(None, s.Replacement)
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``comparing two expressions stays advice`` () =
+    match caseIn "module Test\nopen System\nlet f (a: string) (b: string) = a.ToLower() = b.ToLower()" with
+    | suggestions -> Assert.True(suggestions |> List.forall (fun s -> s.Replacement |> Option.isNone))
+
+[<Fact>]
+let ``the culture-aware alternative also typechecks`` () =
+    let source =
+        "module Test\nopen System\nlet f (role: string) = role.ToLowerInvariant() = \"user\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(
+            Some "String.Equals(role, \"user\", StringComparison.InvariantCultureIgnoreCase)",
+            s.CultureReplacement
+        )
+
+        let patched = applyEdit source s.Range s.CultureReplacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other

@@ -91,6 +91,7 @@ let private categories =
       "FR0089", Category.Correctness // [ 1, 2 ] is a one-element list of a tuple
       "FR0100", Category.Correctness // an unfinished branch returning a plausible value
       "FR0105", Category.Correctness // unchecked arithmetic on near-limit constants wraps silently
+      "FR0110", Category.Correctness // incomplete DU match gains explicit raising arms (FS0025 made loud)
 
       // --- performance: correct, but doing work it need not
       "FR0004", Category.Performance
@@ -146,6 +147,13 @@ let private categories =
       "FR0043", Category.Idiom
       "FR0050", Category.Idiom // measured: List/Array.sum run LEVEL with the loop, not faster
       "FR0107", Category.Idiom // exists/forall short-circuit where the flag loop kept iterating
+      "FR0108", Category.Idiom // && true contributes nothing; the expression is the other operand
+      "FR0109", Category.Idiom // a || a is a, when a is visibly call-free; often a copy-paste worth a look
+      "FR0112", Category.Idiom // if/elif over one ident vs literals is a match spelled longhand
+      "FR0113", Category.Idiom // nested ifs with the same else (or none) merge into one &&
+      "FR0114", Category.Idiom // pyramid flip: short exit first (default off - house style)
+      "FR0115", Category.Idiom // base case first behind a compound guard: advice on arm order
+      "FR0116", Category.Idiom // a non-recursive member leaves its let rec group
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom
@@ -172,6 +180,7 @@ let private categories =
       "FR0096", Category.Cosmetic
       "FR0097", Category.Cosmetic
       "FR0098", Category.Cosmetic
+      "FR0111", Category.Cosmetic // else-holding-an-if is elif spelled tall
       "FR0099", Category.Cosmetic ]
     |> Map.ofList
 
@@ -190,3 +199,6 @@ let codesIn (wanted: Set<Category>) =
 
 /// Every code the catalog knows, for tests that check nothing was forgotten.
 let known = categories |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+
+/// Every rule as (code, category) — the machine-readable catalog.
+let allRules = categories |> Map.toList

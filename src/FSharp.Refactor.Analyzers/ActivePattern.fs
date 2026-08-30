@@ -64,13 +64,15 @@ let private (|GuardFunction|_|) (e: SynExpr) =
 /// let/use bindings, lambda parameters, for-loop variables, or a match
 /// pattern binding it directly after `|`.
 let private locallyBound (declText: string) (name: string) =
-    let n = Regex.Escape name
+    // identifierPattern, not \b: F# names may end in a prime, where \b
+    // finds no boundary
+    let n = identifierPattern name
 
-    [ $@"let[^\n=]*\b{n}\b"
-      $@"use[^\n=]*\b{n}\b"
-      $@"fun[^\n>]*\b{n}\b"
-      $@"for\s+{n}\b"
-      $@"\|\s*{n}\b\s*(->|when)" ]
+    [ $@"let[^\n=]*{n}"
+      $@"use[^\n=]*{n}"
+      $@"fun[^\n>]*{n}"
+      $@"for\s+{n}"
+      $@"\|\s*{n}\s*(->|when)" ]
     |> List.exists (fun pattern -> Regex.IsMatch(declText, pattern))
 
 let private capitalize (name: string) =

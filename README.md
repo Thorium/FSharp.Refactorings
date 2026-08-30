@@ -38,7 +38,7 @@ Point it at whatever you have — the kind is read off the path:
 |---|---|
 | `Your.fsproj` | one project |
 | `Thing.fs` | one source file — its project is found and analysed, but only that file is edited |
-| `build.fsx` | one script — no MSBuild step at all, so it starts instantly |
+| `build.fsx` | one script — no MSBuild step at all, so it starts instantly. A script with unresolvable references is not refused: the syntactic rules still run over it (an fsi-run script may reference things only the run supplies) |
 | `Your.sln`, `Your.slnx` | every F# project the solution lists |
 | `src/` | the solution in that directory, or the projects beneath it |
 | `"src/**/*.fsproj"` | everything the glob matches |
@@ -146,7 +146,87 @@ if applying ever introduces one.
 | `--help` | The same list, from the tool itself (`-h` and `/?` also work). |
 | `--api-changes` | Also apply the cross-file fixes described below. |
 | `--no-if-defs` | Never emit `#if`/`#else`/`#endif` pairs for capability fixes on multi-targeted projects (see below). The fixes stay plain, and any the legacy frameworks reject are put back by the final build check. |
-| `--report <file>` | Write every finding the run surfaced as SARIF 2.1.0 — the format GitHub code scanning renders as inline PR annotations. Pairs naturally with `--dry-run` for a CI lint gate. |
+| `--report <file>` | Write every finding the run surfaced as SARIF 2.1.0 — the format GitHub code scanning renders as inline PR annotations. Pairs naturally with `--dry-run` for a CI lint gate. See [CI setup](#ci-setup-sarif) below. |
+| `--baseline <sarif>` | The ratchet: findings whose fingerprints appear in this earlier `--report` output are neither reported nor fixed — only what is NEW surfaces. Fingerprints hash the rule code, file name and normalized surrounding source, so they survive line shifts, other edits in the file, and different checkouts. Triage once, ratchet forever. |
+| `--fail-on-findings` | Exit 3 when any finding survives the filters — the hard CI gate. The full exit contract: 0 clean, 1 analysis or apply failure, 2 usage error, 3 findings (only with this flag). |
+| `--format json` | Machine-readable stdout: progress prose moves to stderr and the run's findings leave as one JSON document (code, severity, fixable, position, message, fingerprint, source snippet). The default output stays human-readable. |
+| `--rules` | Print the rule catalog — code, category, enabled-by-default (honors `--format json`). |
+| `--mcp` | Serve the tool as an MCP server over stdio (newline-delimited JSON-RPC, no extra dependencies): tools `analyze` (target, codes/categories, parseOnly, apply) and `list_rules`. One warm typechecker lives across calls, so the first analyze pays the reference parse and the rest answer from a hot cache — the economics agent loops need. |
+| `--parse-only` | For a codebase that cannot COMPILE on this machine — a type provider needing its database, references that cannot restore. No MSBuild, no reference resolution: sources come straight from the fsproj's `<Compile>` items, and only the ~40 analyzers that never consult the typechecker run (the typed rules are excluded outright, not trusted to self-silence). Safety shifts accordingly: instead of a build, the gate is that a pass must not RAISE the compilation's error count over its baseline, and the usual parse-level protections (comment guard, overlap holds) still apply. Limitations: `#if` branches behind conditional or computed `DefineConstants` are not parsed, wildcard `<Compile>` globs are refused, and multi-framework passes collapse to one. Review the diff — the all-frameworks build arbiter is exactly what this mode does without. |
+
+### CI setup (SARIF)
+
+A dry run plus `--report` gives CI the full findings list without
+touching a file; uploading the SARIF turns each finding into an inline
+annotation on the pull request. Paths in the report are relative to the
+working directory, so run the tool from the repository root (that is
+what code scanning matches blobs by):
+
+```yaml
+  refactor-lint:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write     # required by upload-sarif
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+      - run: dotnet tool install --global fsharp-refactor
+      - run: fsharp-refactor src/Your.fsproj --dry-run --report findings.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: findings.sarif
+          category: fsharp-refactor
+```
+
+Two honest notes. First, a dry run exits 0 whether or not it found
+anything — findings are hints, not errors, and only a broken build or a
+crashed run fails the step. Annotations therefore inform without
+blocking; to make findings HARD-fail the job, add an explicit check:
+
+```bash
+jq -e '.runs[0].results | length == 0' findings.sarif
+```
+
+Second, scope the gate before turning it on: `--categories
+correctness,performance` keeps the signal defensible on a shared
+repository (see [Someone else's codebase](#someone-elses-codebase)),
+and a `fsharprefactor.json` turns off anything the team has decided
+against. The suppression comments described under
+[Configuration](#configuration) silence individual findings at the
+line, for both the gate and editors, in one place.
+
+#### Running alongside other analyzer packages
+
+The `fsharp-analyzers` host loads every analyzer assembly it is
+pointed at, so one invocation — and one FCS typecheck, the expensive
+part — can run this package together with others built on the same
+SDK, all findings landing in one report. With
+[G-Research's analyzers](https://github.com/G-Research/fsharp-analyzers),
+whose current release pins the same `FSharp.Analyzers.SDK` as this
+package (0.37.2):
+
+```bash
+fsharp-analyzers --project src/Your.fsproj \
+  --analyzers-path ~/.nuget/packages/fsharp.refactor.analyzers/<version>/analyzers/dotnet/fs \
+                   ~/.nuget/packages/g-research.fsharp.analyzers/<version>/analyzers/dotnet/fs \
+  --code-root . --report findings.sarif
+```
+
+Rule codes are disjoint (`FR*` here, `GRA*` there), and the
+`fsharpanalyzer: ignore-line` suppression comments work for their codes
+too — the machinery lives in the shared SDK, not in any one package.
+
+The SDK is strict about version agreement between the host and every
+analyzer assembly it loads; a mismatch means analyzers silently fail
+to load rather than erroring loudly. The day the two packages pin
+different SDK minors, fall back to separate CI jobs — each producing
+its own SARIF and uploading under its own `category:` (code scanning
+keeps the streams apart) — at the cost of typechecking the project
+once per job. Applying fixes stays this package's own tool either way:
+`fsharp-refactor` applies only its own rules, and report-only
+analyzers have nothing to collide with.
 
 ### Someone else's codebase
 
@@ -155,10 +235,10 @@ Every rule is one of four kinds, shown in the last column of
 
 | Kind | | Count |
 |---|---|---|
-| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 30 |
+| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 31 |
 | `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 29 |
-| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 33 |
-| `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 14 |
+| `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 40 |
+| `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 15 |
 
 This matters when the repository is not yours. Running everything over a
 project you do not maintain and opening a pull request from the result is a
@@ -327,7 +407,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0036 | Fragile runtime type comparisons (notes): `GetType().Name = "..."` breaks silently on renames/namespaces — compare types instead; `x.GetType() = typeof<T>` is exact-type equality — `x :? T` if subtypes are fine | correctness |
 | FR0037 | Build-once types constructed inside a loop: `ConcurrentDictionary`, `HttpClient`, `JsonSerializerOptions` (CA1869), `Regex`, `SearchValues.Create` (CA1870) — all expensive by design; note suggests hoisting out or making static. `HttpClient` gets its own wording: per-iteration construction exhausts sockets under load, and the right lifetime (a shared instance, or `IHttpClientFactory` under DI) is the author's call | performance |
 | FR0038 | Char overloads for single-character strings (CA1834/1847/1865-67): `s.Contains "x"` → `s.Contains 'x'` and `sb.Append "x"` → `sb.Append 'x'` (both ordinal already — fix); `s.StartsWith("x", StringComparison.Ordinal)` → `s.StartsWith('x')` (fix); bare `StartsWith`/`EndsWith`/`IndexOf` are culture-sensitive where the char overload is ordinal, so those get an advisory note only; receivers typed-gated to `String`/`StringBuilder` | performance |
-| FR0039 | Allocating case-insensitive comparisons (CA1862, note): `a.ToLower() = b.ToLower()` and `s.ToLower().StartsWith "abc"` allocate lowered copies just to compare; `String.Equals(a, b, StringComparison...IgnoreCase)` / the comparison overloads are allocation-free — comparison type stays the author's deliberate choice | performance |
+| FR0039 | Allocating case-insensitive comparisons (CA1862): `x.ToLower() = "literal"` gets a FIX to `String.Equals(x, "literal", StringComparison.OrdinalIgnoreCase)` when the literal is pure ASCII — measured across all of Unicode, the two spellings then diverge for exactly two compatibility characters no config value or role string contains (U+212A KELVIN SIGN when the literal has a k; U+017F LONG S in the upper direction when it has an s); qualified spelling when the file lacks `open System`, `<>` wraps in `not`. In EDITORS the light bulb offers a second action — the culture-aware `InvariantCultureIgnoreCase` spelling — while the CLI auto-applies only the ordinal primary: a bulk tool does not guess at linguistics. FR0031 offers the same pairing: interpolation primary, one explicit String.Concat call as the editor alternative. Everything else — non-ASCII literals, `a.ToLower() = b.ToLower()`, `s.ToLower().StartsWith "abc"` (the comparison overloads are netstandard2.1+) — stays a note: the comparison type is the author's deliberate choice | performance |
 | FR0040 | Redundant membership guards (CA1853/1868, fix): `if d.ContainsKey k then d.Remove k \|> ignore` → `d.Remove k \|> ignore`, `if not (s.Contains x) then s.Add x \|> ignore` → `s.Add x \|> ignore` — the operations already return `false` on a miss; typed-gated to `Dictionary`/`HashSet`/`SortedSet` | performance |
 | FR0041 | `Array.sum/average/min/max/contains` on `int[]`/`int64[]` is a scalar loop; on .NET 8+ System.Linq's `Sum()`/`Average()`/`Min()`/`Max()`/`Contains()` are SIMD-vectorized (`Contains` measured ~5x at 1000 elements, ~6x at 100k; note only: LINQ `Sum` throws on overflow where `Array.sum` wraps; floats excluded — NaN semantics differ; quiet inside `query { }`, where the code is a quotation for a provider's translator and the LINQ spelling may not translate) | performance |
 | FR0042 | Fully applied `sprintf` → typed interpolated string (`sprintf "asdf %s" x` → `$"asdf %s{x}"`); specifiers are kept verbatim so the output is byte-identical; guards: regular literal with no `{`/`}`, simple arguments only, no `%a`/`%t`/`*`-widths, partial applications never match | idiom |
@@ -340,6 +420,15 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0049 | Sync-over-async (CA1849/VSTHRD): `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, `Async.RunSynchronously`, `Thread.Sleep` **inside** `async`/`task { }` invite thread-pool starvation and deadlocks (typed-gated receivers; `Thread.Sleep n` gets a `do! Async.Sleep n` / `do! Task.Delay n` fix in statement position); `.Result`/`.Wait()`/`GetResult()` **outside** CEs get the boundary note — wrap in `task { }` or use the sync API (`Async.RunSynchronously` outside a CE is F#'s intended sync boundary and stays quiet) | correctness |
 | FR0050 | `let mutable total = 0` + `for x in xs do total <- total + x` → `let total = xs \|> List.sum` (fix); projections → `sumBy`, general combines → `fold (fun acc x -> ...) init` — same expression, same bindings, no mutable. The module matches the source's resolved kind: measured, `List.sum`/`Array.sum` run LEVEL with the loop while `Seq.sum` is ~50% slower on a list, so this is an idiom rule, and the rewrite never spells `Seq` when it knows better | idiom |
 | FR0107 | `let mutable found = false` + `for x in xs do if p x then found <- true` → `let found = xs \|> List.exists (fun x -> p x)` (fix); the `true`-initialized dual becomes `forall` with the predicate negated. Tightly gated because `exists` SHORT-CIRCUITS where the flag loop kept iterating: the loop body must be exactly the one `if` (no `else`, no second statement), the predicate must never mention the flag and must be visibly effect-free (any assignment, sequencing, statement construct or `ignore` inside it disqualifies), nothing may reassign the flag afterward, and the source must resolve to a real List/Array/Seq. Module-resolved like FR0050; measured level with the loop on the no-hit worst case, faster on any hit | idiom |
+| FR0108 | Boolean identity literals drop (fix): `x && true`, `true && x`, `x \|\| false`, `false \|\| x` — the literal contributes nothing, the expression is the other operand. `x && false` and `true \|\| x` stay: their value is constant but `x`'s evaluation (and its effects) changes. Deliberately fires inside `query { }` too — removing a node leaves a strictly simpler tree of shapes the translator already accepted | idiom |
+| FR0110 | An incomplete DU match with no wildcard (the FS0025 warning shape) gains the missing arm(s) as `\| Case -> raise (System.NotImplementedException())` (fix) — FR0072's dual: that rule expands a wildcard hiding real cases, this one closes a match that has none. Coverage counts only unguarded plain case patterns (a `when` may reject); at most three missing cases, past that a wildcard was probably the intent; multi-line matches only, new arms adopt the last clause's `\|` column | correctness |
+| FR0111 | `else` holding a whole nested `if` flattens to `elif` (fix) — only when the `else` sits at the outer `if`'s column (offside rules for `elif`) and nothing but whitespace separates the keywords | cosmetic |
+| FR0112 | An if/elif chain comparing ONE identifier against distinct int/string/char literals becomes a `match` (fix). The scrutinee must be a bare identifier — a call re-evaluated per comparison today would be evaluated once after the rewrite — and every `=` must resolve to FSharp.Core's (match patterns use structural equality) | idiom |
+| FR0113 | Nested ifs merge into one `&&` (fix), in the two exactly-semantics-preserving shapes: identical else-branches (`if a then (if b then X else E) else E` — one branch runs either way, so even an effectful E is unchanged), and no else at all (unit result). An `\|\|`-topped condition gains parens before joining the `&&`. The tempting third shape — inner if without else while the outer has one — is deliberately absent: the merge would run E where the original ran nothing | idiom |
+| FR0114 | Pyramid-of-doom flip (fix, OFF by default): a then-branch of 20+ lines behind an else of 3 or fewer (both thresholds configurable, see Configuration) flips — condition negated (an existing `not` unwraps instead), short exit first, big block last. Off because plenty of teams hold the exact opposite style (happy path first); turn on per repository when short-exit-first IS the house style | idiom |
+| FR0115 | Base case first behind a compound guard (note): `match v with \| x when a && b -> base \| _ -> err` hides the base case behind a guard every new error condition must be threaded into; inverted — error guards first, base case as the final arm — the match reads top-down and extends by appending. Advice only: which case is "the base" is intent | idiom |
+| FR0116 | A member of a `let rec ... and` group that references no sibling takes part in no recursion and moves out, as a plain `let` above the group (fix) — callers in the group still see it, and it can call nothing in the group by construction. A self-recursive member (calls itself, nobody else) leaves as its own `let rec`; when the group's HEAD is the non-recursive one nothing moves at all — its `let rec` becomes `let` and the next binding is re-crowned `let rec`. No attributes on moved bindings, membership judged conservatively (any textual mention of a sibling keeps it in) | idiom |
+| FR0109 | Idempotent duplicates collapse (fix): `a \|\| a` and `a && a` → `a` — only when the operands are textually identical and contain no function or method call (operators, `not`, property chains and indexing pass). `tryConnect () \|\| tryConnect ()` is the deliberate retry idiom and never matches; the message also flags the likelier truth, a copy-paste that meant another operand | idiom |
 | FR0051 | `acc <- acc @ [x]` / `acc <- Array.append acc [\|x\|]` inside a loop copies the accumulator per iteration — O(n²) (note): use a ResizeArray, or cons and `List.rev`. Also `acc <- acc + s` on a STRING (typed-proven) in any loop — the slowest string builder measured, 36x a StringBuilder at 1000 pieces; the note names StringBuilder or collect-then-`String.concat` | performance |
 | FR0052 | `q.Count = 0` on `ConcurrentQueue`/`Stack`/`Bag` → `q.IsEmpty` (CA1836, fix): their `Count` walks segments, `IsEmpty` peeks | performance |
 | FR0053 | `BitConverter.ToString(bytes).Replace("-", "")` → `System.Convert.ToHexString bytes` (CA1872, fix) | performance |
@@ -414,6 +503,19 @@ trailing commas are tolerated:
 }
 ```
 
+Rules with tunable thresholds read numeric properties from the same
+object-valued entries. FR0114 is the first: `thenAtLeast` (default 20)
+is how long a then-branch must be before flipping is suggested, and
+`elseAtMost` (default 3) is how short the else must stay:
+
+```json
+{
+  "rules": {
+    "FR0114": { "enabled": true, "thenAtLeast": 30, "elseAtMost": 2 }
+  }
+}
+```
+
 Paths can be excluded too — additively over the built-in defaults
 (`paket-files`, `.paket`, `node_modules`), which cover generated and
 vendored code a compilation nonetheless includes:
@@ -448,6 +550,31 @@ let inline dodgy (s: string) = s.Substring(0, 3) // fsharpanalyzer: ignore-line 
 // fsharpanalyzer: ignore-region-start FR0002
 // fsharpanalyzer: ignore-region-end
 ```
+
+Suppression comments are also easy to reach for, and a team may not want
+a correctness finding silenceable with one line of punctuation the way a
+naming nit is. The `"suppressions"` policy draws that line:
+
+```json
+{ "suppressions": "no-correctness" }
+```
+
+- `"all"` (default) — every suppression comment silences its finding.
+- `"no-correctness"` — comments on correctness-category rules are
+  reported anyway; idiom, cosmetic, and performance suppressions still
+  work. An overridden finding is never auto-FIXED — the tool does not
+  rewrite code over someone's explicit comment — it is reported (and
+  fails `--fail-on-findings`) until addressed or the comment is judged
+  worth honoring.
+- `"none"` — every suppression comment is reported anyway.
+
+`--honor-suppressions` on the command line overrides the policy to
+`"all"` for that run. A repo that wants suppressions inert on developer
+machines but honored by the pipeline commits `"no-correctness"` (or
+`"none"`) in its config and passes the flag in CI only. Whatever the
+policy, the run summary counts what comments silenced — suppression is
+never silent. Note the policy only governs this tool: editors honor the
+SDK's comments natively, so the light bulb stays silenceable regardless.
 
 A disabled rule skips its analysis entirely, so the file also works as a
 performance lever on large codebases. Internally all analyzers share one

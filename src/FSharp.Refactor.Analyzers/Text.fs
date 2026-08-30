@@ -28,6 +28,13 @@ let isSingleLine (r: range) = r.StartLine = r.EndLine
 let identText (ids: Ident list) =
     ids |> List.map (fun i -> i.idText) |> String.concat "."
 
+/// True when a dotted path ends `owner.meth` — `String.Format`,
+/// `Async.RunSynchronously` — without indexing into the ident list.
+let pathEndsWith (owner: string) (meth: string) (ids: Ident list) =
+    match List.rev ids with
+    | m :: o :: _ -> m.idText = meth && o.idText = owner
+    | _ -> false
+
 /// Where a new attribute belongs on a declaration.
 ///
 /// A declaration's range starts at its XML doc, so inserting at the range
@@ -397,3 +404,32 @@ let insideQuotedCode (path: SyntaxNode list) =
         | SyntaxNode.SynExpr(SynExpr.App(funcExpr = SynExpr.Ident id)) ->
             id.idText.EndsWith("query", System.StringComparison.OrdinalIgnoreCase)
         | _ -> false)
+
+/// Does the file `open System` at any top-level line? Textual, cheap and
+/// deliberately exact: `open System.IO` does not bring System.String into
+/// scope, and a fix emitted without the open must spell `System.` out.
+let opensSystemNamespace (source: ISourceText) =
+    seq { 0 .. source.GetLineCount() - 1 }
+    |> Seq.exists (fun l -> source.GetLineString(l).Trim() = "open System")
+
+/// A regex matching `name` as a WHOLE F# identifier. `\b<name>\b` is wrong
+/// for this language: identifiers may end in primes (`visit'`), and after
+/// a `'` the \b anchor finds no boundary — `\bvisit'\b` never matches
+/// `visit' exp` at all, which let a recursive reference slip past a
+/// membership check (caught adversarially on Linq.Expression.Optimizer).
+let identifierPattern (name: string) =
+    @"(?<![\w'])" + System.Text.RegularExpressions.Regex.Escape name + @"(?![\w'])"
+
+/// Every comment in a parse tree, as (range, text) — shared by the apply
+/// layer's comment guard and its editor-side twin.
+let commentsWithText (parseTree: ParsedInput) (source: ISourceText) =
+    let ranges =
+        match parseTree with
+        | ParsedInput.ImplFile(ParsedImplFileInput(trivia = trivia)) -> trivia.CodeComments
+        | ParsedInput.SigFile(ParsedSigFileInput(trivia = trivia)) -> trivia.CodeComments
+        |> List.map (fun c ->
+            match c with
+            | FSharp.Compiler.SyntaxTrivia.CommentTrivia.LineComment r
+            | FSharp.Compiler.SyntaxTrivia.CommentTrivia.BlockComment r -> r)
+
+    ranges |> List.map (fun r -> r, textOfRange source r)

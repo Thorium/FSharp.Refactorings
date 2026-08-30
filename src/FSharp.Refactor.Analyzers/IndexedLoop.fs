@@ -184,7 +184,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                 let element =
                     [ "x"; "item"; "element" ]
-                    |> List.tryFind (fun name -> not (Regex.IsMatch(loopText, $@"\b{name}\b")))
+                    |> List.tryFind (fun name -> not (Regex.IsMatch(loopText, identifierPattern name)))
 
                 match element with
                 | Some element ->

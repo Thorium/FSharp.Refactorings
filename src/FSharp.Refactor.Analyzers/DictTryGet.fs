@@ -20,8 +20,13 @@
 ///     evaluated once, which must not change behavior
 ///   - the then-branch must use the indexer (`d.[key]` or `d[key]`) at least
 ///     once, and the else-branch must not use it at all
-///   - `value` must not already occur in either branch (it becomes the bound
-///     name); branches must be single-line; elif positions are skipped
+///   - `value` must not already occur in the spliced branch text (it
+///     becomes the found-arm's binder); the then-branch must be
+///     single-line; elif positions are skipped IN PLACE — but an
+///     if/elif/.../else chain still converges: the outer if rewrites
+///     alone, carrying the elif chain verbatim into the fallthrough arm
+///     with its leading `elif` spelled back to `if`, and the next
+///     fix-then-reanalyze pass peels the next level
 ///   - the file must have no type errors
 module FSharp.Refactor.DictTryGet
 
@@ -198,13 +203,49 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     let containerTypeName = containerTypeName source check
 
     // shared by the if-form and the `match d.ContainsKey k with true/false` form
+    // A multi-line else-branch (an elif CHAIN above all) is carried into
+    // the fallthrough arm VERBATIM, re-indented, with a leading `elif`
+    // spelled back to `if` — which the next fix-then-reanalyze pass then
+    // rewrites in turn, peeling the chain one level per pass. Returns None
+    // when a continuation line cannot take the shift.
+    let reindentedElse (elseExpr: SynExpr) (targetColumn: int) =
+        let raw = textOfRange source elseExpr.Range
+        let delta = targetColumn - elseExpr.Range.StartColumn
+        let lines = raw.Replace("\r", "").Split '\n'
+
+        let shifted =
+            [ for i, line in Seq.indexed lines ->
+                  if i = 0 then
+                      let line =
+                          if line.StartsWith "elif" then
+                              "if" + line.Substring 4
+                          else
+                              line
+
+                      Some(String.replicate targetColumn " " + line)
+                  elif line.Trim() = "" then
+                      Some ""
+                  elif delta >= 0 then
+                      Some(String.replicate delta " " + line)
+                  elif line.Length >= -delta && line.Substring(0, -delta).Trim() = "" then
+                      Some(line.Substring(-delta))
+                  else
+                      None ]
+
+        if shifted |> List.contains None then
+            None
+        else
+            Some(shifted |> List.choose id |> String.concat "\n")
+
     let handleCandidate (whole: SynExpr) (containerIds: Ident list) (keyExpr: SynExpr) thenExpr elseExpr =
+        let elseIsInline =
+            isSingleLine (elseExpr: SynExpr).Range && isSafeInline elseExpr
+
         if
             isPureAtom keyExpr
             && isSingleLine (thenExpr: SynExpr).Range
-            && isSingleLine (elseExpr: SynExpr).Range
             && isSafeInline thenExpr
-            && isSafeInline elseExpr
+            && (elseIsInline || not (spansDirective source whole.Range))
         then
             let container = pathText containerIds
             let key = textOfRange source keyExpr.Range
@@ -212,8 +253,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             let elseUses = indexerUses source container key elseExpr
 
             let mentionsValue =
+                // `value` becomes the found-arm's binder; the fallthrough
+                // arm binds nothing, but the inline emission splices both
+                // texts, so the inline path keeps the historical check
                 Regex.IsMatch(textOfRange source thenExpr.Range, @"\bvalue\b")
-                || Regex.IsMatch(textOfRange source elseExpr.Range, @"\bvalue\b")
+                || (elseIsInline && Regex.IsMatch(textOfRange source elseExpr.Range, @"\bvalue\b"))
 
             if not thenUses.IsEmpty && elseUses.IsEmpty && not mentionsValue then
                 match containerTypeName containerIds with
@@ -235,26 +279,48 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                 "_"
 
                         let replacement =
-                            if isSingleLine whole.Range then
-                                $"%s{header} | %s{foundPat} -> %s{thenText} | %s{missingPat} -> %s{elseText}"
-                            else
+                            if elseIsInline && isSingleLine whole.Range then
+                                Some $"%s{header} | %s{foundPat} -> %s{thenText} | %s{missingPat} -> %s{elseText}"
+                            elif elseIsInline then
                                 let indent = String.replicate whole.Range.StartColumn " "
 
-                                sprintf
-                                    "%s\n%s| %s -> %s\n%s| %s -> %s"
-                                    header
-                                    indent
-                                    foundPat
-                                    thenText
-                                    indent
-                                    missingPat
-                                    elseText
+                                Some(
+                                    sprintf
+                                        "%s\n%s| %s -> %s\n%s| %s -> %s"
+                                        header
+                                        indent
+                                        foundPat
+                                        thenText
+                                        indent
+                                        missingPat
+                                        elseText
+                                )
+                            else
+                                // multi-line else (an elif chain above all):
+                                // the fallthrough arm carries it verbatim,
+                                // and the next pass peels the next level
+                                let indent = String.replicate whole.Range.StartColumn " "
 
-                        suggestions.Add
-                            { Range = whole.Range
-                              OriginalText = textOfRange source whole.Range
-                              ReplacementText = replacement
-                              Concurrent = typeName = ConcurrentDictionaryType }
+                                reindentedElse elseExpr (whole.Range.StartColumn + 4)
+                                |> Option.map (fun elseBlock ->
+                                    sprintf
+                                        "%s\n%s| %s -> %s\n%s| %s ->\n%s"
+                                        header
+                                        indent
+                                        foundPat
+                                        thenText
+                                        indent
+                                        missingPat
+                                        elseBlock)
+
+                        match replacement with
+                        | Some replacement ->
+                            suggestions.Add
+                                { Range = whole.Range
+                                  OriginalText = textOfRange source whole.Range
+                                  ReplacementText = replacement
+                                  Concurrent = typeName = ConcurrentDictionaryType }
+                        | None -> ()
                     | None -> ()
                 | _ -> ()
 

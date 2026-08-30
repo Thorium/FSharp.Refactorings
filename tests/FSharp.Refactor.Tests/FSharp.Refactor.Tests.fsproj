@@ -42,6 +42,8 @@
     <Compile Include="ObjectDesignTests.fs" />
     <Compile Include="OptionMatchTests.fs" />
     <Compile Include="LoopPerfTests.fs" />
+    <Compile Include="BooleanSimplifyTests.fs" />
+    <Compile Include="IfRestructureTests.fs" />
     <Compile Include="PythonSmellTests.fs" />
     <Compile Include="CharOverloadTests.fs" />
     <Compile Include="CaseInsensitiveTests.fs" />

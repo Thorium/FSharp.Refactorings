@@ -73,8 +73,11 @@ let parse (json: string) : Map<string, bool> =
 ///   USER'S code slower (+53% and a 24-byte closure per call on the
 ///   gate's pair) — and among the highest-churn. Nice to read, costs to
 ///   run: an opt-in, not a default.
+///   FR0114 (pyramid flip) reorders branches for a style — short exit
+///   first — that plenty of teams hold exactly the other way around
+///   (happy path first). An opt-in, not a default.
 let private defaultOff =
-    set [ "fr0002"; "optionmodule"; "fr0099"; "trailingsemicolon" ]
+    set [ "fr0002"; "optionmodule"; "fr0099"; "trailingsemicolon"; "fr0114"; "pyramidflip" ]
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins
 /// over a name entry; absent rules are enabled unless default-off.
@@ -170,12 +173,86 @@ let parseIgnorePaths (json: string) : string list =
 type ConfigData =
     { Rules: Map<string, bool>
       Hints: string list
-      IgnorePaths: string list }
+      IgnorePaths: string list
+      /// Numeric knobs per rule, from object-valued rule entries:
+      ///     { "FR0114": { "enabled": true, "thenAtLeast": 30 } }
+      /// Keys are lowercased rule code (or analyzer name) then parameter
+      /// name; every rule documents its own knobs and their defaults.
+      Parameters: Map<string, Map<string, int>>
+      /// The team's suppression-comment policy, `"suppressions"`:
+      ///   "all"            every suppression comment silences its finding
+      ///                    (the default, and what editors do regardless)
+      ///   "no-correctness" comments on correctness-category rules are
+      ///                    reported anyway (though never auto-fixed)
+      ///   "none"           every suppression comment is reported anyway
+      Suppressions: string }
+
+/// The `"suppressions"` policy string; unknown values read as "all" so a
+/// typo cannot silently harden a run.
+let parseSuppressions (json: string) : string =
+    try
+        let options =
+            JsonDocumentOptions(CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true)
+
+        use doc = JsonDocument.Parse(json, options)
+
+        match doc.RootElement.TryGetProperty "suppressions" with
+        | true, v when v.ValueKind = JsonValueKind.String ->
+            match v.GetString().ToLowerInvariant() with
+            | "no-correctness" -> "no-correctness"
+            | "none" -> "none"
+            | _ -> "all"
+        | _ -> "all"
+    with
+    | :? JsonException
+    | :? InvalidOperationException -> "all"
+
+/// Numeric rule parameters from object-valued rule entries. Pure and
+/// total: anything malformed yields an empty map.
+let parseParameters (json: string) : Map<string, Map<string, int>> =
+    try
+        let options =
+            JsonDocumentOptions(CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true)
+
+        use doc = JsonDocument.Parse(json, options)
+        let root = doc.RootElement
+
+        let rulesElement =
+            match root.TryGetProperty "rules" with
+            | true, rules when rules.ValueKind = JsonValueKind.Object -> rules
+            | _ -> root
+
+        rulesElement.EnumerateObject()
+        |> Seq.choose (fun property ->
+            if property.Value.ValueKind = JsonValueKind.Object then
+                let knobs =
+                    property.Value.EnumerateObject()
+                    |> Seq.choose (fun knob ->
+                        if knob.Value.ValueKind = JsonValueKind.Number then
+                            match knob.Value.TryGetInt32() with
+                            | true, v -> Some(knob.Name.ToLowerInvariant(), v)
+                            | _ -> None
+                        else
+                            None)
+                    |> Map.ofSeq
+
+                if knobs.IsEmpty then
+                    None
+                else
+                    Some(property.Name.ToLowerInvariant(), knobs)
+            else
+                None)
+        |> Map.ofSeq
+    with
+    | :? JsonException
+    | :? InvalidOperationException -> Map.empty
 
 let private emptyConfig =
     { Rules = Map.empty
       Hints = []
-      IgnorePaths = [] }
+      IgnorePaths = []
+      Parameters = Map.empty
+      Suppressions = "all" }
 
 let private parseCache = ConcurrentDictionary<string, DateTime * ConfigData>()
 
@@ -230,7 +307,9 @@ let configFor (analyzedFile: string) : ConfigData =
                 lastWrite,
                 { Rules = parse content
                   Hints = parseHints content
-                  IgnorePaths = parseIgnorePaths content }
+                  IgnorePaths = parseIgnorePaths content
+                  Parameters = parseParameters content
+                  Suppressions = parseSuppressions content }
 
             let _, config =
                 parseCache.AddOrUpdate(
@@ -341,6 +420,24 @@ let private forcedOn (code: string) (analyzerName: string) =
 
             c.Equals(code, StringComparison.OrdinalIgnoreCase)
             || c.Equals(analyzerName, StringComparison.OrdinalIgnoreCase))
+
+/// A rule's numeric knob from the effective configuration, falling back
+/// to the rule's own default. Looked up under the rule CODE first, the
+/// analyzer name second, both case-insensitive.
+let parameterInt (analyzedFile: string) (code: string) (analyzerName: string) (knob: string) (fallback: int) : int =
+    let parameters = (configFor analyzedFile).Parameters
+    let knob = knob.ToLowerInvariant()
+
+    let lookup (key: string) =
+        parameters.TryFind(key.ToLowerInvariant()) |> Option.bind (Map.tryFind knob)
+
+    lookup code
+    |> Option.orElseWith (fun () -> lookup analyzerName)
+    |> Option.defaultValue fallback
+
+/// The effective suppression-comment policy for a file:
+/// "all" | "no-correctness" | "none".
+let suppressionPolicy (analyzedFile: string) : string = (configFor analyzedFile).Suppressions
 
 let isRuleEnabled (analyzedFile: string) (code: string) (analyzerName: string) : bool =
     not (isGeneratedFile analyzedFile)

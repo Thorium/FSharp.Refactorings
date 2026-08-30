@@ -1,0 +1,499 @@
+module FSharp.Refactor.Tests.IfRestructureTests
+
+open Xunit
+open FSharp.Refactor
+open FSharp.Refactor.Tests.Parsing
+open FSharp.Analyzers.SDK
+
+// ---- FR0111 else-if -> elif ----
+
+let private elseIfsIn (source: string) =
+    let tree, sourceText = parse source
+    IfRestructure.findElseIf tree sourceText
+
+[<Fact>]
+let ``an else holding a whole if flattens to elif`` () =
+    let source =
+        "module Test\nlet f (x: int) (y: int) =\n    if x = 1 then\n        0\n    else\n        if y = 2 then\n            1\n        else 2"
+
+    match elseIfsIn source with
+    | [ s ] ->
+        Assert.Equal("elif", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        Assert.Contains("elif y = 2 then", patched)
+    | other -> failwithf "Expected one elif suggestion, got %A" other
+
+[<Fact>]
+let ``an existing elif is left alone`` () =
+    Assert.Empty(elseIfsIn "module Test\nlet f (x: int) =\n    if x = 1 then 0\n    elif x = 2 then 1\n    else 2")
+
+[<Fact>]
+let ``an else with more than the if keeps its shape`` () =
+    Assert.Empty(
+        elseIfsIn
+            "module Test\nlet g () = ()\nlet f (x: int) (y: int) =\n    if x = 1 then\n        0\n    else\n        g ()\n        if y = 2 then 1 else 2"
+    )
+
+// ---- FR0112 equality chain -> match ----
+
+let private chainsIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    IfRestructure.findEqualityChains tree sourceText checkResults
+
+[<Fact>]
+let ``an equality chain over one ident becomes a match`` () =
+    let source =
+        "module Test\nlet f (x: int) =\n    if x = 1 then \"a\"\n    elif x = 2 then \"b\"\n    else \"c\""
+
+    match chainsIn source with
+    | [ s ] ->
+        Assert.Contains("match x with", s.ReplacementText)
+        Assert.Contains("| 1 -> \"a\"", s.ReplacementText)
+        Assert.Contains("| 2 -> \"b\"", s.ReplacementText)
+        Assert.Contains("| _ -> \"c\"", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one chain suggestion, got %A" other
+
+[<Fact>]
+let ``a chain over a CALL is left alone: re-evaluation is the semantics`` () =
+    Assert.Empty(
+        chainsIn
+            "module Test\nlet f (g: unit -> int) =\n    if g () = 1 then \"a\"\n    elif g () = 2 then \"b\"\n    else \"c\""
+    )
+
+[<Fact>]
+let ``mixed identifiers are left alone`` () =
+    Assert.Empty(
+        chainsIn
+            "module Test\nlet f (x: int) (y: int) =\n    if x = 1 then \"a\"\n    elif y = 2 then \"b\"\n    else \"c\""
+    )
+
+[<Fact>]
+let ``duplicate literals are left alone`` () =
+    Assert.Empty(
+        chainsIn "module Test\nlet f (x: int) =\n    if x = 1 then \"a\"\n    elif x = 1 then \"b\"\n    else \"c\""
+    )
+
+[<Fact>]
+let ``a two-arm string chain converts too`` () =
+    let source =
+        "module Test\nlet f (s: string) =\n    if s = \"json\" then 1\n    elif s = \"xml\" then 2\n    else 0"
+
+    match chainsIn source with
+    | [ s ] ->
+        Assert.Contains("| \"json\" -> 1", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one string chain suggestion, got %A" other
+
+// ---- FR0113 nested if merge ----
+
+let private mergesIn (source: string) =
+    let tree, sourceText = parse source
+    IfRestructure.findNestedIfMerges tree sourceText
+
+[<Fact>]
+let ``nested ifs with the same else merge`` () =
+    let source =
+        "module Test\nlet f (x: int) (y: int) =\n    if x = 1 then\n        if y = 2 then 1 else 3\n    else 3"
+
+    match mergesIn source with
+    | [ s ] ->
+        Assert.Contains("if x = 1 && y = 2 then", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one merge suggestion, got %A" other
+
+[<Fact>]
+let ``different elses are left alone`` () =
+    Assert.Empty(
+        mergesIn "module Test\nlet f (x: int) (y: int) =\n    if x = 1 then\n        if y = 2 then 1 else 3\n    else 4"
+    )
+
+[<Fact>]
+let ``inner else missing while outer has one is the semantic trap`` () =
+    // merging would run the outer else where the original ran NOTHING
+    Assert.Empty(
+        mergesIn
+            "module Test\nlet g () = ()\nlet f (x: int) (y: int) =\n    if x = 1 then\n        (if y = 2 then g ())\n    else g ()"
+    )
+
+[<Fact>]
+let ``both elses absent merges the unit shape`` () =
+    let source =
+        "module Test\nlet g () = ()\nlet f (x: int) (y: int) =\n    if x = 1 then\n        if y = 2 then g ()"
+
+    match mergesIn source with
+    | [ s ] ->
+        Assert.Contains("if x = 1 && y = 2 then", s.ReplacementText)
+        Assert.Contains("g ()", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one unit merge suggestion, got %A" other
+
+[<Fact>]
+let ``an or-condition gains parens before joining the and`` () =
+    let source =
+        "module Test\nlet f (x: int) (y: int) =\n    if x = 1 || x = 2 then\n        if y = 3 then 1 else 9\n    else 9"
+
+    match mergesIn source with
+    | [ s ] ->
+        Assert.Contains("(x = 1 || x = 2) && y = 3", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one parenthesized merge, got %A" other
+
+// ---- FR0110 missing DU cases ----
+
+let private missingIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    MissingCases.find tree sourceText checkResults
+
+/// Insertion fixes have a zero-width range: patch by splicing the text in.
+let private applyInsert (source: string) (s: MissingCases.Suggestion) =
+    let lines = source.Split '\n'
+
+    let offset =
+        (lines |> Seq.take (s.Range.StartLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
+        + s.Range.StartColumn
+
+    source.Substring(0, offset) + s.InsertText + source.Substring offset
+
+[<Fact>]
+let ``an incomplete DU match gains raising arms`` () =
+    let source =
+        "module Test\ntype Color = Red | Green | Blue\nlet f (c: Color) =\n    match c with\n    | Red -> \"r\"\n    | Green -> \"g\""
+
+    match missingIn source with
+    | [ s ] ->
+        Assert.Equal<string list>([ "Blue" ], s.MissingCases)
+        Assert.Contains("| Blue -> raise (System.NotImplementedException())", s.InsertText)
+        let patched = applyInsert source s
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one missing-case suggestion, got %A" other
+
+[<Fact>]
+let ``a wildcard arm completes the match`` () =
+    Assert.Empty(
+        missingIn
+            "module Test\ntype Color = Red | Green | Blue\nlet f (c: Color) =\n    match c with\n    | Red -> \"r\"\n    | _ -> \"x\""
+    )
+
+[<Fact>]
+let ``field-carrying cases arrive with a wildcard`` () =
+    let source =
+        "module Test\ntype Shape = Dot | Circle of int\nlet f (s: Shape) =\n    match s with\n    | Dot -> 0"
+
+    match missingIn source with
+    | [ s ] -> Assert.Contains("| Circle _ -> raise", s.InsertText)
+    | other -> failwithf "Expected one missing-case suggestion, got %A" other
+
+[<Fact>]
+let ``too many missing cases means a wildcard was the intent`` () =
+    Assert.Empty(missingIn "module Test\ntype N = A | B | C | D | E | F\nlet f (n: N) =\n    match n with\n    | A -> 0")
+
+[<Fact>]
+let ``guarded arms do not count as coverage`` () =
+    let source =
+        "module Test\ntype Color = Red | Green\nlet f (c: Color) =\n    match c with\n    | Red -> \"r\"\n    | Green when 1 > 0 -> \"g\""
+
+    match missingIn source with
+    | [ s ] -> Assert.Equal<string list>([ "Green" ], s.MissingCases)
+    | other -> failwithf "Expected the guarded case still missing, got %A" other
+
+// ---- FR0114 pyramid flip ----
+
+let private flipsIn (source: string) =
+    let tree, sourceText = parse source
+    IfRestructure.findPyramidFlips 20 3 tree sourceText
+
+let private bigThen =
+    [ for i in 1..22 -> $"        let v{i} = {i}" ] @ [ "        v1 + v22" ]
+    |> String.concat "\n"
+
+[<Fact>]
+let ``a large then behind a small else flips`` () =
+    let source =
+        $"module Test\nlet f (x: int) =\n    if x = 1 then\n{bigThen}\n    else\n        0"
+
+    match flipsIn source with
+    | [ s ] ->
+        Assert.StartsWith("if not (x = 1) then", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one flip suggestion, got %A" other
+
+[<Fact>]
+let ``an already negated condition unwraps instead of double negating`` () =
+    let source =
+        $"module Test\nlet f (x: int) =\n    if not (x = 1) then\n{bigThen}\n    else\n        0"
+
+    match flipsIn source with
+    | [ s ] -> Assert.StartsWith("if x = 1 then", s.ReplacementText)
+    | other -> failwithf "Expected one unwrapping flip, got %A" other
+
+[<Fact>]
+let ``a small then is left alone`` () =
+    Assert.Empty(flipsIn "module Test\nlet f (x: int) =\n    if x = 1 then\n        2\n    else\n        0")
+
+// ---- FR0115 guard order note ----
+
+let private guardNotesIn (source: string) =
+    let tree, sourceText = parse source
+    IfRestructure.findGuardOrderNotes tree sourceText
+
+[<Fact>]
+let ``a compound guard on the first arm before a wildcard is noted`` () =
+    match
+        guardNotesIn
+            "module Test\nlet f (v: int) (lo: int) (hi: int) =\n    match v with\n    | x when x >= lo && x <= hi -> \"base\"\n    | _ -> \"err\""
+    with
+    | [ n ] -> Assert.Equal("x", n.Variable)
+    | other -> failwithf "Expected one guard-order note, got %A" other
+
+[<Fact>]
+let ``a simple guard is not noted`` () =
+    Assert.Empty(
+        guardNotesIn "module Test\nlet f (v: int) (lo: int) =\n    match v with\n    | x when x >= lo -> \"base\"\n    | _ -> \"err\""
+    )
+
+// ---- FR0116 rec group extraction ----
+
+let private recGroupsIn (source: string) =
+    let tree, sourceText = parse source
+    RecGroup.find tree sourceText
+
+[<Fact>]
+let ``a member referencing no sibling leaves the group`` () =
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1) + x\nand f2 (y: int) = y + 1\nand f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1) - z"
+
+    match recGroupsIn source with
+    | [ s ] ->
+        Assert.Equal("f2", s.MemberName)
+        Assert.StartsWith("let f2", s.InsertText)
+    | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a member the group calls still leaves when it calls nobody`` () =
+    // f2 is CALLED by f1 but calls no member itself: moving it above the
+    // group keeps it in scope for the callers
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then f2 x else f1 (x - 1)\nand f2 (y: int) = y + 1"
+
+    match recGroupsIn source with
+    | [ s ] -> Assert.Equal("f2", s.MemberName)
+    | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a genuinely mutual member stays`` () =
+    Assert.Empty(
+        recGroupsIn
+            "module Test\nlet rec isEven (n: int) : bool = if n = 0 then true else isOdd (n - 1)\nand isOdd (n: int) : bool = if n = 0 then false else isEven (n - 1)"
+    )
+
+[<Fact>]
+let ``the extraction applies to a compiling result`` () =
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1) + x\nand f2 (y: int) = y + 1\nand f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1) - z"
+
+    match recGroupsIn source with
+    | [ s ] ->
+        // apply remove-then-insert (remove is later in the file; do it first)
+        let lines = source.Split '\n'
+
+        let offsetOf (line: int) (col: int) =
+            (lines |> Seq.take (line - 1) |> Seq.sumBy (fun l -> l.Length + 1)) + col
+
+        let removeStart = offsetOf s.RemoveRange.StartLine s.RemoveRange.StartColumn
+        let removeEnd = offsetOf s.RemoveRange.EndLine s.RemoveRange.EndColumn
+        let afterRemove = source.Substring(0, removeStart) + source.Substring removeEnd
+        let insertAt = offsetOf s.InsertRange.StartLine s.InsertRange.StartColumn
+
+        let patched =
+            afterRemove.Substring(0, insertAt) + s.InsertText + afterRemove.Substring insertAt
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a self-recursive member leaves as its own let rec`` () =
+    // adversarial: `fact` references itself but no sibling — extracting
+    // it as a plain `let` would not compile; the rec must survive
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f2 (x - 1) + f1 x\nand fact (n: int) : int = if n = 0 then 1 else n * fact (n - 1)\nand f2 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    match recGroupsIn source with
+    | [ s ] ->
+        Assert.Equal("fact", s.MemberName)
+        Assert.True s.IsSelfRecursive
+        Assert.StartsWith("let rec fact", s.InsertText)
+    | other -> failwithf "Expected one rec extraction, got %A" other
+
+let private headRecrownsIn (source: string) =
+    let tree, sourceText = parse source
+    RecGroup.findHeadRecrowns tree sourceText
+
+[<Fact>]
+let ``a head referencing no member is re-crowned in place`` () =
+    // f2/f3 are genuinely mutual; helper heads the group but calls
+    // nobody — two keyword rewrites split it off, nothing moves
+    let source =
+        "module Test\nlet rec helper (y: int) = y + 1\nand f2 (x: int) : int = if x = 0 then helper x else f3 (x - 1)\nand f3 (z: int) : int = if z = 0 then 0 else f2 (z - 1)"
+
+    match headRecrownsIn source with
+    | [ s ] ->
+        Assert.Equal("helper", s.MemberName)
+
+        let lines = source.Split '\n'
+
+        let offsetOf (line: int) (col: int) =
+            (lines |> Seq.take (line - 1) |> Seq.sumBy (fun l -> l.Length + 1)) + col
+
+        // apply back-to-front so earlier offsets stay valid
+        let replace (r: FSharp.Compiler.Text.range) (text: string) (s: string) =
+            s.Substring(0, offsetOf r.StartLine r.StartColumn)
+            + text
+            + s.Substring(offsetOf r.EndLine r.EndColumn)
+
+        let patched = source |> replace s.AndRange "let rec" |> replace s.LetRecRange "let"
+        Assert.Contains("let helper", patched)
+        Assert.Contains("let rec f2", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one head re-crown, got %A" other
+
+[<Fact>]
+let ``a self-recursive head keeps its crown`` () =
+    Assert.Empty(
+        headRecrownsIn
+            "module Test\nlet rec loop (n: int) : int = if n = 0 then 0 else loop (n - 1)\nand f2 (x: int) : int = if x = 0 then 1 else f3 (x - 1)\nand f3 (z: int) : int = if z = 0 then 0 else f2 (z - 1)"
+    )
+
+[<Fact>]
+let ``a head referencing a member stays crowned`` () =
+    Assert.Empty(
+        headRecrownsIn
+            "module Test\nlet rec isEven (n: int) : bool = if n = 0 then true else isOdd (n - 1)\nand isOdd (n: int) : bool = if n = 0 then false else isEven (n - 1)"
+    )
+
+[<Fact>]
+let ``an and-extraction in the group defers the head re-crown`` () =
+    // both f2 (and-position) and helper (head) are extractable; the two
+    // fixes would overlap around the group's start, so the head waits
+    // for the next pass
+    let source =
+        "module Test\nlet rec helper (y: int) = y + 1\nand f2 (w: int) = w * 2\nand f3 (z: int) : int = if z = 0 then 0 else f3 (z - 1)"
+
+    Assert.NotEmpty(recGroupsIn source)
+    Assert.Empty(headRecrownsIn source)
+
+[<Fact>]
+let ``a chain with no terminal else is left alone`` () =
+    // adversarial: the trailing elif's text starts with the KEYWORD, and
+    // splicing it into a wildcard arm produced invalid code before the gate
+    Assert.Empty(
+        chainsIn
+            "module Test\nlet mutable sink = 0\nlet g (x: int) =\n    if x = 1 then sink <- 1\n    elif x = 2 then sink <- 2\n    elif x = 3 then sink <- 3"
+    )
+
+[<Fact>]
+let ``a doc comment above the extracted member travels with it`` () =
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1)\n/// Adds one; used by callers outside the group.\nand f2 (y: int) = y + 1\nand f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    match recGroupsIn source with
+    | [ s ] ->
+        Assert.StartsWith("/// Adds one", s.InsertText)
+        Assert.Contains("let f2", s.InsertText)
+        Assert.Equal(3, s.RemoveRange.StartLine)
+    | other -> failwithf "Expected one extraction with its doc, got %A" other
+
+[<Fact>]
+let ``a name-mentioning plain comment travels too`` () =
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1)\n// f2 is the plain helper\nand f2 (y: int) = y + 1\nand f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    match recGroupsIn source with
+    | [ s ] -> Assert.StartsWith("// f2 is the plain helper", s.InsertText)
+    | other -> failwithf "Expected one extraction with its comment, got %A" other
+
+[<Fact>]
+let ``an unrelated comment above the member stays put`` () =
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1)\n// general remark about the algorithm\nand f2 (y: int) = y + 1\nand f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    match recGroupsIn source with
+    | [ s ] ->
+        Assert.StartsWith("let f2", s.InsertText)
+        Assert.Equal(4, s.RemoveRange.StartLine)
+    | other -> failwithf "Expected one extraction without the comment, got %A" other
+
+[<Fact>]
+let ``a primed sibling reference keeps the member in the group`` () =
+    // \b finds no boundary after a trailing prime: `\bvisit'\b` never
+    // matches `visit' e` — the LEO adversarial catch. identifierPattern
+    // treats ' as an identifier character
+    Assert.Empty(
+        recGroupsIn
+            "module Test\nlet rec visit' (x: int) : int = if x = 0 then 0 else helper (x - 1)\nand helper (y: int) : int = visit' (y - 1)"
+    )
+
+[<Fact>]
+let ``commentSafeOnly drops a message whose fix swallows a comment`` () =
+    // the WebsitePlayground isMono lesson, editor edition: light bulbs
+    // have no build check or hold-back behind them, so a message with a
+    // comment-eating fix must never reach the editor at all
+    let source =
+        "module Test\nlet f (b: bool) =\n    match b with\n    | true ->\n        // the note someone left here\n        1\n    | false -> 2"
+
+    let tree, sourceText = parse source
+    let raw = MatchToIf.find tree sourceText
+
+    // the rule itself fires (collapsing the match would eat the comment)…
+    Assert.NotEmpty raw
+
+    let messages =
+        raw
+        |> List.map (fun s ->
+            { Type = "test"
+              Message = "m"
+              Code = "FR0001"
+              Severity = Severity.Hint
+              Range = s.Range
+              Fixes =
+                [ { FromRange = s.Range
+                    FromText = s.OriginalText
+                    ToText = s.ReplacementText } ] })
+
+    // …and the editor filter withholds it
+    Assert.Empty(Analyzers.commentSafeOnly tree sourceText messages)
+
+[<Fact>]
+let ``commentSafeOnly keeps a fix that carries the comment along`` () =
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1)\n/// Adds one.\nand f2 (y: int) = y + 1\nand f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    let tree, sourceText = parse source
+
+    match recGroupsIn source with
+    | [ s ] ->
+        let messages =
+            [ { Type = "test"
+                Message = "m"
+                Code = "FR0116"
+                Severity = Severity.Hint
+                Range = s.RemoveRange
+                Fixes =
+                  [ { FromRange = s.InsertRange
+                      FromText = ""
+                      ToText = s.InsertText }
+                    { FromRange = s.RemoveRange
+                      FromText = ""
+                      ToText = "" } ] } ]
+
+        // the remove-half spans the /// comment, but the insert-half
+        // re-emits it: message-level accounting keeps the fix
+        Assert.Equal(1, (Analyzers.commentSafeOnly tree sourceText messages).Length)
+    | other -> failwithf "Expected the doc-carrying extraction, got %A" other

@@ -218,7 +218,7 @@ let find
                         && isSafeInline rhs
                         // acc must not be re-assigned in the continuation
                         && not (
-                            Regex.IsMatch(textOfRange source rest.Range, @"\b" + Regex.Escape acc.idText + @"\b\s*<-")
+                            Regex.IsMatch(textOfRange source rest.Range, identifierPattern acc.idText + @"\s*<-")
                         )
                         ->
                         // one resolution, not one in the guard and another
@@ -460,6 +460,36 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                           | SynExpr.Do(expr = inner) -> inner
                           | other -> other
 
+                      // a prefix of PURE let-bindings folds into the lambda:
+                      //     for l in xs do
+                      //         let t = f l
+                      //         if t = "x" then found <- true
+                      // is still an exists question — the lets ride along as
+                      // `fun l -> let t = f l in t = "x"`. Each binding must
+                      // be immutable, single-line, effect-free, and silent
+                      // about the flag
+                      let rec unwrapLets acc body =
+                          match body with
+                          | SynExpr.LetOrUse innerLet when
+                              not (innerLet.IsBang || innerLet.IsUse)
+                              && (match innerLet.Bindings with
+                                  | [ SynBinding(isMutable = false; headPat = letPat; expr = rhs) ] ->
+                                      isSingleLine rhs.Range
+                                      && isSingleLine letPat.Range
+                                      && effectFreeIn index rhs.Range
+                                      && not (mentionsIn index flag.idText rhs.Range)
+                                  | _ -> false)
+                              ->
+                              match innerLet.Bindings with
+                              | [ SynBinding(headPat = letPat; expr = rhs) ] ->
+                                  unwrapLets
+                                      ((textOfRange source letPat.Range, textOfRange source rhs.Range) :: acc)
+                                      innerLet.Body
+                              | _ -> List.rev acc, body
+                          | other -> List.rev acc, other
+
+                      let letPrefix, loopBody = unwrapLets [] loopBody
+
                       match stripParens init, loopBody with
                       | SynExpr.Const(SynConst.Bool initVal, _),
                         SynExpr.IfThenElse(ifExpr = cond; thenExpr = thenBranch; elseExpr = None) ->
@@ -477,7 +507,7 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                               && not (
                                   Regex.IsMatch(
                                       textOfRange source rest.Range,
-                                      @"\b" + Regex.Escape flag.idText + @"\b\s*<-"
+                                      identifierPattern flag.idText + @"\s*<-"
                                   )
                               )
                               ->
@@ -485,6 +515,11 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                               | ValueSome patText, ValueSome m ->
                                   let srcText = atomicText source src
                                   let condText = textOfRange source cond.Range
+
+                                  let lets =
+                                      letPrefix
+                                      |> List.map (fun (name, rhs) -> $"let {name} = {rhs} in ")
+                                      |> String.concat ""
 
                                   let call =
                                       if initVal then
@@ -498,9 +533,9 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                                                   textOfRange source inner.Range
                                               | _ -> $"not ({condText})"
 
-                                          $"{srcText} |> {m}.forall (fun {patText} -> {negated})"
+                                          $"{srcText} |> {m}.forall (fun {patText} -> {lets}{negated})"
                                       else
-                                          $"{srcText} |> {m}.exists (fun {patText} -> {condText})"
+                                          $"{srcText} |> {m}.exists (fun {patText} -> {lets}{condText})"
 
                                   let editRange =
                                       Range.mkRange expr.Range.FileName expr.Range.Start forEach.Range.End

@@ -177,17 +177,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       ->
                       Some(BlockKind.AwaiterGetResult, None)
                   | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
-                      ids.Length >= 2
-                      && (List.last ids).idText = "RunSynchronously"
-                      && ids.[ids.Length - 2].idText = "Async"
+                      pathEndsWith "Async" "RunSynchronously" ids
                       && (fullNameOf check source (List.last ids)).StartsWith "Microsoft.FSharp.Control"
                       ->
                       Some(BlockKind.RunSynchronously, None)
                   | SynExpr.App(
                       isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) when
-                      ids.Length >= 2
-                      && (List.last ids).idText = "Sleep"
-                      && ids.[ids.Length - 2].idText = "Thread"
+                      pathEndsWith "Thread" "Sleep" ids
                       && (enclosingEntityOf check source (List.last ids)) = "System.Threading.Thread"
                       ->
                       Some(BlockKind.ThreadSleep, Some arg)

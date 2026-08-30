@@ -75,8 +75,11 @@ open System.Reflection
 open System.Text.Json
 open FSharp.Analyzers.SDK
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Syntax
+open FSharp.Compiler.SyntaxTrivia
 open FSharp.Compiler.Text
 open FSharp.Refactor
+open FSharp.Refactor.Text
 
 type private Options =
     {
@@ -100,6 +103,27 @@ type private Options =
         /// SARIF 2.1.0 output file: every finding the run surfaced, for CI
         /// annotation. Pairs naturally with --dry-run.
         Report: string option
+        /// No MSBuild, no reference resolution: sources are read straight
+        /// from the fsproj and only the analyzers that never consult the
+        /// typechecker run. For codebases that cannot compile on this
+        /// machine (a type provider needing its database, say).
+        ParseOnly: bool
+        /// A previous run's SARIF: findings whose fingerprints appear in it
+        /// are neither reported nor fixed — the ratchet for agents and CI.
+        Baseline: string option
+        /// Exit 3 when the run surfaced any finding (after baseline
+        /// filtering) — the hard lint gate.
+        FailOnFindings: bool
+        /// Honor every suppression comment regardless of the config's
+        /// "suppressions" policy — the CI override.
+        HonorSuppressions: bool
+        /// Machine-readable stdout: prose moves to stderr, and the run's
+        /// findings leave as one JSON document on stdout.
+        Json: bool
+        /// Print the rule catalog and exit.
+        ListRules: bool
+        /// Serve analyze/list_rules over MCP (JSON-RPC on stdio).
+        Mcp: bool
         MaxPasses: int
         Jobs: int
         /// Overrides the automatic narrowest-framework choice, so the code
@@ -148,6 +172,25 @@ OPTIONS
                         simply put back by the final build check
   --report <file>       write every finding as SARIF 2.1.0 — the format CI
                         turns into inline annotations. Pairs with --dry-run
+  --parse-only          no MSBuild, no reference resolution: sources come
+                        straight from the fsproj and only the syntactic
+                        analyzers run. For codebases that cannot compile on
+                        this machine (a type provider needing its database);
+                        typed rules and #if branches are out of reach
+  --baseline <sarif>    findings whose fingerprints appear in this earlier
+                        report are neither reported nor fixed: the ratchet.
+                        Triage once, then only NEW findings surface
+  --fail-on-findings    exit 3 when any finding survives the filters — the
+                        hard CI gate (0 clean, 1 failure, 2 usage)
+  --honor-suppressions  honor every suppression comment regardless of the
+                        config's "suppressions" policy — the CI override
+                        for a repo that wants comments inert locally
+  --format json         machine-readable stdout: progress prose moves to
+                        stderr and the findings leave as one JSON document.
+                        The default stays human-readable
+  --rules               print the rule catalog (honors --format json)
+  --mcp                 serve analyze/list_rules as an MCP server over
+                        stdio, keeping the typechecker warm between calls
   --max-passes <n>      fix-then-reanalyse iterations (default 5)
   --help, -h, /?        this text
 
@@ -194,6 +237,14 @@ let rec private parseArgsLoop opts args =
     | "--api-changes" :: rest -> parseArgsLoop { opts with ApiChanges = true } rest
     | "--no-if-defs" :: rest -> parseArgsLoop { opts with NoIfDefs = true } rest
     | "--report" :: file :: rest -> parseArgsLoop { opts with Report = Some file } rest
+    | "--parse-only" :: rest -> parseArgsLoop { opts with ParseOnly = true } rest
+    | "--baseline" :: file :: rest -> parseArgsLoop { opts with Baseline = Some file } rest
+    | "--fail-on-findings" :: rest -> parseArgsLoop { opts with FailOnFindings = true } rest
+    | "--honor-suppressions" :: rest -> parseArgsLoop { opts with HonorSuppressions = true } rest
+    | "--format" :: "json" :: rest -> parseArgsLoop { opts with Json = true } rest
+    | "--format" :: other :: _ -> Error $"--format knows 'json' (the default output is human-readable); got '{other}'"
+    | "--rules" :: rest -> parseArgsLoop { opts with ListRules = true } rest
+    | "--mcp" :: rest -> parseArgsLoop { opts with Mcp = true } rest
     | "--framework" :: tfm :: rest -> parseArgsLoop { opts with Framework = tfm } rest
     | "--jobs" :: n :: rest ->
         match Int32.TryParse n with
@@ -234,6 +285,13 @@ let private parseArgs (argv: string[]) =
           ApiChanges = false
           NoIfDefs = false
           Report = None
+          ParseOnly = false
+          Baseline = None
+          FailOnFindings = false
+          HonorSuppressions = false
+          Json = false
+          ListRules = false
+          Mcp = false
           MaxPasses = 5
           // Measured sweet spot. FCS reuses each file's prefix within one
           // incremental build, so parallel checks buy wall clock by giving
@@ -366,6 +424,66 @@ let private tfmRank (tfm: string) =
 /// The project's fsc arguments, straight from MSBuild. SDK-style projects
 /// go through `dotnet`; old-style (net48-era) projects need Visual
 /// Studio's MSBuild, whose imports do not evaluate under the SDK's.
+/// --parse-only's argument source: the fsproj text itself, no MSBuild.
+/// Compile items in order plus whatever DefineConstants can be read
+/// literally — conditions and $() are beyond a textual read and are
+/// simply skipped, so `#if` branches behind them stay out of the parse
+/// (documented limitation of the mode).
+// compiled once: these run per project (and the whitespace collapser per
+// FINDING), and FR0015 rightly flagged the re-parsed patterns — dogfood
+let private propertyGroupRegex =
+    Text.RegularExpressions.Regex(
+        "<PropertyGroup([^>]*)>((?s:.*?))</PropertyGroup>",
+        Text.RegularExpressions.RegexOptions.Compiled
+    )
+
+let private conditionAttributeRegex =
+    Text.RegularExpressions.Regex("Condition\\s*=\\s*\"([^\"]*)\"", Text.RegularExpressions.RegexOptions.Compiled)
+
+let private defineElementRegex =
+    Text.RegularExpressions.Regex(
+        "<DefineConstants([^>]*)>([^<]*)</DefineConstants>",
+        Text.RegularExpressions.RegexOptions.Compiled
+    )
+
+let private whitespaceRunRegex =
+    Text.RegularExpressions.Regex(@"\s+", Text.RegularExpressions.RegexOptions.Compiled)
+
+let private compileItemRegex =
+    Text.RegularExpressions.Regex("<Compile\\s+Include=\"([^\"]+)\"", Text.RegularExpressions.RegexOptions.Compiled)
+
+let private defineConstantsElementRegex =
+    Text.RegularExpressions.Regex(
+        "<DefineConstants[^>]*>([^<]*)</DefineConstants>",
+        Text.RegularExpressions.RegexOptions.Compiled
+    )
+
+let private parseOnlyArgs (projectPath: string) =
+    let projectText =
+        try
+            File.ReadAllText projectPath
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> ""
+
+    let sources =
+        [| for m in compileItemRegex.Matches projectText -> m.Groups.[1].Value |]
+        |> Array.filter (fun s -> not (s.Contains '*'))
+
+    if sources.Length = 0 then
+        Error "no <Compile Include> items to parse (wildcards and imported items are beyond --parse-only)"
+    else
+        let defines =
+            [| for m in defineConstantsElementRegex.Matches projectText do
+                   for piece in m.Groups.[1].Value.Split ';' do
+                       let piece = piece.Trim()
+
+                       if piece <> "" && not (piece.Contains "$(") then
+                           $"--define:{piece}" |]
+            |> Array.distinct
+
+        Ok(Array.append defines sources)
+
 let private fscArgs (chosenFramework: string) (projectPath: string) =
     let projectText =
         try
@@ -375,6 +493,22 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
         | :? UnauthorizedAccessException -> ""
 
     let isSdkStyle = projectText.Contains "Sdk="
+
+    // an .fsproj is not necessarily an F# compilation: SQL database
+    // projects (MSBuild.Sdk.SqlProj, OutputType Database, dacpac output)
+    // wear the extension too. Recognize them BEFORE paying for a
+    // design-time build that can only end in "no FscCommandLineArgs"
+    let isDatabaseProject =
+        projectText.Contains "MSBuild.Sdk.SqlProj"
+        || Text.RegularExpressions.Regex.IsMatch(
+            projectText,
+            "<OutputType>\\s*Database\\s*</OutputType>",
+            Text.RegularExpressions.RegexOptions.IgnoreCase
+        )
+
+    if isDatabaseProject then
+        Error "a SQL database project (dacpac), not an F# compilation — skipped"
+    else
 
     // A multi-targeted project builds "outer" and dispatches one inner build
     // per framework. CoreCompile — and so FscCommandLineArgs — only runs in
@@ -443,7 +577,22 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
     let buildExit, buildOut, buildErr = run $"build \"{projectPath}\"{tfmArg}"
 
     if buildExit <> 0 then
-        Error $"dotnet build failed — fix the build before applying fixes:\n{buildOut}\n{buildErr}"
+        // the raw MSBuild transcript buries the compile errors under
+        // restore chatter and MSB warnings; show just the error lines
+        // (a type provider's connection failure surfaces here too)
+        let errorLines =
+            ($"{buildOut}\n{buildErr}").Split '\n'
+            |> Array.filter (fun l -> l.Contains "error")
+            |> Array.distinct
+            |> Array.truncate 8
+
+        let detail =
+            if errorLines.Length = 0 then
+                $"{buildOut}\n{buildErr}"
+            else
+                String.concat "\n" errorLines
+
+        Error $"dotnet build failed — fix the build before applying fixes:\n{detail}"
     else
         // Rebuild forces CoreCompile even when the build above left the
         // project up-to-date (an incremental skip yields no args at all);
@@ -477,6 +626,62 @@ let private cliAnalyzers () =
           for m in t.GetMethods(BindingFlags.Static ||| BindingFlags.Public) do
               if m.GetCustomAttributes(typeof<CliAnalyzerAttribute>, false).Length > 0 then
                   m ]
+
+/// Analyzers whose CLI wrappers never touch CheckFileResults — the set a
+/// --parse-only run may execute against an unresolvable compilation. The
+/// typed analyzers are excluded outright rather than trusted to
+/// self-silence: their conservative gates assume a compilation that at
+/// least TRIED to resolve. Curated against the wrapper bodies in
+/// Analyzers.fs; a new syntactic analyzer earns its entry here.
+let private parseOnlySafeAnalyzers =
+    set
+        [ "AbbreviatedType"
+          "ArgNames"
+          "AttributeMerge"
+          "AutoProperty"
+          "BooleanSimplify"
+          "CeStrip"
+          "CheckedArithmetic"
+          "Composition"
+          "ConversionMove"
+          "DuFieldNames"
+          "ExceptionRules"
+          "FormatArgs"
+          "Hints"
+          "IndexedLoop"
+          "InterpToString"
+          "LambdaBuiltin"
+          "LoopPerf"
+          "MatchBang"
+          "MatchToIf"
+          "MethodCallParens"
+          "MiscRules"
+          "ObjectRules"
+          "PathSeparator"
+          "PatternParens"
+          "RaiseFailwith"
+          "RecursiveAppend"
+          "RecursiveSeq"
+          "RedundantParens"
+          "RedundantSyntax"
+          "RegexUsage"
+          "SecurityRules"
+          "StructDu"
+          "StructHints"
+          "SwallowedException"
+          "TabIndentation"
+          "TaskStateMachine"
+          "TrailingSemicolon"
+          "TypeChecks"
+          "TypeParens"
+          "TypeTestChain"
+          "UnimplementedBranch"
+          "WhileBang"
+          "XmlDocParams" ]
+
+let private analyzerName (m: MethodInfo) =
+    (m.GetCustomAttributes(typeof<CliAnalyzerAttribute>, false).[0] :?> CliAnalyzerAttribute)
+        .Name
 
 /// The encoding a source file is written in, judged by its BOM — so an
 /// edit does not silently strip a UTF-8 BOM or re-encode a UTF-16 file.
@@ -631,7 +836,7 @@ let private applyEditGroups
                 // can interleave between this one's edits
                 for _, _, f in members do
                     appliedRanges <- f.FromRange :: appliedRanges
-            else if members.Length > 1 then
+            elif members.Length > 1 then
                 let _, code, f = List.head members
 
                 printfn
@@ -869,21 +1074,11 @@ let private chooseDualConstant (projectPath: string) (modern: string list) (lega
         // scope cannot be known, the constant is not a candidate
         let tainted = System.Collections.Generic.HashSet<string>()
 
-        for groupMatch in
-            System.Text.RegularExpressions.Regex.Matches(text, "<PropertyGroup([^>]*)>((?s:.*?))</PropertyGroup>") do
-            let groupCondition =
-                System.Text.RegularExpressions.Regex.Match(groupMatch.Groups.[1].Value, "Condition\\s*=\\s*\"([^\"]*)\"")
+        for groupMatch in propertyGroupRegex.Matches text do
+            let groupCondition = conditionAttributeRegex.Match groupMatch.Groups.[1].Value
 
-            for defineMatch in
-                System.Text.RegularExpressions.Regex.Matches(
-                    groupMatch.Groups.[2].Value,
-                    "<DefineConstants([^>]*)>([^<]*)</DefineConstants>"
-                ) do
-                let elementCondition =
-                    System.Text.RegularExpressions.Regex.Match(
-                        defineMatch.Groups.[1].Value,
-                        "Condition\\s*=\\s*\"([^\"]*)\""
-                    )
+            for defineMatch in defineElementRegex.Matches groupMatch.Groups.[2].Value do
+                let elementCondition = conditionAttributeRegex.Match defineMatch.Groups.[1].Value
 
                 let condition =
                     if elementCondition.Success then elementCondition.Groups.[1].Value
@@ -981,15 +1176,101 @@ let private sweptFiles = System.Collections.Generic.HashSet<string * string>()
 /// Every finding the run surfaced, for the --report SARIF file: fixable or
 /// not, applied or held back. Deduplicated because passes re-analyze and a
 /// multi-targeted project sweeps the same file once per framework.
-let private reportedFindings = ResizeArray<string * Message>()
+/// One surfaced finding, carrying everything a report (or an agent)
+/// needs without re-opening the file.
+type ReportedFinding =
+    { File: string
+      Code: string
+      Message: string
+      Severity: Severity
+      StartLine: int
+      StartColumn: int
+      EndLine: int
+      EndColumn: int
+      /// Does a quick fix exist, or is this a note?
+      Fixable: bool
+      /// Stable identity across line shifts and sessions: a hash of the
+      /// rule code, the file's NAME (not path — checkouts differ), and the
+      /// whitespace-normalized source lines around the finding. Two
+      /// sessions looking at the same code agree on it; an unrelated edit
+      /// elsewhere in the file does not change it.
+      Fingerprint: string
+      /// The finding's own line(s) with one line of margin.
+      Snippet: string }
+
+/// The fingerprint version key used in SARIF partialFingerprints.
+[<Literal>]
+let private FingerprintKey = "fsrefContextHash/v1"
+
+let private fingerprintAndSnippet (source: ISourceText) (file: string) (code: string) (r: range) =
+    let lineCount = source.GetLineCount()
+    let clamp l = max 0 (min (lineCount - 1) l)
+    let firstContext = clamp (r.StartLine - 3)
+    let lastContext = clamp (r.EndLine + 1)
+
+    let normalized =
+        [ for l in firstContext..lastContext ->
+              whitespaceRunRegex.Replace(source.GetLineString(l).Trim(), " ") ]
+        |> String.concat "\n"
+
+    let hash =
+        use sha = System.Security.Cryptography.SHA256.Create()
+
+        let bytes =
+            System.Text.Encoding.UTF8.GetBytes($"{code}|{Path.GetFileName(file).ToLowerInvariant()}|{normalized}")
+
+        (sha.ComputeHash bytes)[..7] |> Array.map (sprintf "%02x") |> String.concat ""
+
+    let snippet =
+        [ for l in clamp (r.StartLine - 2) .. clamp r.EndLine -> source.GetLineString l ]
+        |> String.concat "\n"
+
+    hash, snippet
+
+/// Fingerprints an earlier run accepted (--baseline): findings matching
+/// them are neither reported nor fixed this run.
+let mutable private baselineFingerprints: Set<string> = Set.empty
+let mutable private baselineSuppressed = 0
+
+/// Findings a suppression comment silenced this run — never silent
+/// silence: the run summary counts them.
+let mutable private commentSuppressed = 0
+
+/// Suppression comments the config's "suppressions" policy declined to
+/// honor: their findings were reported anyway (though never auto-fixed).
+let mutable private suppressionOverridden = 0
+
+/// --honor-suppressions: comments silence everything regardless of the
+/// config policy — the CI override.
+let mutable private honorAllSuppressions = false
+
+let private reportedFindings = ResizeArray<ReportedFinding>()
 
 let private reportedKeys = System.Collections.Generic.HashSet<string>()
+
+/// Console notes already shown this run — later passes recompute the same
+/// fix-less findings, and printing them once is enough.
+let private printedNotes = System.Collections.Generic.HashSet<string>()
+
+/// Every comment in a parse tree, as (range, text) — the guard against
+/// fixes that would silently swallow one.
+let private commentsIn (parseTree: ParsedInput) (source: ISourceText) =
+    let ranges =
+        match parseTree with
+        | ParsedInput.ImplFile(ParsedImplFileInput(trivia = trivia)) -> trivia.CodeComments
+        | ParsedInput.SigFile(ParsedSigFileInput(trivia = trivia)) -> trivia.CodeComments
+        |> List.map (fun c ->
+            match c with
+            | CommentTrivia.LineComment r
+            | CommentTrivia.BlockComment r -> r)
+
+    ranges |> List.map (fun r -> r, textOfRange source r)
 
 /// Minimal SARIF 2.1.0, hand-built with System.Text.Json: enough for
 /// GitHub code scanning to render inline annotations, no Sarif.Sdk
 /// dependency. Paths are relativized against the working directory when
 /// they fall under it — that is what code-scanning matches blobs by.
-let private writeSarifReport (path: string) (findings: (string * Message) seq) =
+let private writeSarifReport (path: string) (findings: ReportedFinding seq) =
     let root = Directory.GetCurrentDirectory().Replace('\\', '/').TrimEnd('/') + "/"
 
     let uriOf (file: string) =
@@ -1009,25 +1290,33 @@ let private writeSarifReport (path: string) (findings: (string * Message) seq) =
         | Severity.Info | Severity.Hint -> "note"
 
     let results =
-        [ for file, msg in findings ->
+        [ for f in findings ->
               dict
-                  [ "ruleId", box msg.Code
-                    "level", box (levelOf msg.Severity)
-                    "message", box (dict [ "text", box msg.Message ])
+                  [ "ruleId", box f.Code
+                    "level", box (levelOf f.Severity)
+                    "message", box (dict [ "text", box f.Message ])
+                    // stable across line shifts and sessions; the baseline
+                    // mechanism keys on this
+                    "partialFingerprints", box (dict [ FingerprintKey, box f.Fingerprint ])
+                    "properties", box (dict [ "fixable", box f.Fixable ])
                     "locations",
                     box
                         [ dict
                               [ "physicalLocation",
                                 box (
                                     dict
-                                        [ "artifactLocation", box (dict [ "uri", box (uriOf file) ])
+                                        [ "artifactLocation", box (dict [ "uri", box (uriOf f.File) ])
                                           "region",
                                           box (
                                               dict
-                                                  [ "startLine", box (max 1 msg.Range.StartLine)
-                                                    "startColumn", box (msg.Range.StartColumn + 1)
-                                                    "endLine", box (max 1 msg.Range.EndLine)
-                                                    "endColumn", box (msg.Range.EndColumn + 1) ]
+                                                  [ "startLine", box (max 1 f.StartLine)
+                                                    "startColumn", box (f.StartColumn + 1)
+                                                    "endLine", box (max 1 f.EndLine)
+                                                    "endColumn", box (f.EndColumn + 1)
+                                                    // saves the reader (human
+                                                    // or agent) one file-open
+                                                    // per finding
+                                                    "snippet", box (dict [ "text", box f.Snippet ]) ]
                                           ) ]
                                 ) ] ] ] ]
 
@@ -1052,19 +1341,13 @@ let private writeSarifReport (path: string) (findings: (string * Message) seq) =
 
     File.WriteAllText(path, JsonSerializer.Serialize(report, JsonSerializerOptions(WriteIndented = true)))
 
-let private recordForReport (analyzedFile: string) (msg: Message) =
-    let file =
-        if String.IsNullOrEmpty msg.Range.FileName then
-            analyzedFile
-        else
-            msg.Range.FileName
-
+let private recordForReport (finding: ReportedFinding) =
     lock reportedFindings (fun () ->
         let key =
-            $"{msg.Code}|{file}|{msg.Range.StartLine}|{msg.Range.StartColumn}|{msg.Message}"
+            $"{finding.Code}|{finding.File}|{finding.StartLine}|{finding.StartColumn}|{finding.Message}"
 
         if reportedKeys.Add key then
-            reportedFindings.Add(file, msg))
+            reportedFindings.Add finding)
 
 /// The conditional-compilation identity of a compilation: its sorted
 /// --define set. Same file, same defines — same tree.
@@ -1115,6 +1398,7 @@ let private runPass
     let mutable nextGroup = 0
 
     let mutable crossFileSkipped = 0
+    let mutable commentHeldBack = 0
 
     // files FCS could not check cleanly: most rules stay silent on those, so
     // without this a run over a project that does not typecheck would just
@@ -1199,18 +1483,85 @@ let private runPass
                             | AnalyzerIgnoreRange.NextLine line -> msg.Range.StartLine - 1 = line
                             | AnalyzerIgnoreRange.CurrentLine line -> msg.Range.StartLine = line)
 
-                let reportable =
+                let toFinding (msg: Message) =
+                    let findingFile =
+                        if String.IsNullOrEmpty msg.Range.FileName then
+                            file
+                        else
+                            msg.Range.FileName
+
+                    let fingerprint, snippet =
+                        fingerprintAndSnippet sourceText findingFile msg.Code msg.Range
+
+                    { File = findingFile
+                      Code = msg.Code
+                      Message = msg.Message
+                      Severity = msg.Severity
+                      StartLine = msg.Range.StartLine
+                      StartColumn = msg.Range.StartColumn
+                      EndLine = msg.Range.EndLine
+                      EndColumn = msg.Range.EndColumn
+                      Fixable = not msg.Fixes.IsEmpty
+                      Fingerprint = fingerprint
+                      Snippet = snippet }
+
+                // whether a comment is honored is the team's call — the
+                // config's "suppressions" policy; --honor-suppressions is
+                // the CI override that says yes to all of them
+                let policy =
+                    if honorAllSuppressions then
+                        "all"
+                    else
+                        Configuration.suppressionPolicy file
+
+                let honoredByPolicy (msg: Message) =
+                    match policy with
+                    | "none" -> false
+                    | "no-correctness" -> RuleCatalog.categoryOf msg.Code <> RuleCatalog.Category.Correctness
+                    | _ -> true
+
+                let byCode =
                     collected
-                    |> Seq.filter (fun msg ->
-                        codes |> Option.forall (fun wanted -> wanted.Contains msg.Code)
-                        && not (isSuppressed msg))
+                    |> Seq.filter (fun msg -> codes |> Option.forall (fun wanted -> wanted.Contains msg.Code))
                     |> List.ofSeq
 
-                for msg in reportable do
-                    recordForReport file msg
+                let suppressedByComment, live = byCode |> List.partition isSuppressed
+                let silenced, overridden = suppressedByComment |> List.partition honoredByPolicy
+
+                if not suppressedByComment.IsEmpty then
+                    lock reportedFindings (fun () ->
+                        commentSuppressed <- commentSuppressed + silenced.Length
+                        suppressionOverridden <- suppressionOverridden + overridden.Length)
+
+                // an overridden comment still REPORTS its finding — the
+                // policy says a comment cannot silence this category — but
+                // never auto-fixes over someone's explicit comment
+                let overriddenAsNotes =
+                    overridden
+                    |> List.map (fun m ->
+                        { m with
+                            Fixes = []
+                            Message = m.Message + " (suppression comment not honored — \"suppressions\" policy)" })
+
+                // baseline last: a finding an earlier accepted run already
+                // carried is neither reported nor FIXED — the ratchet only
+                // moves on what is new
+                let reportable, baselined =
+                    live @ overriddenAsNotes
+                    |> Seq.map (fun msg -> msg, toFinding msg)
+                    |> List.ofSeq
+                    |> List.partition (fun (_, f) -> not (baselineFingerprints.Contains f.Fingerprint))
+
+                if not baselined.IsEmpty then
+                    lock reportedFindings (fun () -> baselineSuppressed <- baselineSuppressed + baselined.Length)
+
+                for _, finding in reportable do
+                    recordForReport finding
 
                 let messages, notes =
-                    reportable |> List.partition (fun msg -> not msg.Fixes.IsEmpty)
+                    reportable
+                    |> List.map fst
+                    |> List.partition (fun msg -> not msg.Fixes.IsEmpty)
 
                 return
                     {| File = file
@@ -1218,7 +1569,8 @@ let private runPass
                        Timings = List.ofSeq timings
                        HasErrors = OptionModule.hasErrors checkResults
                        Messages = messages
-                       Notes = notes |}
+                       Notes = notes
+                       Comments = commentsIn parseResults.ParseTree sourceText |}
             | FSharpCheckFileAnswer.Aborted ->
                 return
                     {| File = file
@@ -1226,7 +1578,8 @@ let private runPass
                        Timings = []
                        HasErrors = true
                        Messages = []
-                       Notes = [] |}
+                       Notes = []
+                       Comments = [] |}
         }
 
     // naming one source file means analyzing its project — the references
@@ -1289,17 +1642,43 @@ let private runPass
 
         // fix-less findings (FR0055, FR0028...) have no edit to apply, so
         // without this they would be invisible outside --report — the note
-        // IS the rule's entire output
+        // IS the rule's entire output. Printed once per run: later passes
+        // recompute the same notes, and repeating them is noise
         for note in outcome.Notes do
-            let firstSentence =
-                let text = note.Message
+            let key =
+                $"{note.Code}|{outcome.File}|{note.Range.StartLine}|{note.Range.StartColumn}|{note.Message}"
 
-                match text.IndexOfAny [| '.'; '\n' |] with
-                | -1 -> text
-                | cut -> text.Substring(0, cut + 1)
+            if printedNotes.Add key then
+                let firstSentence =
+                    let text = note.Message
+                    // a bare '.' is not a sentence end — "String.Equals"
+                    // must survive the cut
+                    let cutAt =
+                        [ text.IndexOf ". "; text.IndexOf ".\n"; text.IndexOf '\n' ]
+                        |> List.filter (fun i -> i >= 0)
 
-            printfn
-                $"  {note.Code} {kindColumn note.Code} {Path.GetFileName outcome.File}({note.Range.StartLine},{note.Range.StartColumn}) note: {firstSentence}"
+                    match cutAt with
+                    | [] -> text
+                    | cuts -> text.Substring(0, List.min cuts + 1)
+
+                printfn
+                    $"  {note.Code} {kindColumn note.Code} {Path.GetFileName outcome.File}({note.Range.StartLine},{note.Range.StartColumn}) note: {firstSentence}"
+
+        // a fix whose span contains a comment the replacement does not carry
+        // would silently DELETE it — a match collapsed to one line takes its
+        // Note1/Note2 lines with it. Held back instead: the reader's notes
+        // outrank our rewrite
+        // MESSAGE-level, not fix-level: a compound fix may MOVE code — a
+        // remove whose ToText is empty paired with an insert that carries
+        // the text (FR0116's extraction). A comment inside any fix's span
+        // is only lost when NO fix of the same message re-emits it
+        let losesComment (siblingToTexts: string list) (f: Fix) =
+            // only consulted for same-file fixes, so the comment list and
+            // the range coordinates already speak about the same file
+            outcome.Comments
+            |> List.exists (fun (r: range, text: string) ->
+                Range.rangeContainsRange f.FromRange r
+                && not (siblingToTexts |> List.exists (fun t -> t.Contains text)))
 
         for msg in outcome.Messages do
             nextGroup <- nextGroup + 1
@@ -1316,7 +1695,12 @@ let private runPass
                 let sameFile =
                     String.Equals(target, Path.GetFullPath outcome.File, StringComparison.OrdinalIgnoreCase)
 
-                if sameFile || apiChanges then
+                if sameFile && losesComment [ for sibling in msg.Fixes -> sibling.ToText ] f then
+                    commentHeldBack <- commentHeldBack + 1
+
+                    printfn
+                        $"  {msg.Code} {kindColumn msg.Code} {Path.GetFileName outcome.File}({f.FromRange.StartLine},{f.FromRange.StartColumn}): held back (a comment inside its span would be lost)"
+                elif sameFile || apiChanges then
                     match editsByFile.TryGetValue target with
                     | true, existing -> existing.Add(nextGroup, msg.Code, f)
                     | false, _ ->
@@ -1471,12 +1855,25 @@ let private resolveTargets (raw: string) : Result<Target list, string> =
             [ yield! Directory.EnumerateFiles(dir, "*.slnx")
               yield! Directory.EnumerateFiles(dir, "*.sln") ]
 
-        match solutions with
-        | solution :: _ -> projectsInSolution solution |> List.map (fun p -> Target.Project(p, None))
-        | [] ->
-            FileWalk.files "*.fsproj" dir
-            |> Seq.map (fun p -> Target.Project(p, None))
+        let projects =
+            match solutions with
+            | solution :: _ -> projectsInSolution solution |> List.map (fun p -> Target.Project(p, None))
+            | [] ->
+                FileWalk.files "*.fsproj" dir
+                |> Seq.map (fun p -> Target.Project(p, None))
+                |> List.ofSeq
+
+        // loose scripts are code too: build.fsx and friends never appear in
+        // any fsproj, so a directory sweep that stopped at projects silently
+        // skipped them. The walker already prunes obj/bin/packages/.git;
+        // ignorePaths (paket-files above all) applies on top
+        let scripts =
+            FileWalk.files "*.fsx" dir
+            |> Seq.filter (Configuration.isIgnoredPath >> not)
+            |> Seq.map Target.Script
             |> List.ofSeq
+
+        projects @ scripts
 
     if raw.Contains '*' || raw.Contains '?' then
         match expandGlob raw |> List.choose targetOf with
@@ -1519,14 +1916,17 @@ let private resolveTargets (raw: string) : Result<Target list, string> =
 /// get analyzed and fixed alongside the script itself. That also makes
 /// --script far quicker than --project, which spends its first half-minute
 /// in MSBuild before any analysis starts.
-let private optionsFor (checker: FSharpChecker) (chosenFramework: string) (target: Target) =
+let private optionsFor (checker: FSharpChecker) (parseOnly: bool) (chosenFramework: string) (target: Target) =
     match target with
     | Target.Script script ->
         let path = Path.GetFullPath script
         let sourceText = SourceText.ofString (File.ReadAllText path)
 
         let options, diagnostics =
-            checker.GetProjectOptionsFromScript(path, sourceText, assumeDotNetFramework = false)
+            // useFsiAuxLib: scripts run under fsi get the fsi object
+            // (fsi.CommandLineArgs and friends); resolving without it
+            // reported "'fsi' is not defined" on perfectly good scripts
+            checker.GetProjectOptionsFromScript(path, sourceText, assumeDotNetFramework = false, useFsiAuxLib = true)
             |> Async.RunSynchronously
 
         // a reference the script host could not resolve leaves the script
@@ -1540,10 +1940,22 @@ let private optionsFor (checker: FSharpChecker) (chosenFramework: string) (targe
         // announced BEFORE it starts: this step can take a minute, and a
         // line that only appears afterwards is no help while you are
         // staring at a silent terminal wondering whether it is stuck
-        printf "building and reading compiler arguments... "
+        printf (
+            if parseOnly then
+                "reading sources from the project file... "
+            else
+                "building and reading compiler arguments... "
+        )
+
         Console.Out.Flush()
         let argsSw = Stopwatch.StartNew()
-        let fscResult = fscArgs chosenFramework project
+
+        let fscResult =
+            if parseOnly then
+                parseOnlyArgs project
+            else
+                fscArgs chosenFramework project
+
         argsSw.Stop()
         printfn $"{argsSw.ElapsedMilliseconds} ms"
 
@@ -1674,13 +2086,16 @@ let private restoreSnapshot (snapshot: Map<string, string>) =
 let private verifyPass
     (checker: FSharpChecker)
     (options: FSharpProjectOptions)
+    (baselineErrors: int)
     (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
     (changedFiles: AppliedFile list)
     : bool =
     checker.InvalidateConfiguration options
     let errors = projectErrors checker options
 
-    if errors.Length = 0 then
+    // measured against the baseline, not zero: a --parse-only run starts
+    // with hundreds of unresolved-reference errors that are nobody's fault
+    if errors.Length <= baselineErrors then
         true
     else
         let errorFiles =
@@ -1703,7 +2118,7 @@ let private verifyPass
             if not named.IsEmpty then
                 restore named
 
-                if (projectErrors checker options).Length = 0 then
+                if (projectErrors checker options).Length <= baselineErrors then
                     named
                 else
                     let rest = changedFiles |> List.except named
@@ -1746,12 +2161,15 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
         printfn $"== {label}{frameworkLabel} =="
 
-    match optionsFor checker opts.Framework target with
+    match optionsFor checker opts.ParseOnly opts.Framework target with
     | Error message ->
         eprintfn $"{message}"
         1
     | Ok options ->
-        let analyzers = cliAnalyzers ()
+        let analyzers =
+            cliAnalyzers ()
+            |> List.filter (fun m -> not opts.ParseOnly || parseOnlySafeAnalyzers.Contains(analyzerName m))
+
         printfn $"{analyzers.Length} analyzers, {options.SourceFiles.Length} files"
 
         // cross-file (API-changing) rule variants gate on this: they
@@ -1793,13 +2211,40 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
         baselineSw.Stop()
         printfn $"{baselineSw.ElapsedMilliseconds} ms"
 
-        if baselineErrors > 0 then
+        // a SCRIPT that does not resolve is not refused: scripts routinely
+        // reference things fsi would supply at run time (or nothing at all —
+        // a README-snippet checker), and the syntactic rules still apply.
+        // Projects keep the refusal: they are supposed to compile
+        let degradedScript =
+            baselineErrors > 0
+            && not opts.ParseOnly
+            && (match target with
+                | Target.Script _ -> true
+                | Target.Project _ -> false)
+
+        let analyzers =
+            if degradedScript then
+                analyzers
+                |> List.filter (analyzerName >> parseOnlySafeAnalyzers.Contains)
+            else
+                analyzers
+
+        if (opts.ParseOnly || degradedScript) && baselineErrors > 0 then
+            // expected: nothing was resolved. The count still serves as the
+            // end-of-run regression baseline — a fix that breaks the parse
+            // RAISES it and is put back
+            printfn
+                $"  ({baselineErrors} unresolved-reference error(s) ignored; syntactic rules only ({analyzers.Length}))"
+
+        if baselineErrors > 0 && not opts.ParseOnly && not degradedScript then
             eprintfn $"The project has {baselineErrors} error(s) before any fix; fix those first:"
 
-            if showHeader then
+            if showHeader && not opts.DryRun then
                 // in a multi-compilation run these "pre-existing" errors can
                 // be an earlier project's applied fixes breaking a shared
-                // source file — that is our doing, not the caller's
+                // source file — that is our doing, not the caller's. A dry
+                // run modifies nothing, so there the errors are simply
+                // pre-existing
                 eprintfn
                     "  (multi-project run: if an earlier project was just modified, its fixes may have introduced these — review the diff)"
 
@@ -1813,6 +2258,14 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
             if opts.ApiChanges && onlyFile.IsSome then
                 printfn "  (api pass skipped: a single file was named, and these fixes edit call sites elsewhere)"
 
+            // Everything the run actually wrote, across the api-changes
+            // rounds and the normal passes. Zero means an untouched tree:
+            // there is nothing to arbitrate, so the end-of-run error
+            // recount and the all-frameworks verification build are pure
+            // cost and are skipped — on a large solution that is one full
+            // `dotnet build` per framework pass of every clean project.
+            let mutable totalApplied = 0
+
             if opts.ApiChanges && onlyFile.IsNone then
                 // iterated: a suggestion held back because its edits
                 // nest inside another suggestion's applies next round
@@ -1824,6 +2277,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     printfn $"api pass {apiPass}:"
                     let applied, changedFiles = runApiPass checker options opts.Codes opts.DryRun suppressed
                     apiApplied <- applied
+                    totalApplied <- totalApplied + applied
                     printfn $"  {apiApplied} api-changing fix(es) applied"
 
                     if opts.DryRun then
@@ -1833,7 +2287,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     elif apiApplied > 0 then
                         // a cross-file suggestion's edits all land in the
                         // same pass, so a rollback keeps them consistent
-                        verifyPass checker options suppressed changedFiles |> ignore
+                        verifyPass checker options baselineErrors suppressed changedFiles |> ignore
 
             let mutable pass = 0
             let mutable lastApplied = -1
@@ -1846,6 +2300,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     runPass checker options analyzers opts.Codes opts.DryRun opts.ApiChanges opts.Jobs onlyFile suppressed
 
                 lastApplied <- applied
+                totalApplied <- totalApplied + applied
 
                 let prefix = if opts.DryRun then "would be " else ""
                 printfn $"  {lastApplied} fix(es) {prefix}applied"
@@ -1856,13 +2311,19 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     // verify while the pre-pass texts are in hand; a clean
                     // result warms the next pass's project check, so this
                     // REPLACES the end-of-run check rather than adding one
-                    verifyPass checker options suppressed changedFiles |> ignore
+                    verifyPass checker options baselineErrors suppressed changedFiles |> ignore
 
             if not opts.DryRun && lastApplied > 0 && pass = opts.MaxPasses then
                 eprintfn
                     $"did not converge: fixes were still being applied after {opts.MaxPasses} pass(es) — rerun to continue, or raise --max-passes"
 
             if opts.DryRun then
+                markSwept options
+                0
+            elif totalApplied = 0 then
+                // no file was written: the tree is exactly as the baseline
+                // check found it, so re-counting errors and rebuilding every
+                // framework would verify nothing
                 markSwept options
                 0
             else
@@ -1883,7 +2344,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                 // multi-targeted project has others, and a fix valid for one
                 // can fail on another, so build the lot before claiming
                 // success.
-                elif isMultiTargeted target then
+                elif isMultiTargeted target && not opts.ParseOnly then
                     match target with
                     | Target.Project(project, _) ->
                         printfn "verifying every target framework..."
@@ -1916,42 +2377,90 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     markSwept options
                     0
 
-[<EntryPoint>]
-let main argv =
-    match parseArgs argv with
+/// The fingerprint set of an earlier SARIF report, for --baseline.
+let private loadBaseline (path: string) : Result<Set<string>, string> =
+    try
+        use doc = JsonDocument.Parse(File.ReadAllText path)
+
+        let prints =
+            [ for run in doc.RootElement.GetProperty("runs").EnumerateArray() do
+                  match run.TryGetProperty "results" with
+                  | true, results ->
+                      for result in results.EnumerateArray() do
+                          match result.TryGetProperty "partialFingerprints" with
+                          | true, fps ->
+                              match fps.TryGetProperty FingerprintKey with
+                              | true, v -> v.GetString()
+                              | _ -> ()
+                          | _ -> ()
+                  | _ -> () ]
+
+        Ok(Set.ofList prints)
+    with ex ->
+        Error $"could not read baseline '{path}': {ex.Message}"
+
+let private severityName (s: Severity) =
+    match s with
+    | Severity.Error -> "error"
+    | Severity.Warning -> "warning"
+    | Severity.Info -> "info"
+    | Severity.Hint -> "hint"
+
+let private findingsPayload (findings: ReportedFinding list) =
+    [ for f in findings ->
+          dict
+              [ "code", box f.Code
+                "severity", box (severityName f.Severity)
+                "fixable", box f.Fixable
+                "file", box f.File
+                "startLine", box f.StartLine
+                "startColumn", box f.StartColumn
+                "endLine", box f.EndLine
+                "endColumn", box f.EndColumn
+                "message", box f.Message
+                "fingerprint", box f.Fingerprint
+                "snippet", box f.Snippet ] ]
+
+/// The run's findings as one JSON document (--format json and --mcp).
+let private findingsAsJson (findings: ReportedFinding list) (baselined: int) =
+    let payload =
+        dict
+            [ "findings", box (findingsPayload findings)
+              "baselineSuppressed", box baselined
+              "commentSuppressed", box commentSuppressed
+              "suppressionsOverridden", box suppressionOverridden ]
+
+    JsonSerializer.Serialize(payload, JsonSerializerOptions(WriteIndented = true))
+
+let private rulesAsRows () =
+    RuleCatalog.allRules
+    |> List.map (fun (code, category) ->
+        code, RuleCatalog.name category, Configuration.isEnabledIn Map.empty code "")
+
+/// The whole run for one Options value: resolve targets, sweep, verify,
+/// report. The checker comes from the caller so a resident host (--mcp)
+/// can keep it — and every reference assembly FCS has parsed — warm
+/// between calls.
+let private executeRun (checker: FSharpChecker) (opts: Options) : int =
+    match resolveTargets opts.Target with
     | Error message ->
         eprintfn $"{message}"
         2
-    | Ok opts when opts.ShowHelp ->
-        printfn $"{helpText}"
-        0
-    // no arguments at all is a question, not a mistake: show the help
-    | Ok opts when opts.Target = "" ->
-        printfn $"{helpText}"
-        2
-    | Ok opts ->
-        match resolveTargets opts.Target with
-        | Error message ->
-            eprintfn $"{message}"
-            2
-        | Ok targets ->
+    | Ok targets ->
             let several = targets.Length > 1
 
             if several then
                 printfn $"{targets.Length} compilations to work through"
 
-            // ONE checker for the whole run: FCS caches parsed reference
-            // assemblies on the instance, and a twenty-project solution's
-            // flavors share nearly all of them — a fresh checker per
-            // compilation was paying that parse twenty times over.
-            // (Analyzers may read the typed tree, hence assembly contents.)
-            let checker = FSharpChecker.Create(keepAssemblyContents = true)
             sweptFiles.Clear()
+            honorAllSuppressions <- opts.HonorSuppressions
             // the corpus harness runs main in-process, so per-run stores
             // must not leak findings across invocations
             lock reportedFindings (fun () ->
                 reportedFindings.Clear()
                 reportedKeys.Clear())
+
+            printedNotes.Clear()
 
             // A multi-targeted project is really several compilations: each
             // framework activates its own #if branches, and code behind
@@ -1962,6 +2471,8 @@ let main argv =
             // is what catches a fix that does not generalise.
             let runOne target =
                 match opts.Framework, frameworksOf target with
+                // parse-only has no per-framework defines to vary; one pass
+                | _ when opts.ParseOnly -> runTarget checker opts several target
                 | "", (_ :: _ :: _ as frameworks) ->
                     let conditionals =
                         match target with
@@ -2032,7 +2543,20 @@ let main argv =
                     printfn $"{reportedFindings.Count} finding(s) written to {reportPath}"
                 | None -> ()
 
-                exitCode
+                if baselineSuppressed > 0 then
+                    printfn $"  ({baselineSuppressed} finding(s) matched the baseline and were suppressed)"
+
+                if commentSuppressed > 0 then
+                    printfn $"  ({commentSuppressed} finding(s) silenced by suppression comments)"
+
+                if suppressionOverridden > 0 then
+                    printfn
+                        $"  ({suppressionOverridden} suppression comment(s) not honored by the \"suppressions\" policy — reported above, never auto-fixed)"
+
+                if exitCode = 0 && opts.FailOnFindings && reportedFindings.Count > 0 then
+                    3
+                else
+                    exitCode
             finally
                 // runTarget sets these for the rule variants; the corpus
                 // harness runs main IN-PROCESS, so a leaked flag would make
@@ -2041,3 +2565,292 @@ let main argv =
                 Environment.SetEnvironmentVariable("FSREF_API_CHANGES", null)
                 Environment.SetEnvironmentVariable("FSREF_FORCE_CODES", null)
                 Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", null)
+
+/// --rules: the catalog, human table by default, JSON on request.
+let private printRules (json: bool) =
+    if json then
+        let payload =
+            [ for code, category, enabledByDefault in rulesAsRows () ->
+                  dict
+                      [ "code", box code
+                        "category", box category
+                        "enabledByDefault", box enabledByDefault ] ]
+
+        printfn $"{JsonSerializer.Serialize(payload, JsonSerializerOptions(WriteIndented = true))}"
+    else
+        for code, category, enabledByDefault in rulesAsRows () do
+            let marker = if enabledByDefault then "" else "  (off by default)"
+            printfn $"%s{code}  %-12s{category}%s{marker}"
+
+/// One MCP tool-call response body: text content plus the protocol wrapper.
+let private mcpToolResult (text: string) =
+    dict [ "content", box [ dict [ "type", box "text"; "text", box text ] ] ]
+
+[<return: Struct>]
+let inline private (|IsNullOrWhiteSpace|_|) (input: string) =
+    if String.IsNullOrWhiteSpace input then ValueSome input else ValueNone
+/// --mcp: a minimal MCP server over stdio — newline-delimited JSON-RPC
+/// 2.0, no extra dependencies, and one warm FSharpChecker across every
+/// call, which is the entire point: the first analyze pays the reference
+/// parse, the rest answer from a hot cache. Progress prose is diverted to
+/// stderr so the protocol stream stays clean.
+let private runMcp () =
+    let protocolOut = Console.Out
+    Console.SetOut Console.Error
+
+    let checker = FSharpChecker.Create(keepAssemblyContents = true)
+
+    let respond (idJson: string) (resultJson: string) =
+        protocolOut.WriteLine($"{{\"jsonrpc\":\"2.0\",\"id\":{idJson},\"result\":{resultJson}}}")
+        protocolOut.Flush()
+
+    let respondError (idJson: string) (code: int) (message: string) =
+        let msg = JsonSerializer.Serialize message
+        protocolOut.WriteLine($"{{\"jsonrpc\":\"2.0\",\"id\":{idJson},\"error\":{{\"code\":{code},\"message\":{msg}}}}}")
+        protocolOut.Flush()
+
+    let serialize (o: obj) = JsonSerializer.Serialize o
+
+    let toolsJson =
+        serialize (
+            dict
+                [ "tools",
+                  box
+                      [ dict
+                            [ "name", box "analyze"
+                              "description",
+                              box
+                                  "Analyze an F# project, script or directory with fsharp-refactor. Dry-run by default: reports findings without editing. Set apply=true to write the fixes (build-verified). Returns findings as JSON with stable fingerprints and source snippets."
+                              "inputSchema",
+                              box (
+                                  dict
+                                      [ "type", box "object"
+                                        "properties",
+                                        box (
+                                            dict
+                                                [ "target",
+                                                  box (
+                                                      dict
+                                                          [ "type", box "string"
+                                                            "description",
+                                                            box "fsproj, fsx, sln, directory or glob to analyze" ]
+                                                  )
+                                                  "codes",
+                                                  box (
+                                                      dict
+                                                          [ "type", box "string"
+                                                            "description", box "comma-separated rule codes to restrict to" ]
+                                                  )
+                                                  "categories",
+                                                  box (
+                                                      dict
+                                                          [ "type", box "string"
+                                                            "description",
+                                                            box "comma-separated: correctness,performance,idiom,cosmetic" ]
+                                                  )
+                                                  "parseOnly",
+                                                  box (dict [ "type", box "boolean"; "description", box "no MSBuild, syntactic rules only" ])
+                                                  "apply",
+                                                  box (dict [ "type", box "boolean"; "description", box "write the fixes (default: dry-run)" ]) ]
+                                        )
+                                        "required", box [ "target" ] ]
+                              ) ]
+                        dict
+                            [ "name", box "list_rules"
+                              "description", box "The rule catalog: code, category, enabled-by-default."
+                              "inputSchema", box (dict [ "type", box "object"; "properties", box (dict []) ]) ] ] ]
+        )
+
+    let handleAnalyze (args: JsonElement) =
+        let getString name =
+            match args.TryGetProperty(name: string) with
+            | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString())
+            | _ -> None
+
+        let getBool name =
+            match args.TryGetProperty(name: string) with
+            | true, v -> v.ValueKind = JsonValueKind.True
+            | _ -> false
+
+        match getString "target" with
+        | None -> Error "analyze needs a 'target'"
+        | Some target ->
+
+        match parseArgs [| target |] with
+        | Error message -> Error message
+        | Ok baseOpts ->
+
+            let codes =
+                getString "codes"
+                |> Option.map (fun s -> s.Split ',' |> Array.map (fun c -> c.Trim().ToUpperInvariant()) |> Set.ofArray)
+
+            let categories =
+                getString "categories"
+                |> Option.map (fun s -> s.Split ',' |> Array.choose (fun c -> RuleCatalog.parse c) |> Set.ofArray)
+
+            let opts =
+                { baseOpts with
+                    DryRun = not (getBool "apply")
+                    ParseOnly = getBool "parseOnly"
+                    Codes = codes
+                    ExplicitCodes = codes
+                    Categories = categories }
+                |> applyCategories
+
+            lock reportedFindings (fun () ->
+                reportedFindings.Clear()
+                reportedKeys.Clear()
+                baselineSuppressed <- 0
+                commentSuppressed <- 0
+                suppressionOverridden <- 0)
+
+            printedNotes.Clear()
+            let exitCode = executeRun checker opts
+            let findings = lock reportedFindings (fun () -> List.ofSeq reportedFindings)
+
+            let body =
+                dict
+                    [ "exitCode", box exitCode
+                      "applied", box (not opts.DryRun)
+                      "findingCount", box findings.Length
+                      "findings", box (findingsPayload findings)
+                      "baselineSuppressed", box baselineSuppressed
+                      "commentSuppressed", box commentSuppressed
+                      "suppressionsOverridden", box suppressionOverridden ]
+
+            Ok(JsonSerializer.Serialize body)
+
+    let mutable running = true
+
+    while running do
+        match Console.In.ReadLine() with
+        | null -> running <- false
+        | IsNullOrWhiteSpace line -> ()
+        | line ->
+            let idJson, method_, params_ =
+                try
+                    use doc = JsonDocument.Parse line
+                    let root = doc.RootElement
+
+                    let id =
+                        match root.TryGetProperty "id" with
+                        | true, v -> v.GetRawText()
+                        | _ -> "null"
+
+                    let m =
+                        match root.TryGetProperty "method" with
+                        | true, v -> v.GetString()
+                        | _ -> ""
+
+                    let p =
+                        match root.TryGetProperty "params" with
+                        | true, v -> Some(v.Clone())
+                        | _ -> None
+
+                    id, m, p
+                with _ ->
+                    "null", "", None
+
+            match method_ with
+            | "initialize" ->
+                respond
+                    idJson
+                    """{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fsharp-refactor","version":"0.6.6"}}"""
+            | "notifications/initialized"
+            | "notifications/cancelled" -> ()
+            | "ping" -> respond idJson "{}"
+            | "tools/list" -> respond idJson toolsJson
+            | "tools/call" ->
+                let name, args =
+                    match params_ with
+                    | Some p ->
+                        let n =
+                            match p.TryGetProperty "name" with
+                            | true, v -> v.GetString()
+                            | _ -> ""
+
+                        let a =
+                            match p.TryGetProperty "arguments" with
+                            | true, v -> v
+                            | _ -> JsonDocument.Parse("{}").RootElement
+
+                        n, a
+                    | None -> "", JsonDocument.Parse("{}").RootElement
+
+                match name with
+                | "list_rules" ->
+                    let rules =
+                        [ for code, category, enabledByDefault in rulesAsRows () ->
+                              dict
+                                  [ "code", box code
+                                    "category", box category
+                                    "enabledByDefault", box enabledByDefault ] ]
+
+                    respond idJson (serialize (mcpToolResult (serialize rules)))
+                | "analyze" ->
+                    try
+                        (handleAnalyze args) |> Result.map (mcpToolResult >> serialize >> respond idJson) |> Result.defaultWith (fun msg -> respondError idJson -32602 msg)
+                    with ex ->
+                        respondError idJson -32603 $"analyze failed: {ex.Message}"
+                | other -> respondError idJson -32601 $"unknown tool '{other}'"
+            | "" -> respondError idJson -32700 "unparseable request"
+            | notification when not (notification.StartsWith "notifications/") && idJson <> "null" ->
+                respondError idJson -32601 $"unknown method '{notification}'"
+            | _ -> ()
+
+    0
+
+[<EntryPoint>]
+let main argv =
+    match parseArgs argv with
+    | Error message ->
+        eprintfn $"{message}"
+        2
+    | Ok opts when opts.ShowHelp ->
+        printfn $"{helpText}"
+        0
+    | Ok opts when opts.ListRules ->
+        printRules opts.Json
+        0
+    | Ok opts when opts.Mcp -> runMcp ()
+    // no arguments at all is a question, not a mistake: show the help
+    | Ok opts when opts.Target = "" ->
+        printfn $"{helpText}"
+        2
+    | Ok opts ->
+        let baseline =
+            match opts.Baseline with
+            | Some path -> loadBaseline path
+            | None -> Ok Set.empty
+
+        match baseline with
+        | Error message ->
+            eprintfn $"{message}"
+            2
+        | Ok prints ->
+            baselineFingerprints <- prints
+            baselineSuppressed <- 0
+            commentSuppressed <- 0
+            suppressionOverridden <- 0
+
+            // --format json: prose to stderr, one clean JSON document on
+            // the real stdout. The default output stays human-readable.
+            let realOut = Console.Out
+
+            if opts.Json then
+                Console.SetOut Console.Error
+
+            // ONE checker for the whole run: FCS caches parsed reference
+            // assemblies on the instance, and a twenty-project solution's
+            // flavors share nearly all of them — a fresh checker per
+            // compilation was paying that parse twenty times over.
+            // (Analyzers may read the typed tree, hence assembly contents.)
+            let checker = FSharpChecker.Create(keepAssemblyContents = true)
+            let code = executeRun checker opts
+
+            if opts.Json then
+                Console.SetOut realOut
+                let findings = lock reportedFindings (fun () -> List.ofSeq reportedFindings)
+                printfn $"{findingsAsJson findings baselineSuppressed}"
+
+            code

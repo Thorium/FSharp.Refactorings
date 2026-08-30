@@ -7,8 +7,8 @@
     <IsPackable>true</IsPackable>
     <BuildOutputTargetFolder>analyzers/dotnet/fs</BuildOutputTargetFolder>
     <PackageId>FSharp.Refactor.Analyzers</PackageId>
-    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK. Around 90 rules covering correctness, performance, idiom and redundancy; every one is Hint severity, so they never gate a build.</Description>
-    <PackageReleaseNotes>0.3.0: new rules FR0090-FR0093 (project-wide tupled-to-curried and parameter reorder under --api-changes, static failwith messages gaining their arguments, reference-tuple fields). Fixes a case where a substituted method call lost needed parentheses, and three FR0081 false positives found by sweeping 3684 files of real F#.</PackageReleaseNotes>
+    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK. Over 110 rules covering correctness, performance, idiom and redundancy; every one is Hint severity, so they never gate a build.</Description>
+    <PackageReleaseNotes>0.6.7: new rules FR0108-FR0116 (boolean identity/idempotent literals, missing DU cases, else-if flattening, equality-chain to match, nested-if merges, pyramid-of-doom flip, guard-order note, rec-group extraction incl. head re-crowning). FR0039 equality-with-ASCII-literal becomes a quick fix, with culture-aware alternatives offered in editors; FR0031 gains a String.Concat alternative. Fixes that move code carry their doc comments along, and a comment-preservation guard holds back any fix that would eat one — in editors too. Per-rule numeric config parameters (FR0114 thresholds first), and a "suppressions" policy that can keep correctness findings visible past suppression comments (--honor-suppressions restores them in CI).</PackageReleaseNotes>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/fsharp-refactor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/fsharp-refactor</RepositoryUrl>
@@ -36,7 +36,11 @@
     <Compile Include="Configuration.fs" />
     <Compile Include="CapabilityFix.fs" />
     <Compile Include="MatchToIf.fs" />
+    <Compile Include="BooleanSimplify.fs" />
     <Compile Include="OptionModule.fs" />
+    <Compile Include="IfRestructure.fs" />
+    <Compile Include="MissingCases.fs" />
+    <Compile Include="RecGroup.fs" />
     <Compile Include="Composition.fs" />
     <Compile Include="ConversionMove.fs" />
     <Compile Include="CeStrip.fs" />
