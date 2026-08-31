@@ -672,6 +672,8 @@ let private parseOnlySafeAnalyzers =
           "CheckedArithmetic"
           "Composition"
           "ConversionMove"
+          "MapFusion"
+          "StringEmptiness"
           "DuFieldNames"
           "ExceptionRules"
           "FormatArgs"
@@ -774,7 +776,11 @@ let private kindColumn (code: string) =
 type private AppliedFile =
     { Path: string
       Before: string
-      Fixes: (string * Fix) list }
+      /// (suggestion group, rule code, fix) — the GROUP travels because a
+      /// multi-edit suggestion applies all-or-nothing, and any later
+      /// selective rollback must keep it that way: half a ParamOrder swap
+      /// COMPILES and computes the wrong thing
+      Fixes: (int * string * Fix) list }
 
 /// The suppression key of a fix: rule code, file, and the edit's CONTENT.
 /// Not coordinates — a later pass applying an unrelated fix ABOVE the
@@ -822,7 +828,7 @@ let private applyEditGroups
 
         let mutable current = text
         let mutable appliedRanges: Range list = []
-        let mutable appliedHere: (string * Fix) list = []
+        let mutable appliedHere: (int * string * Fix) list = []
         let groupDecisions = System.Collections.Generic.Dictionary<int, bool>()
 
         let overlaps (r: Range) =
@@ -914,7 +920,7 @@ let private applyEditGroups
                     let toText = f.ToText.Replace("\r\n", "\n").Replace("\n", eol)
 
                     current <- current.Remove(startIndex, endIndex - startIndex).Insert(startIndex, toText)
-                    appliedHere <- (code, f) :: appliedHere
+                    appliedHere <- (groupId, code, f) :: appliedHere
                     applied <- applied + 1
 
                     printfn
@@ -1469,6 +1475,7 @@ let private runPass
     (jobs: int)
     (onlyFile: string option)
     (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
+    (blockedRuleFile: System.Collections.Generic.HashSet<string * string>)
     =
     let projectSw = Stopwatch.StartNew()
     let projectResults = checker.ParseAndCheckProject options |> Async.RunSynchronously
@@ -1832,6 +1839,11 @@ let private runPass
 
                     printfn
                         $"  {msg.Code} {kindColumn msg.Code} {Path.GetFileName outcome.File}({f.FromRange.StartLine},{f.FromRange.StartColumn}): held back (a comment inside its span would be lost)"
+                // a rule the divergence guard blocked in this file: it kept
+                // re-firing pass after pass while the file GREW — the
+                // signature of a fix feeding on its own output
+                elif blockedRuleFile.Contains(msg.Code, target) then
+                    ()
                 elif sameFile || apiChanges then
                     match editsByFile.TryGetValue target with
                     | true, existing -> existing.Add(nextGroup, msg.Code, f)
@@ -1989,11 +2001,22 @@ let private resolveTargets (raw: string) : Result<Target list, string> =
 
         let projects =
             match solutions with
-            | solution :: _ -> projectsInSolution solution |> List.map (fun p -> Target.Project(p, None))
             | [] ->
                 FileWalk.files "*.fsproj" dir
                 |> Seq.map (fun p -> Target.Project(p, None))
                 |> List.ofSeq
+            | _ ->
+                // EVERY solution in the directory, projects deduplicated —
+                // picking the alphabetically first silently skipped
+                // FsCDK.sln's whole library because FsCDK.Samples.sln
+                // sorted ahead of it
+                if solutions.Length > 1 then
+                    printfn $"({solutions.Length} solutions here — analysing the union of their projects)"
+
+                solutions
+                |> List.collect projectsInSolution
+                |> List.distinctBy (fun p -> Path.GetFullPath(p).ToLowerInvariant())
+                |> List.map (fun p -> Target.Project(p, None))
 
         // loose scripts are code too: build.fsx and friends never appear in
         // any fsproj, so a directory sweep that stopped at projects silently
@@ -2215,6 +2238,84 @@ let private restoreSnapshot (snapshot: Map<string, string>) =
 ///
 /// Nearly free on the happy path: the pass ahead re-uses this check's
 /// cached results, so it replaces rather than adds a full project check.
+/// Re-apply a subset of a file's already-applied fixes to its Before text.
+/// Bottom-up in original coordinates, exactly as applyEditGroups spliced
+/// them the first time — a subset of non-overlapping bottom-up splices
+/// stays viable, and the FromText check makes any drift fail safe (the
+/// fix is silently dropped rather than misapplied).
+let private reapplySubset (before: string) (fixes: (int * string * Fix) list) : string =
+    let mutable current = before
+
+    let ordered =
+        fixes
+        |> List.sortByDescending (fun (_, _, f) -> f.FromRange.StartLine, f.FromRange.StartColumn)
+
+    for _, _, f in ordered do
+        let lines = current.Split '\n'
+
+        if f.FromRange.StartLine - 1 <= lines.Length && f.FromRange.EndLine - 1 <= lines.Length then
+            let startIndex =
+                (lines
+                 |> Seq.take (f.FromRange.StartLine - 1)
+                 |> Seq.sumBy (fun l -> l.Length + 1))
+                + f.FromRange.StartColumn
+
+            let endIndex =
+                (lines |> Seq.take (f.FromRange.EndLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
+                + f.FromRange.EndColumn
+
+            if
+                startIndex <= current.Length
+                && endIndex <= current.Length
+                && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace(
+                    "\r",
+                    ""
+                )
+            then
+                let eol = if current.Contains "\r\n" then "\r\n" else "\n"
+                let toText = f.ToText.Replace("\r\n", "\n").Replace("\n", eol)
+                current <- current.Remove(startIndex, endIndex - startIndex).Insert(startIndex, toText)
+
+    current
+
+/// The fixes in an applied file whose PATCHED position sits within five
+/// lines of one of the file's error lines. Patched positions are the
+/// original ranges shifted by the line growth of every fix applied above
+/// them — approximate under same-line stacking. The slack is five, not
+/// two, because an error anchors at the START of its construct while the
+/// offending edit can sit lines inside it (a record's inconsistent-fields
+/// error points at the record, not the rewritten field — seen live on
+/// WebsitePlayground's build.fsx). Sweeping in a neighbor costs one
+/// suppressed innocent; missing the culprit costs the whole file.
+let private fixesNearErrors (cf: AppliedFile) (errorLines: Set<int>) : (int * string * Fix) list =
+    let newlinesIn (s: string) = s |> Seq.filter ((=) '\n') |> Seq.length
+
+    let ascending =
+        cf.Fixes
+        |> List.sortBy (fun (_, _, f) -> f.FromRange.StartLine, f.FromRange.StartColumn)
+
+    let mutable delta = 0
+
+    let near =
+        [ for g, code, f in ascending do
+              let patchedStart = f.FromRange.StartLine + delta
+              let patchedEnd = patchedStart + newlinesIn f.ToText
+
+              if
+                  errorLines
+                  |> Set.exists (fun l -> l >= patchedStart - 5 && l <= patchedEnd + 5)
+              then
+                  g, code, f
+
+              delta <- delta + (newlinesIn f.ToText - newlinesIn f.FromText) ]
+
+    // a culprit's WHOLE suggestion group joins it: a multi-edit suggestion
+    // applies all-or-nothing, and keeping half (a ParamOrder def swap
+    // without its call sites) can compile into wrong code
+    let culpritGroups = near |> List.map (fun (g, _, _) -> g) |> Set.ofList
+
+    cf.Fixes |> List.filter (fun (g, _, _) -> culpritGroups.Contains g)
+
 let private verifyPass
     (checker: FSharpChecker)
     (options: FSharpProjectOptions)
@@ -2230,31 +2331,147 @@ let private verifyPass
     if errors.Length <= baselineErrors then
         true
     else
-        let errorFiles =
-            errors |> Array.map (fun d -> Path.GetFullPath d.FileName) |> Set.ofArray
+        // case-insensitive: script diagnostics can spell the path with a
+        // different drive/segment casing than the target we edited
+        let canonical (p: string) = Path.GetFullPath(p).ToLowerInvariant()
+
+        let errorFiles = errors |> Array.map (fun d -> canonical d.FileName) |> Set.ofArray
 
         let named =
             changedFiles
-            |> List.filter (fun cf -> errorFiles.Contains(Path.GetFullPath cf.Path))
+            |> List.filter (fun cf -> errorFiles.Contains(canonical cf.Path))
 
-        let restore (files: AppliedFile list) =
+        let writeBack (files: AppliedFile list) =
             for cf in files do
                 writeSource cf.Path cf.Before
 
-                for code, f in cf.Fixes do
+            checker.InvalidateConfiguration options
+
+        let suppressAll (files: AppliedFile list) =
+            for cf in files do
+                for _, code, f in cf.Fixes do
                     suppressed.Add(fixKey code cf.Path f) |> ignore
 
-            checker.InvalidateConfiguration options
+        let restore (files: AppliedFile list) =
+            writeBack files
+            suppressAll files
 
         let rolledBack =
             if not named.IsEmpty then
-                restore named
-
+                writeBack named
                 if (projectErrors checker options).Length <= baselineErrors then
-                    named
+                    // the pass IS to blame — but usually one fix is, and a
+                    // whole-file rollback would take every innocent fix in
+                    // the file down with it (a batch of 36 lost 30 good
+                    // fixes to one bad one on prismatic). Pin it on the
+                    // fixes AT the error sites: re-apply everything else
+                    // and recheck.
+                    let errorLinesFor (path: string) =
+                        errors
+                        |> Array.filter (fun d -> canonical d.FileName = canonical path)
+                        |> Array.map (fun d -> d.StartLine)
+                        |> Set.ofArray
+
+                    let split =
+                        named
+                        |> List.map (fun cf ->
+                            match fixesNearErrors cf (errorLinesFor cf.Path) with
+                            // no fix near any error line: the blame is
+                            // non-local (an inference ripple), so the whole
+                            // file stays rolled back
+                            | [] -> cf, cf.Fixes
+                            | culprits -> cf, culprits)
+
+                    let salvageable =
+                        split
+                        |> List.exists (fun (cf, culprits) -> culprits.Length < cf.Fixes.Length)
+
+                    let salvaged =
+                        if not salvageable then
+                            false
+                        else
+                            for cf, culprits in split do
+                                writeSource cf.Path (reapplySubset cf.Before (cf.Fixes |> List.except culprits))
+
+                            checker.InvalidateConfiguration options
+                            (projectErrors checker options).Length <= baselineErrors
+
+                    if salvaged then
+                        let kept =
+                            split |> List.sumBy (fun (cf, culprits) -> cf.Fixes.Length - culprits.Length)
+
+                        printfn
+                            $"  ({kept} fix(es) away from the error sites kept — the retry without the error-site fixes checks clean)"
+
+                        for cf, culprits in split do
+                            for _, code, f in culprits do
+                                suppressed.Add(fixKey code cf.Path f) |> ignore
+
+                        // a rolled-back suggestion can have members in
+                        // files the errors never named (a cross-file edit
+                        // set under --api-changes) — those members go too,
+                        // or the suggestion is left half-applied
+                        let culpritGroups =
+                            split
+                            |> List.collect (fun (_, culprits) -> culprits |> List.map (fun (g, _, _) -> g))
+                            |> Set.ofList
+
+                        let orphanFiles =
+                            [ for cf in changedFiles |> List.except named do
+                                  let orphans =
+                                      cf.Fixes |> List.filter (fun (g, _, _) -> culpritGroups.Contains g)
+
+                                  if not orphans.IsEmpty then
+                                      writeSource cf.Path (reapplySubset cf.Before (cf.Fixes |> List.except orphans))
+
+                                      for _, code, f in orphans do
+                                          suppressed.Add(fixKey code cf.Path f) |> ignore
+
+                                      { cf with Fixes = orphans } ]
+
+                        if not orphanFiles.IsEmpty then
+                            checker.InvalidateConfiguration options
+
+                        [ for cf, culprits in split do
+                              if not culprits.IsEmpty then
+                                  { cf with Fixes = culprits } ]
+                        @ orphanFiles
+                    else
+                        if salvageable then
+                            // the retry did not check clean — the blame was
+                            // not (only) at the error sites after all
+                            writeBack named
+
+                        suppressAll named
+
+                        // groups rolled back with the named files can have
+                        // members applied in OTHER files — strip those too
+                        let rolledGroups =
+                            named
+                            |> List.collect (fun cf -> cf.Fixes |> List.map (fun (g, _, _) -> g))
+                            |> Set.ofList
+
+                        let orphanFiles =
+                            [ for cf in changedFiles |> List.except named do
+                                  let orphans =
+                                      cf.Fixes |> List.filter (fun (g, _, _) -> rolledGroups.Contains g)
+
+                                  if not orphans.IsEmpty then
+                                      writeSource cf.Path (reapplySubset cf.Before (cf.Fixes |> List.except orphans))
+
+                                      for _, code, f in orphans do
+                                          suppressed.Add(fixKey code cf.Path f) |> ignore
+
+                                      { cf with Fixes = orphans } ]
+
+                        if not orphanFiles.IsEmpty then
+                            checker.InvalidateConfiguration options
+
+                        named @ orphanFiles
                 else
                     let rest = changedFiles |> List.except named
                     restore rest
+                    suppressAll named
                     changedFiles
             else
                 // every error sits in a file this pass never touched. That
@@ -2297,7 +2514,7 @@ let private verifyPass
                 eprintfn $"    {Path.GetFileName d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}"
 
             for cf in rolledBack do
-                for code, f in cf.Fixes do
+                for _, code, f in cf.Fixes do
                     eprintfn
                         $"    {code} {Path.GetFileName cf.Path}({f.FromRange.StartLine},{f.FromRange.StartColumn}) rolled back"
 
@@ -2509,6 +2726,43 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
             let mutable pass = 0
             let mutable lastApplied = -1
 
+            // divergence guard: a rule re-firing in the same file for a
+            // THIRD pass while the file has GROWN since the run began is
+            // feeding on its own output (the arm-wrap escape nested ten
+            // `return! task {` layers exactly this way). Legitimate
+            // repeat-firing — paren peeling, layer-by-layer unwinding —
+            // SHRINKS the file and passes freely.
+            let blockedRuleFile = System.Collections.Generic.HashSet<string * string>()
+            let ruleFilePasses = System.Collections.Generic.Dictionary<string * string, int>()
+
+            let updateDivergenceGuard (changedFiles: AppliedFile list) =
+                for cf in changedFiles do
+                    let codes = cf.Fixes |> List.map (fun (_, c, _) -> c) |> List.distinct
+
+                    for code in codes do
+                        let key = code, Path.GetFullPath cf.Path
+
+                        let n =
+                            (match ruleFilePasses.TryGetValue key with
+                             | true, c -> c
+                             | _ -> 0)
+                            + 1
+
+                        ruleFilePasses.[key] <- n
+
+                        let grown =
+                            match snapshot.TryFind cf.Path with
+                            | Some before ->
+                                (try
+                                    File.ReadAllText(cf.Path).Length > before.Length + 100
+                                 with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                                     false)
+                            | None -> false
+
+                        if n >= 3 && grown && blockedRuleFile.Add(code, Path.GetFullPath cf.Path) then
+                            eprintfn
+                                $"  ({code} re-fired in {Path.GetFileName cf.Path} across {n} passes while the file grew — likely rewriting its own output; blocked for this run, please report)"
+
             while pass < opts.MaxPasses && lastApplied <> 0 do
                 pass <- pass + 1
                 ProjectSources.invalidate ()
@@ -2525,10 +2779,14 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                         opts.Jobs
                         onlyFile
                         suppressed
+                        blockedRuleFile
 
                 lastApplied <- applied
                 totalApplied <- totalApplied + applied
                 runTotalApplied <- runTotalApplied + applied
+
+                if not opts.DryRun then
+                    updateDivergenceGuard changedFiles
 
                 let prefix = if opts.DryRun then "would be " else ""
                 printfn $"  {lastApplied} fix(es) {prefix}applied"
@@ -2863,6 +3121,21 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
 
             if baselineSuppressed > 0 then
                 printfn $"  ({baselineSuppressed} finding(s) matched the baseline and were suppressed)"
+
+            // some fixes exist only under --api-changes (internal-scope
+            // migrations, cross-file rewrites); without the flag they are
+            // never even computed, so no held-back count can hint at them.
+            // On your own code the flag is usually what you want.
+            if
+                not opts.ApiChanges
+                && targets
+                   |> List.exists (fun t ->
+                       match t with
+                       | Target.Project _ -> true
+                       | Target.Script _ -> false)
+            then
+                printfn
+                    "  tip: --api-changes also applies internal-scope migrations and cross-file fixes (rewriting call sites project-wide) — recommended on code you own"
 
             if commentSuppressed > 0 then
                 printfn $"  ({commentSuppressed} finding(s) silenced by suppression comments)"

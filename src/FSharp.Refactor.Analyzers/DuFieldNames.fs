@@ -393,10 +393,24 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
               match named with
               | Some(names, sourceName) ->
                   let edits =
+                      // the inserted names take the tuple's OWN spacing:
+                      // `int * int` gains `rx: int * ry: int`, the compact
+                      // `int*int` gains `rx:int*ry:int` — a space after the
+                      // colon in a spaceless tuple reads lopsided
+                      let fieldsText =
+                          match fields with
+                          | first :: _ ->
+                              let (SynField(range = fr)) = first
+                              let (SynField(range = lr)) = List.last fields
+                              textOfRange source (Range.mkRange fr.FileName fr.Start lr.End)
+                          | [] -> ""
+
+                      let colon = if fieldsText.Contains " * " || fields.Length = 1 then ": " else ":"
+
                       List.zip names fields
                       |> List.map (fun (name, SynField(range = fieldRange)) ->
                           let original = textOfRange source fieldRange
-                          fieldRange, original, $"{name}: {original}")
+                          fieldRange, original, $"{name}{colon}{original}")
 
                   { CaseName = caseName
                     Names = names

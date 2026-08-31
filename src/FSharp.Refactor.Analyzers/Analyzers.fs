@@ -391,6 +391,10 @@ let private ifRestructureMessages
 
     let elseAtMost =
         Configuration.parameterInt fileName "FR0114" "PyramidFlip" "elseAtMost" 3
+        // overlapping thresholds would make the flip fire on its own
+        // output and oscillate every pass; clamp so a flipped branch can
+        // never re-qualify
+        |> min (thenAtLeast - 1)
 
     [ if flipEnabled then
           for s in IfRestructure.findPyramidFlips thenAtLeast elseAtMost parseTree source do
@@ -563,8 +567,12 @@ let private ceStripMessages (parseTree: ParsedInput) (source: ISourceText) : Mes
             match s.Kind with
             | CeStrip.StripKind.WithRunner -> "This async wrapping is immediately run and can be removed."
             | CeStrip.StripKind.Forwarded -> "This async wrapping does nothing and can be removed."
+            | CeStrip.StripKind.ReturnBangIdentity ->
+                "return! around a builder whose whole body is one return statement is a no-op machine; the inner statement is the arm."
             | CeStrip.StripKind.TaskFromResult ->
                 "This task wrapping only wraps a value and can be written with Task.FromResult."
+            | CeStrip.StripKind.ThunkIdentity ->
+                "This tail thunk is defined and immediately called; the binding is its body."
 
         hint "FR0005" message s.Range [ fix s.Range s.OriginalText s.ReplacementText ])
 
@@ -1497,14 +1505,26 @@ let private loopPerfMessages (fileName: string) (parseTree: ParsedInput) (source
             if containsEnabled then
                 contains
                 |> List.map (fun s ->
-                    hint
-                        "FR0035"
-                        (sprintf
-                            "%s.contains scans '%s' linearly on every iteration; build a Set from it once outside the loop for O(log n) probes."
-                            s.ModuleName
-                            s.CollectionName)
-                        s.Range
-                        [])
+                    if not s.Fix.IsEmpty then
+                        hint
+                            "FR0035"
+                            (sprintf
+                                "%s.contains scans '%s' linearly on every iteration; '%s' is a startup-built module binding, so the fix adds a private HashSet companion beside it (built once) and probes that in O(1) — every probe of it in this file converts together."
+                                s.ModuleName
+                                s.CollectionName
+                                s.CollectionName)
+                            s.Range
+                            (s.Fix |> List.map (fun (r, original, replacement) -> fix r original replacement))
+                    else
+                        hint
+                            "FR0035"
+                            (sprintf
+                                "%s.contains scans '%s' linearly on every iteration. If the loop is long and '%s' is more than a handful of elements, build a HashSet from it once outside the loop for O(1) probes — the one-time build only pays for itself then; for a few elements the linear scan is already the fastest option, and F# Set's persistent tree costs more to build and probe than HashSet unless you need its immutability."
+                                s.ModuleName
+                                s.CollectionName
+                                s.CollectionName)
+                            s.Range
+                            [])
             else
                 []
 
@@ -1626,6 +1646,12 @@ let private caseInsensitiveMessages
                 sprintf
                     "%s() allocates a copy just to compare; String.Equals(a, b, StringComparison...IgnoreCase) is allocation-free — pick the comparison type deliberately (Ordinal vs Culture)."
                     s.LoweringName
+            | CaseInsensitive.CaseKind.MethodCall method when s.Replacement.IsSome ->
+                sprintf
+                    "%s() allocates a copy just to call %s with an ASCII literal; %s(..., OrdinalIgnoreCase) is allocation-free and agrees with it on every input except two Unicode compatibility characters (KELVIN SIGN, LONG S)."
+                    s.LoweringName
+                    method
+                    method
             | CaseInsensitive.CaseKind.MethodCall method ->
                 sprintf
                     "%s() allocates a copy just to call %s; the %s overload taking a StringComparison is allocation-free — pick the comparison type deliberately (Ordinal vs Culture)."
@@ -2628,6 +2654,74 @@ let emptyGuidEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
 let emptyGuidCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0136" "EmptyGuid" (fun () ->
         emptyGuidMessages ctx.ParseFileResults.ParseTree ctx.SourceText false ctx.CheckFileResults)
+
+// ---- FR0137 MapFusion ----
+
+let private mapFusionMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    MapFusion.find parseTree source
+    |> List.map (fun s ->
+        let message =
+            if s.Module = "Seq" then
+                "These two Seq.map stages can fuse into one, removing a lazy wrapper."
+            else
+                $"These two {s.Module}.map passes can fuse into one, avoiding an intermediate {s.Module.ToLowerInvariant()}."
+
+        hint "FR0137" message s.Range [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("MapFusion", "Fuse consecutive map passes with function composition", HelpBase)>]
+let mapFusionEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0137" "MapFusion" (fun () ->
+        mapFusionMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("MapFusion", "Fuse consecutive map passes with function composition", HelpBase)>]
+let mapFusionCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0137" "MapFusion" (fun () ->
+        mapFusionMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0138 StringEmptiness ----
+
+let private stringEmptinessMessages
+    (offerAlternatives: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    : Message list =
+    StringEmptiness.find parseTree source
+    |> List.collect (fun s ->
+        let predicate =
+            if s.WhiteSpace then
+                "String.IsNullOrWhiteSpace"
+            else
+                "String.IsNullOrEmpty"
+
+        if s.Guarded then
+            [ hint
+                  "FR0138"
+                  $"this hand-rolled emptiness test IS {predicate} — the null guard short-circuits exactly as the predicate answers, and the Trim spellings stop allocating a trimmed copy."
+                  s.Range
+                  [ fix s.Range s.OriginalText s.ReplacementText ] ]
+        else
+            // null behavior changes: the original throws, the predicate
+            // answers true. Almost always the intent — but a human signs
+            [ hint
+                  "FR0138"
+                  $"trimming a copy just to test it: {predicate} tests the same whitespace set without allocating — but it answers true for null where this throws, so apply deliberately."
+                  s.Range
+                  (if offerAlternatives then
+                       [ fix s.Range s.OriginalText s.ReplacementText ]
+                   else
+                       []) ])
+
+[<EditorAnalyzer("StringEmptiness", "Hand-rolled emptiness tests become the BCL predicates", HelpBase)>]
+let stringEmptinessEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0138" "StringEmptiness" (fun () ->
+        stringEmptinessMessages true ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("StringEmptiness", "Hand-rolled emptiness tests become the BCL predicates", HelpBase)>]
+let stringEmptinessCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0138" "StringEmptiness" (fun () ->
+        stringEmptinessMessages false ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 // ---- FR0062 / FR0067 / FR0068 MiscRules ----
 

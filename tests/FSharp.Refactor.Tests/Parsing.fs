@@ -149,7 +149,7 @@ let parseAndCheckPair (sourceA: string) (sourceB: string) =
     let checkA =
         match answerA with
         | FSharpCheckFileAnswer.Succeeded c -> c
-        | FSharpCheckFileAnswer.Aborted -> failwith "pair typecheck aborted"
+        | FSharpCheckFileAnswer.Aborted -> failwith $"pair typecheck aborted, calling parseAndCheckPair with sourceA: {sourceA}, sourceB: {sourceB}"
 
     let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions options
 

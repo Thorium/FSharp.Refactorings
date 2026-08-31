@@ -221,6 +221,40 @@ let ``an already extracted tail is not wrapped again`` () =
     Assert.Empty tails
 
 [<Fact>]
+let ``a tiny tail after a binding whose bangs sit in a nested CE is not wrapped`` () =
+    // the management-portal doom-loop shape: the last bang lives inside a
+    // nested task in an earlier BINDING, so the old body-end-minus-bang-line
+    // count saw a big number while the actual tail was two lines — it
+    // wrapped them, and then re-wrapped its own wrapper every pass
+    let source =
+        "module Test\nlet f (cache: ResizeArray<int>) = task {\n"
+        + awaits 8
+        + "\n    let inner =\n        task {\n            let! b = System.Threading.Tasks.Task.FromResult 9\n            return b + x1\n        }\n        |> fun t ->\n            let a = t\n            let b2 = a\n            let c = b2\n            c\n    cache.Clear()\n    return inner\n}"
+
+    let tailEdits =
+        adviceIn source
+        |> editsOfKind (function
+            | TaskStateMachine.AdviceKind.ExtractTail _ -> true
+            | _ -> false)
+
+    Assert.Empty tailEdits
+
+[<Fact>]
+let ``a tail that is already one wrapped thunk is never re-wrapped`` () =
+    let source =
+        "module Test\nlet f () = task {\n"
+        + awaits 8
+        + "\n    let inner =\n        task {\n            let! b = System.Threading.Tasks.Task.FromResult 9\n            return b + x1\n        }\n        |> fun t ->\n            let a = t\n            let b2 = a\n            let c = b2\n            c\n    let runTail () =\n        ignore inner\n        let s1 = x1 + 1\n        let s2 = s1 + 2\n        let s3 = s2 + 3\n        s1 + s2 + s3\n    return runTail ()\n}"
+
+    let tailEdits =
+        adviceIn source
+        |> editsOfKind (function
+            | TaskStateMachine.AdviceKind.ExtractTail _ -> true
+            | _ -> false)
+
+    Assert.Empty tailEdits
+
+[<Fact>]
 let ``a tail with branch returns extracts as a task-returning function`` () =
     // once the old hands-off case: branch returns cannot ride a plain
     // closure, but the task-returning wrapper carries them

@@ -40,6 +40,17 @@ type StripKind =
     | WithRunner
     /// `task { return x }` → `Task.FromResult(x)`
     | TaskFromResult
+    /// `return! task { return! X }` — the wrapper machine is a no-op
+    /// around its single return statement; the inner statement IS the
+    /// arm. Each strip removes one layer, so nesting unwinds pass by
+    /// pass.
+    | ReturnBangIdentity
+    /// `let runTailN () = B in runTailN ()` — a tool-generated tail
+    /// thunk wrapping nothing but another tail thunk (or, since the wrap
+    /// now sizes correctly, a tail too small to have deserved one). The
+    /// thunk is nullary, non-rec and called exactly where it is defined,
+    /// so the binding IS its body. Each strip removes one layer.
+    | ThunkIdentity
 
 type Suggestion =
     {
@@ -104,6 +115,26 @@ let private collectOpens (parseTree: ParsedInput) : Set<string> =
     AstIndex.replay collector parseTree
     Set.ofSeq opens
 
+/// A name the FR0029 tail wrap generates: runTail, runTail2, runTail3...
+/// Only these are collapsed — a human's own immediately-invoked thunk may
+/// be making a deliberate point.
+let private isRunTailName (name: string) =
+    name.StartsWith "runTail" && name.Substring 7 |> Seq.forall System.Char.IsDigit
+
+let private isUnitPat (p: SynPat) =
+    match p with
+    | SynPat.Paren(SynPat.Const(SynConst.Unit, _), _)
+    | SynPat.Const(SynConst.Unit, _) -> true
+    | _ -> false
+
+/// The expression a statement chain ends in.
+[<TailCall>]
+let rec private terminalExpr (e: SynExpr) =
+    match e with
+    | SynExpr.Sequential(expr2 = e2) -> terminalExpr e2
+    | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) -> terminalExpr lou.Body
+    | e -> e
+
 /// `Async.RunSynchronously`
 [<return: Struct>]
 let private (|RunSynchronously|_|) (e: SynExpr) =
@@ -133,10 +164,29 @@ let private (|ReturnOnly|_|) (e: SynExpr) =
     | AsyncCe(SynExpr.YieldOrReturn(expr = returned)) -> ValueSome returned
     | _ -> ValueNone
 
+/// Lines that lie INSIDE a multi-line string or interpolation — their
+/// leading whitespace is content, and the dedents must not touch it.
+let private multiLineLiteralLines (parseTree: ParsedInput) : Set<int> =
+    let lines = ResizeArray<int>()
+
+    let collector =
+        { new SyntaxCollectorBase() with
+            override _.WalkExpr(_path, e) =
+                match e with
+                | SynExpr.Const(SynConst.String _, r)
+                | SynExpr.InterpolatedString(range = r) when r.EndLine > r.StartLine ->
+                    for l in r.StartLine + 1 .. r.EndLine do
+                        lines.Add l
+                | _ -> () }
+
+    AstIndex.replay collector parseTree
+    Set.ofSeq lines
+
 /// Find do-nothing async/task wrappings.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
     let opens = collectOpens parseTree
+    let literalLines = multiLineLiteralLines parseTree
 
     let add (range: range) (replacementText: string) (kind: StripKind) =
         suggestions.Add
@@ -171,6 +221,155 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         expr.Range
                         (sprintf "Task.FromResult(%s)" (textOfRange source returned.Range))
                         StripKind.TaskFromResult
+                // return! task { <single return statement> } — the wrapper
+                // machine is a no-op; the inner statement IS the arm
+                | SynExpr.YieldOrReturnFrom(
+                    expr = SynExpr.App(
+                        funcExpr = SynExpr.Ident builder; argExpr = SynExpr.ComputationExpr(expr = inner))) when
+                    (builder.idText = "task"
+                     || builder.idText = "async"
+                     || builder.idText = "backgroundTask")
+                    && (match inner with
+                        | SynExpr.YieldOrReturn _
+                        | SynExpr.YieldOrReturnFrom _ -> true
+                        | _ -> false)
+                    ->
+                    // rebuild the inner statement's text, dedented from its
+                    // wrapped depth back to the wrapper's column where the
+                    // lines allow; verbatim where they do not (still parses:
+                    // deeper is never offside)
+                    let shift = inner.Range.StartColumn - expr.Range.StartColumn
+
+                    let text =
+                        if inner.Range.StartLine = inner.Range.EndLine then
+                            textOfRange source inner.Range
+                        else
+                            [ for l in inner.Range.StartLine .. inner.Range.EndLine ->
+                                  let line = source.GetLineString(l - 1)
+
+                                  let line =
+                                      if l = inner.Range.EndLine then
+                                          line.Substring(0, min line.Length inner.Range.EndColumn)
+                                      else
+                                          line
+
+                                  if l = inner.Range.StartLine then
+                                      line.Substring inner.Range.StartColumn
+                                  elif
+                                      shift > 0
+                                      && line.Length >= shift
+                                      && line.Substring(0, shift).Trim() = ""
+                                      && not (literalLines.Contains l)
+                                  then
+                                      line.Substring shift
+                                  else
+                                      line ]
+                            |> String.concat "\n"
+
+                    add expr.Range text StripKind.ReturnBangIdentity
+                // let runTailN () = B in runTailN () — the tail thunk wraps
+                // nothing worth a thunk; the binding IS its body. One layer
+                // per pass, so runTail3(runTail2(runTail)) unwinds fully.
+                | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
+                    match lou.Bindings, lou.Body with
+                    | [ SynBinding(
+                            headPat = SynPat.LongIdent(
+                                longDotId = SynLongIdent(id = [ f ]); argPats = SynArgPats.Pats [ unitPat ])
+                            expr = thunkBody) ],
+                      thunkCall when
+                        isRunTailName f.idText
+                        && isUnitPat unitPat
+                        // only UNJUSTIFIED wraps collapse: a body under the
+                        // tail wrap's own four-line threshold, or a body
+                        // that is nothing but another thunk (nested
+                        // damage). A four-plus-line body is the wrap FR0029
+                        // meant to make — collapsing it would hand the two
+                        // rules an eternal wrap/unwrap oscillation (seen
+                        // live on management-portal Domain.fs before this
+                        // gate)
+                        && (thunkBody.Range.EndLine - thunkBody.Range.StartLine + 1 < 4
+                            || (match thunkBody with
+                                // ... or the body is NOTHING BUT another
+                                // immediately-invoked thunk (nested damage).
+                                // A body that merely STARTS with a thunk and
+                                // carries more statements is a justified
+                                // wrap — collapsing it would reopen the
+                                // wrap/unwrap oscillation from the other side
+                                | SynExpr.LetOrUse innerLou when not innerLou.IsBang ->
+                                    match innerLou.Bindings, innerLou.Body with
+                                    | [ SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ innerF ]))) ],
+                                      SynExpr.App(funcExpr = SynExpr.Ident innerG; argExpr = SynExpr.Const(SynConst.Unit, _)) ->
+                                        isRunTailName innerF.idText && innerG.idText = innerF.idText
+                                    | _ -> false
+                                | _ -> false))
+                        ->
+                        // `return f ()` needs the return re-seated on the
+                        // body's terminal expression; `f ()` needs nothing
+                        let returnTerminal =
+                            match thunkCall with
+                            | SynExpr.App(funcExpr = SynExpr.Ident g; argExpr = SynExpr.Const(SynConst.Unit, _)) when
+                                g.idText = f.idText
+                                ->
+                                Some None
+                            | SynExpr.YieldOrReturn(
+                                expr = SynExpr.App(funcExpr = SynExpr.Ident g; argExpr = SynExpr.Const(SynConst.Unit, _))) when
+                                g.idText = f.idText
+                                ->
+                                match terminalExpr thunkBody with
+                                // a branching terminal would need a return
+                                // in every branch — out of scope
+                                | SynExpr.IfThenElse _
+                                | SynExpr.Match _
+                                | SynExpr.MatchBang _
+                                | SynExpr.TryWith _
+                                | SynExpr.TryFinally _
+                                | SynExpr.While _
+                                | SynExpr.For _
+                                | SynExpr.ForEach _ -> None
+                                | t when t.Range.StartLine = t.Range.EndLine -> Some(Some t.Range)
+                                | _ -> None
+                            | _ -> None
+
+                        match returnTerminal with
+                        | Some terminal when
+                            thunkBody.Range.StartLine > f.idRange.EndLine
+                            && not (spansDirective source thunkBody.Range)
+                            ->
+                            let inner = thunkBody.Range
+                            let shift = inner.StartColumn - expr.Range.StartColumn
+
+                            let text =
+                                [ for l in inner.StartLine .. inner.EndLine ->
+                                      let line = source.GetLineString(l - 1)
+
+                                      let line =
+                                          if l = inner.EndLine then
+                                              line.Substring(0, min line.Length inner.EndColumn)
+                                          else
+                                              line
+
+                                      let line =
+                                          match terminal with
+                                          | Some tr when l = tr.StartLine && tr.StartColumn <= line.Length ->
+                                              line.Insert(tr.StartColumn, "return ")
+                                          | _ -> line
+
+                                      if l = inner.StartLine then
+                                          line.Substring(min line.Length inner.StartColumn)
+                                      elif
+                                          shift > 0
+                                          && line.Length >= shift
+                                          && line.Substring(0, shift).Trim() = ""
+                                          && not (literalLines.Contains l)
+                                      then
+                                          line.Substring shift
+                                      else
+                                          line ]
+                                |> String.concat "\n"
+
+                            add expr.Range text StripKind.ThunkIdentity
+                        | _ -> ()
+                    | _ -> ()
                 | _ -> () }
 
     AstIndex.replay collector parseTree

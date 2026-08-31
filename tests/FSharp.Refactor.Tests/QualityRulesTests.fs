@@ -1527,7 +1527,7 @@ let ``an internal option field migrates across files`` () =
             Assert.Contains("| ValueSome d -> string d", patchedB)
 
             let errors = recheck patchedA patchedB
-            Assert.True(Array.isEmpty errors, sprintf "patched pair does not typecheck: %A" errors)
+            Assert.True(Array.isEmpty errors, $"patched pair does not typecheck: %A{errors}")
         | None -> failwith "expected a cross-file migration"
     | other -> failwithf "Expected one voption suggestion, got %A" other
 
@@ -2072,3 +2072,154 @@ let ``inside a query the whole culture suggestion stands down`` () =
 
     let _, parses, _ = miscIn source
     Assert.Empty parses
+
+[<Fact>]
+let ``compact tuple spelling keeps its compact field names`` () =
+    let source = "module M\ntype private Mut =\n    | RxAndRy of int*int\n    | Nothing"
+
+    match duNamesIn source with
+    | [ s ] ->
+        let patched = applyMigration source s.Edits
+        Assert.Contains("| RxAndRy of rx:int*ry:int", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one compact suggestion, got %A" other
+
+// ---- FR0035 startup-set quick-fix ----
+
+let private containsIn (source: string) =
+    let tree, sourceText = parse source
+    let contains, _ = LoopPerf.find tree sourceText
+    contains
+
+[<Fact>]
+let ``a startup list whose only uses are probes converts in place to a Set`` () =
+    let source =
+        "module M\nlet allowed = [ \"a\"; \"b\"; \"c\" ]\nlet f (xs: string list) =\n    for x in xs do\n        if List.contains x allowed then\n            printfn \"%s\" x"
+
+    match containsIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fix
+        let patched = applyMigration source s.Fix
+        Assert.Contains("let allowed = [ \"a\"; \"b\"; \"c\" ] |> Set.ofList", patched)
+        Assert.Contains("if allowed.Contains x then", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one contains suggestion, got %A" other
+
+[<Fact>]
+let ``a list with other uses keeps its type and gains the HashSet companion`` () =
+    // the stray List.length use pins the binding's type, so the fix
+    // reaches for the shadow set instead of converting in place
+    let source =
+        "module M\nlet allowed = [ \"a\"; \"b\"; \"c\" ]\nlet count = List.length allowed\nlet f (xs: string list) =\n    for x in xs do\n        if List.contains x allowed then\n            printfn \"%s\" x"
+
+    match containsIn source with
+    | [ s ] ->
+        Assert.NotEmpty s.Fix
+        let patched = applyMigration source s.Fix
+        Assert.Contains("let private allowedProbeSet = System.Collections.Generic.HashSet(allowed)", patched)
+        Assert.Contains("if allowedProbeSet.Contains x then", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one contains suggestion, got %A" other
+
+[<Fact>]
+let ``an array literal converts with ofArray`` () =
+    let source =
+        "module M\nlet allowed = [| 1; 2; 3 |]\nlet f (xs: int list) =\n    for x in xs do\n        if Array.contains x allowed then\n            printfn \"%d\" x"
+
+    match containsIn source with
+    | [ s ] ->
+        let patched = applyMigration source s.Fix
+        Assert.Contains("[| 1; 2; 3 |] |> Set.ofArray", patched)
+        Assert.Contains("if allowed.Contains x then", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one contains suggestion, got %A" other
+
+[<Fact>]
+let ``a shadowed collection name keeps the note only`` () =
+    // a parameter of the same name makes resolution ambiguous to a
+    // parse-only scan
+    let source =
+        "module M\nlet allowed = [ \"a\" ]\nlet f (allowed: string list) (xs: string list) =\n    for x in xs do\n        if List.contains x allowed then\n            printfn \"%s\" x"
+
+    match containsIn source with
+    | [ s ] -> Assert.Empty s.Fix
+    | other -> failwithf "Expected the note without a fix, got %A" other
+
+[<Fact>]
+let ``a dotted-path collection keeps the note only`` () =
+    let source =
+        "module M\ntype C = { Allowed: string list }\nlet f (c: C) (xs: string list) =\n    for x in xs do\n        if List.contains x c.Allowed then\n            printfn \"%s\" x"
+
+    match containsIn source with
+    | [ s ] -> Assert.Empty s.Fix
+    | other -> failwithf "Expected the dotted note, got %A" other
+
+[<Fact>]
+let ``two probes of one startup list convert together with one companion`` () =
+    let source =
+        "module M\nlet allowed = [ \"a\"; \"b\" ]\nlet f (xs: string list) =\n    for x in xs do\n        if List.contains x allowed then printfn \"a\"\nlet g (ys: string list) =\n    for y in ys do\n        if List.contains y allowed then printfn \"b\""
+
+    match containsIn source with
+    | [ s1; s2 ] ->
+        Assert.Equal(3, (s1.Fix @ s2.Fix).Length) // one conversion + two rewrites, carried once
+        let patched = applyMigration source (s1.Fix @ s2.Fix)
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(patched, "Set.ofList").Count)
+        Assert.Contains("if allowed.Contains x then", patched)
+        Assert.Contains("if allowed.Contains y then", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected two contains suggestions, got %A" other
+
+// ---- FR0005 return!-identity collapse / FR0029 single-return arms ----
+
+let private ceStripIn (source: string) =
+    let tree, sourceText = parse source
+    CeStrip.find tree sourceText
+
+[<Fact>]
+let ``a return-bang around a single-return task is a no-op machine`` () =
+    let source =
+        "module M\nlet f (t: System.Threading.Tasks.Task<int>) =\n    task {\n        return! task {\n            return! t\n        }\n    }"
+
+    match ceStripIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ReturnBangIdentity) with
+    | [ s ] ->
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.Contains("return! t", patched)
+        Assert.False(patched.Contains "return! task {")
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one identity strip, got %A" other
+
+[<Fact>]
+let ``nested no-op machines unwind layer by layer`` () =
+    // the management-portal damage shape: each pass strips one layer
+    let source =
+        "module M\nlet f (t: System.Threading.Tasks.Task<int>) =\n    task {\n        return! task {\n            return! task {\n                return! t\n            }\n        }\n    }"
+
+    let strips =
+        ceStripIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ReturnBangIdentity)
+
+    Assert.True(strips.Length >= 1)
+
+[<Fact>]
+let ``a single return-bang arm is never wrapped`` () =
+    // wrapping `| A -> return! X` moves nothing out of the machine and
+    // once re-wrapped itself every pass
+    let source =
+        "module Test\nlet g () = System.Threading.Tasks.Task.FromResult 1\nlet f (cond: bool) =\n    task {\n        match cond with\n        | true ->\n            return! g ()\n        | false ->\n            let! a = g ()\n            let! b = g ()\n            let! c = g ()\n            let! d = g ()\n            let! e = g ()\n            let! h = g ()\n            let! i = g ()\n            let! j = g ()\n            return a + b + c + d + e + h + i + j\n    }"
+
+    let taskAdviceIn (src: string) =
+        let tree, sourceText = parse src
+        TaskStateMachine.find tree sourceText
+
+    let splits =
+        taskAdviceIn source
+        |> List.tryPick (fun s ->
+            match s.Kind with
+            | TaskStateMachine.AdviceKind.SplitBranches -> Some s.Edits
+            | _ -> None)
+
+    match splits with
+    | Some edits ->
+        // the true arm (single return!) must not appear in any edit
+        for r, _ in edits do
+            Assert.False(r.StartLine <= 7 && r.EndLine >= 7 && r.StartLine > 5)
+    | None -> ()

@@ -1103,7 +1103,7 @@ let ``an internal boundary drain taskifies across files under api-changes`` () =
             Assert.Contains("return! t", patchedA)
             Assert.Contains("let! s = A.fetch 1", patchedB)
             let errors = recheck patchedA patchedB
-            Assert.True(Array.isEmpty errors, sprintf "patched pair does not typecheck: %A" errors)
+            Assert.True(Array.isEmpty errors, $"patched pair does not typecheck: %A{errors}")
         | other -> failwithf "Expected one internal taskify, got %A" other
     finally
         System.Environment.SetEnvironmentVariable("FSREF_API_CHANGES", null)

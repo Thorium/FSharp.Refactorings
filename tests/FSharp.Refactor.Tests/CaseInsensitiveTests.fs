@@ -151,6 +151,76 @@ let ``comparing two expressions stays advice`` () =
     | suggestions -> Assert.True(suggestions |> List.forall (fun s -> s.Replacement |> Option.isNone))
 
 [<Fact>]
+let ``a lowered StartsWith against an ASCII literal gets the comparison-overload fix`` () =
+    let source =
+        "module Test\nopen System\nlet f (path: string) = path.ToLower().StartsWith \"file:\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(Some "path.StartsWith(\"file:\", StringComparison.OrdinalIgnoreCase)", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``the parenthesized argument spelling fixes the same way, qualified without open System`` () =
+    let source =
+        "module Test\nlet f (path: string) = path.ToUpperInvariant().EndsWith(\".CSV\")"
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(Some "path.EndsWith(\".CSV\", System.StringComparison.OrdinalIgnoreCase)", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``a lowered Contains fixes where the StringComparison overload exists`` () =
+    let source =
+        "module Test\nopen System\nlet f (s: string) = s.ToLowerInvariant().Contains \"error\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(Some "s.Contains(\"error\", StringComparison.OrdinalIgnoreCase)", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``an equality literal whose case fights the lowering stays advice`` () =
+    // x.ToLower() = "ABC" is always false; OrdinalIgnoreCase would make
+    // it start matching — same gate as the method-call shape
+    match caseIn "module Test\nopen System\nlet f (x: string) = x.ToLower() = \"ABC\"" with
+    | [ s ] -> Assert.Equal(None, s.Replacement)
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``a literal whose case fights the lowering stays advice`` () =
+    // path.ToLower().StartsWith "FILE:" can never match; making it match
+    // is a behavior change only a human should sign off on
+    match caseIn "module Test\nopen System\nlet f (path: string) = path.ToLower().StartsWith \"FILE:\"" with
+    | [ s ] -> Assert.Equal(None, s.Replacement)
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``a non-literal method argument stays advice`` () =
+    match caseIn "module Test\nopen System\nlet f (path: string) (p: string) = path.ToLower().StartsWith p" with
+    | [ s ] -> Assert.Equal(None, s.Replacement)
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``a lowered IndexOf against an agreeing literal gets the fix`` () =
+    let source =
+        "module Test\nopen System\nlet f (email: string) = email.ToLower().IndexOf \"@example.\""
+
+    match caseIn source with
+    | [ s ] ->
+        Assert.Equal(Some "email.IndexOf(\"@example.\", StringComparison.OrdinalIgnoreCase)", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement.Value
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
 let ``the culture-aware alternative also typechecks`` () =
     let source =
         "module Test\nopen System\nlet f (role: string) = role.ToLowerInvariant() = \"user\""

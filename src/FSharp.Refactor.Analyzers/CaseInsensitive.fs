@@ -6,11 +6,20 @@
 ///
 /// The allocation-free spellings are `String.Equals(a, b, comparison)` and
 /// the `StringComparison` overloads of Contains/StartsWith/EndsWith/
-/// IndexOf. This is advice, not a fix: lower-then-compare, OrdinalIgnoreCase
-/// and CultureIgnoreCase can differ on edge cases (Turkish dotless i, ß),
-/// so the comparison type is the author's deliberate choice.
+/// IndexOf — the form the .NET string best-practices guide names outright
+/// (learn.microsoft.com/dotnet/standard/base-types/best-practices-strings:
+/// state the comparison explicitly, prefer OrdinalIgnoreCase for
+/// non-linguistic matching, do not lower-case to compare). Both the
+/// equality and the method-call shapes get a FIX when the other operand is
+/// a pure-ASCII literal whose case agrees with the lowering direction;
+/// everything else stays advice, because lower-then-compare,
+/// OrdinalIgnoreCase and CultureIgnoreCase can differ on edge cases
+/// (Turkish dotless i, ß) and there the comparison type is the author's
+/// deliberate choice.
 ///
-/// The lowering method is typed-gated to System.String.
+/// The lowering method is typed-gated to System.String; the Contains
+/// rewrite additionally requires the StringComparison overload to exist in
+/// the compilation's references (netstandard2.1+).
 module FSharp.Refactor.CaseInsensitive
 
 open FSharp.Compiler.CodeAnalysis
@@ -107,6 +116,49 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             | SynExpr.Const(SynConst.String(text = text), _) -> text |> Seq.forall (fun c -> int c < 128)
             | _ -> false
 
+        // `x.ToLower().StartsWith "FILE:"` can never match — the receiver
+        // was just lowered. Rewriting it to OrdinalIgnoreCase would make it
+        // start matching, which is a silent behavior change even if it is
+        // probably the intended one; mismatched-case literals stay advice.
+        let literalAgreesWithLowering (loweringName: string) (e: SynExpr) =
+            match e with
+            | SynExpr.Const(SynConst.String(text = text), _) ->
+                if loweringName.StartsWith "ToLower" then
+                    text |> Seq.forall (System.Char.IsAsciiLetterUpper >> not)
+                else
+                    text |> Seq.forall (System.Char.IsAsciiLetterLower >> not)
+            | _ -> false
+
+        // Contains(string, StringComparison) is netstandard2.1+, so on
+        // net48/netstandard2.0 that rewrite would not compile; the other
+        // comparison methods have carried their StringComparison overload
+        // since .NET 2.0. Fail CLOSED, like FR0038's char gate: no visible
+        // overload, no fix.
+        let hasComparisonOverload (methodId: Ident) =
+            let r = methodId.idRange
+            let lineText = source.GetLineString(r.EndLine - 1)
+
+            match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ methodId.idText ]) with
+            | Some symbolUse ->
+                match symbolUse.Symbol with
+                | :? FSharpMemberOrFunctionOrValue as value ->
+                    match value.DeclaringEntity with
+                    | Some entity ->
+                        (try
+                            entity.MembersFunctionsAndValues
+                            |> Seq.exists (fun m ->
+                                m.LogicalName = methodId.idText
+                                && m.CurriedParameterGroups
+                                   |> Seq.exists (fun group ->
+                                       group.Count = 2
+                                       && group.[1].Type.HasTypeDefinition
+                                       && group.[1].Type.TypeDefinition.TryFullName = Some "System.StringComparison"))
+                         with OptionModule.FcsSymbolFailure ->
+                             false)
+                    | None -> false
+                | _ -> false
+            | None -> false
+
         [ for _, expr in index.Exprs do
               match expr with
               | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs); argExpr = rhs) when
@@ -121,7 +173,15 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   match lowered with
                   | Some(m, call, other) when resolvesToStringMethod check source m ->
                       let replacementWith (comparison: string) =
-                          if isAsciiLiteral other && isSingleLine expr.Range then
+                          // same case-agreement gate as the method-call
+                          // shape: `x.ToLower() = "ABC"` is always false,
+                          // and making it start matching is a behavior
+                          // change only a human signs
+                          if
+                              isAsciiLiteral other
+                              && literalAgreesWithLowering m.idText (stripParens other)
+                              && isSingleLine expr.Range
+                          then
                               receiverTextOf call
                               |> Option.map (fun receiver ->
                                   let literal = textOfRange source other.Range
@@ -149,16 +209,36 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   | _ -> ()
               | SynExpr.App(
                   isInfix = false
-                  funcExpr = SynExpr.DotGet(expr = LoweredCall lowering; longDotId = SynLongIdent(id = [ methodId ]))) when
+                  funcExpr = SynExpr.DotGet(
+                      expr = (LoweredCall lowering as loweredExpr); longDotId = SynLongIdent(id = [ methodId ]))
+                  argExpr = arg) when
                   comparisonMethods.Contains methodId.idText
                   ->
                   if resolvesToStringMethod check source lowering then
-                      // the comparison-taking Contains/StartsWith overloads
-                      // are netstandard2.1+, so this form stays advice until
-                      // it grows a capability gate like FR0038's
+                      let literalArg =
+                          match stripParens arg with
+                          | SynExpr.Const(SynConst.String _, _) as lit -> Some lit
+                          | _ -> None
+
+                      let replacementWith (comparison: string) =
+                          match literalArg with
+                          | Some lit when
+                              isAsciiLiteral lit
+                              && literalAgreesWithLowering lowering.idText lit
+                              && isSingleLine expr.Range
+                              && (methodId.idText <> "Contains" || hasComparisonOverload methodId)
+                              ->
+                              receiverTextOf loweredExpr
+                              |> Option.map (fun receiver ->
+                                  let literal = textOfRange source lit.Range
+                                  let prefix = if opensSystemNamespace source then "" else "System."
+
+                                  $"{receiver}.{methodId.idText}({literal}, {prefix}StringComparison.{comparison})")
+                          | _ -> None
+
                       { Range = expr.Range
                         Kind = CaseKind.MethodCall methodId.idText
                         LoweringName = lowering.idText
-                        Replacement = None
-                        CultureReplacement = None }
+                        Replacement = replacementWith "OrdinalIgnoreCase"
+                        CultureReplacement = replacementWith "InvariantCultureIgnoreCase" }
               | _ -> () ]

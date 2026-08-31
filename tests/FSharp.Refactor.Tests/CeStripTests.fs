@@ -23,6 +23,79 @@ let ``return-bang of identifier is stripped`` () =
     assertSingleSuggestion "module Test\nlet f (comp: Async<int>) = async { return! comp }" "comp"
 
 [<Fact>]
+let ``a tail thunk called where it is defined collapses to its body`` () =
+    assertSingleSuggestion
+        "module Test\nlet f (xs: ResizeArray<int>) v =\n    let x =\n        let runTail () =\n            xs.Clear()\n            v\n        runTail ()\n    x"
+        "xs.Clear()\n        v"
+
+[<Fact>]
+let ``a returned tail thunk collapses with the return reseated on its terminal`` () =
+    let source =
+        "module Test\nlet f (xs: ResizeArray<int>) v =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail () =\n            xs.Clear()\n            v\n        return runTail ()\n    }"
+
+    match findIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ThunkIdentity) with
+    | [ s ] ->
+        Assert.Equal("xs.Clear()\n        return v", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
+    | other -> failwithf "Expected exactly one thunk collapse, got %A" other
+
+[<Fact>]
+let ``numbered wrappers collapse one layer per pass`` () =
+    // the live three-deep damage: each layer is its own suggestion, the
+    // applier takes the innermost, and the next pass takes the next
+    let source =
+        "module Test\nlet f (xs: ResizeArray<int>) v =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail3 () =\n            let runTail2 () =\n                let runTail () =\n                    xs.Clear()\n                    v\n                runTail ()\n            runTail2 ()\n        return runTail3 ()\n    }"
+
+    let collapses =
+        findIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ThunkIdentity)
+
+    Assert.Equal(3, collapses.Length)
+
+[<Fact>]
+let ``a thunk with a four-line body is the wrap FR0029 meant to make`` () =
+    // collapsing a justified wrap would hand FR0029 and FR0005 an eternal
+    // wrap/unwrap oscillation
+    Assert.Empty(
+        findIn
+            "module Test\nlet f (xs: ResizeArray<int>) v =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail () =\n            let a = v + 1\n            let b = a + 1\n            xs.Clear()\n            a + b\n        return runTail ()\n    }"
+    )
+
+[<Fact>]
+let ``a body that starts with a thunk but carries more statements is a justified wrap`` () =
+    // collapsing here would strand the tail back in the machine and let
+    // FR0029 wrap it again — the other side of the oscillation
+    Assert.Empty(
+        findIn
+            "module Test\nlet f (xs: ResizeArray<int>) v =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail2 () =\n            let runTail () =\n                xs.Clear()\n                v\n            let extra = runTail ()\n            extra + 1\n        return runTail2 ()\n    }"
+        |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ThunkIdentity && s.OriginalText.Contains "runTail2")
+    )
+
+[<Fact>]
+let ``a triple-quoted string inside a collapsed thunk keeps its indentation`` () =
+    // the dedent must not strip leading whitespace that is string CONTENT
+    let source =
+        "module Test\nlet f (emit: string -> string) =\n    let x =\n        let runTail () =\n            emit \"\"\"\n            payload\n\"\"\"\n        runTail ()\n    x"
+
+    match findIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ThunkIdentity) with
+    | [ s ] -> Assert.Contains("\n            payload", s.ReplacementText)
+    | other -> failwithf "Expected exactly one thunk collapse, got %A" other
+
+[<Fact>]
+let ``a thunk with a human name is left alone`` () =
+    Assert.Empty(
+        findIn
+            "module Test\nlet f (xs: ResizeArray<int>) v =\n    let x =\n        let cleanup () =\n            xs.Clear()\n            v\n        cleanup ()\n    x"
+    )
+
+[<Fact>]
+let ``a returned thunk with a branching terminal is left alone`` () =
+    Assert.Empty(
+        findIn
+            "module Test\nlet f (xs: ResizeArray<int>) c =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail () =\n            xs.Clear()\n            if c then 1 else 2\n        return runTail ()\n    }"
+    )
+
+[<Fact>]
 let ``let-bang rewrap identity is stripped`` () =
     assertSingleSuggestion "module Test\nlet f (comp: Async<int>) = async { let! v = comp in return v }" "comp"
 

@@ -182,6 +182,21 @@ let rec private terminalOf (e: SynExpr) =
 
 /// A fresh function name for extracted code: the base name, or a numbered
 /// variant when the file already uses that identifier.
+/// The tail wrap's own output: a single nullary local function immediately
+/// called (or returned). Wrapping THAT again — runTail2 around runTail,
+/// runTail3 around runTail2 — sheds nothing from the state machine and
+/// never converges; seen live three layers deep on management-portal.
+let private alreadyWrappedTail (tail: SynExpr) =
+    match tail with
+    | SynExpr.LetOrUse lou when not lou.IsBang ->
+        match lou.Bindings, lou.Body with
+        | [ SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ f ]); argPats = SynArgPats.Pats [ _ ])) ],
+          (SynExpr.App(funcExpr = SynExpr.Ident g)
+          | SynExpr.YieldOrReturn(expr = SynExpr.App(funcExpr = SynExpr.Ident g))
+          | SynExpr.YieldOrReturnFrom(expr = SynExpr.App(funcExpr = SynExpr.Ident g))) -> f.idText = g.idText
+        | _ -> false
+    | _ -> false
+
 let private freshName (source: ISourceText) (baseName: string) =
     let full =
         String.concat "\n" [ for i in 0 .. source.GetLineCount() - 1 -> source.GetLineString i ]
@@ -492,7 +507,19 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       let armEdits =
                           let perArm =
                               [ for SynMatchClause(resultExpr = result) as clause in clauses do
-                                    if containsBang result.Range then
+                                    // a single return statement is the whole
+                                    // arm: wrapping it moves NOTHING out of
+                                    // the machine, and the wrapped result is
+                                    // itself a single return! — the shape
+                                    // that once re-wrapped every pass into
+                                    // return! task { return! task { ... } }
+                                    let singleReturnArm =
+                                        match result with
+                                        | SynExpr.YieldOrReturn _
+                                        | SynExpr.YieldOrReturnFrom _ -> true
+                                        | _ -> false
+
+                                    if containsBang result.Range && not singleReturnArm then
                                         let r = result.Range
                                         let bodyLines = linesOf source r.StartLine r.EndLine
                                         let armInd = String.replicate r.StartColumn " "
@@ -585,6 +612,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                   && startsOwnLine source tail.Range
                                   && tail.Range.EndLine > tail.Range.StartLine
                                   && not (spansDirective source tail.Range)
+                                  // size the WRAP by the tail's own extent, not
+                                  // tailLineCount: the last bang can sit inside
+                                  // a nested CE in an earlier binding, and that
+                                  // anchor once inflated a 2-line tail into a
+                                  // wrap that then re-wrapped itself every pass
+                                  && tail.Range.EndLine - tail.Range.StartLine + 1 - functionDefLines tail.Range >= 4
+                                  && not (alreadyWrappedTail tail)
                                   ->
                                   let returns =
                                       index.Exprs

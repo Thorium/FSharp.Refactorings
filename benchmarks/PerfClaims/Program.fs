@@ -77,10 +77,25 @@ let private measure iters (f: unit -> int) =
 /// judged on what they promise, held loosely on what they don't.
 let private allocIsTheClaim = set [ "FR0011"; "FR0106" ]
 
+/// The symmetric set: advice that TRADES a stated one-time allocation
+/// for time (FR0035's build-a-HashSet note). Allocation cannot gate a
+/// trade whose before-side allocates nothing; instead the time win must
+/// be DECISIVE — at least 2x — or naming the trade isn't worth it.
+let private timeIsTheClaim = set [ "FR0035" ]
+
 /// The gates. Time tolerances are generous because stopwatch loops
 /// jitter; the allocation axis is nearly deterministic, so its
 /// tolerances are tight.
-let private gate cat (relaxedTime: bool) (bNs: float, bB: float) (aNs: float, aB: float) =
+let private gate cat (relaxedTime: bool) (timeTrade: bool) (bNs: float, bB: float) (aNs: float, aB: float) =
+    if timeTrade then
+        // an explicit time-for-allocation trade: the advice names its
+        // price, so only the promised axis gates — and it must win BIG
+        if aNs <= bNs * 0.5 then
+            Ok()
+        else
+            Error $"the traded time win is not decisive: {bNs:F0} -> {aNs:F0} ns/op"
+    else
+
     match cat with
     | Perf ->
         let timeOk =
@@ -156,6 +171,7 @@ let private curried8 (a: int) (b: int) (c: int) (d: int) (e: int) (f: int) (g: i
 let xsArr = Array.init 1000 id
 let bigArr = Array.init 100_000 (fun i -> i % 100)
 let sq = Seq.init 1000 id
+let pairArr = Array.init 1000 (fun i -> i, string i)
 let idSet = Set.ofList xsList
 let queue = System.Collections.Concurrent.ConcurrentQueue<int>(Seq.init 1000 id)
 let opt = Some 42
@@ -163,6 +179,9 @@ let vopt = ValueSome 42
 let sName = "wintermute"
 let sCity = "chiba"
 let sHello = "hello world, hello again"
+// padded but NOT blank: the Trim() = "" test does its full work and the
+// trimmed copy still allocates
+let sPadded = "  hello  "
 let sMixed = "Hello World"
 let sMixed2 = "hELLO wORLD"
 let mutable maybeNull: string = "present"
@@ -197,6 +216,13 @@ let cases =
         Iters = 10_000
         Before = fun () -> (sq |> Seq.toList |> List.map (fun x -> x + 1)).Length
         After = fun () -> (sq |> Seq.map (fun x -> x + 1) |> Seq.toList).Length }
+
+      { Code = "FR0137"
+        Name = "Array.map fst|>Array.map f -> Array.map (fst >> f)"
+        Cat = Perf
+        Iters = 10_000
+        Before = fun () -> (pairArr |> Array.map fst |> Array.map (fun x -> x + 1)).Length
+        After = fun () -> (pairArr |> Array.map (fst >> fun x -> x + 1)).Length }
 
       { Code = "FR0011"
         Name = "active pattern -> [<return: Struct>]"
@@ -289,7 +315,7 @@ let cases =
               r.Count }
 
       { Code = "FR0035"
-        Name = "List.contains probes -> Set.contains"
+        Name = "List.contains probes -> binding converted to Set in place"
         Cat = Perf
         Iters = 1_000
         Before =
@@ -302,11 +328,43 @@ let cases =
 
               n
         After =
+          // build charged, same honesty rule as the HashSet companion:
+          // Set.Contains is O(log n) not O(1), but even a five-element
+          // set beats the list scan measured 2.5x — and the in-place
+          // form keeps the module value immutable
+          fun () ->
+              let probes = Set.ofList xsList
+              let mutable n = 0
+
+              for i in 0..999 do
+                  if probes.Contains i then
+                      n <- n + 1
+
+              n }
+
+      { Code = "FR0035"
+        Name = "List.contains probes -> HashSet built once, probed per iteration"
+        Cat = Perf
+        Iters = 1_000
+        Before =
           fun () ->
               let mutable n = 0
 
               for i in 0..999 do
-                  if Set.contains i idSet then
+                  if List.contains i xsList then
+                      n <- n + 1
+
+              n
+        After =
+          // the build is CHARGED to the rewrite — the advice is only
+          // honest if the one-time construction plus O(1) probes beats
+          // the repeated linear scans, build cost included
+          fun () ->
+              let probes = System.Collections.Generic.HashSet<int>(xsList)
+              let mutable n = 0
+
+              for i in 0..999 do
+                  if probes.Contains i then
                       n <- n + 1
 
               n }
@@ -619,6 +677,22 @@ let cases =
               | true -> 1
               | false -> 0
         After = fun () -> if sHello.Length > 10 then 1 else 0 }
+
+      { Code = "FR0138"
+        Name = "isNull x || x = \"\" -> String.IsNullOrEmpty"
+        Cat = Idiom
+        Iters = 5_000_000
+        Before =
+          fun () ->
+              if isNull sHello || sHello = "" then 1 else 0
+        After = fun () -> if System.String.IsNullOrEmpty sHello then 1 else 0 }
+
+      { Code = "FR0138"
+        Name = "x.Trim() = \"\" -> String.IsNullOrWhiteSpace"
+        Cat = Perf
+        Iters = 1_000_000
+        Before = fun () -> if sPadded.Trim() = "" then 1 else 0
+        After = fun () -> if System.String.IsNullOrWhiteSpace sPadded then 1 else 0 }
 
       { Code = "FR0002"
         Name = "match option -> Option.map |> defaultValue"
@@ -1107,7 +1181,7 @@ let main argv =
         let aNs, aB, s2 = measure case.Iters case.After
         sink <- sink + s1 + s2
 
-        match gate case.Cat (allocIsTheClaim.Contains case.Code) (bNs, bB) (aNs, aB) with
+        match gate case.Cat (allocIsTheClaim.Contains case.Code) (timeIsTheClaim.Contains case.Code) (bNs, bB) (aNs, aB) with
         | Ok() -> printfn "%-8s %-50s %11.1f %11.1f %10.1f %10.1f  PASS" case.Code case.Name bNs aNs bB aB
         | Error why ->
             failures <- failures + 1

@@ -13,6 +13,8 @@
     <Compile Include="OptionModuleTests.fs" />
     <Compile Include="CompositionTests.fs" />
     <Compile Include="ConversionMoveTests.fs" />
+    <Compile Include="MapFusionTests.fs" />
+    <Compile Include="StringEmptinessTests.fs" />
     <Compile Include="CeStripTests.fs" />
     <Compile Include="ActivePatternTests.fs" />
     <Compile Include="MutableRemovalTests.fs" />
