@@ -8,6 +8,7 @@ let private capturesIn (source: string) =
     let tree, sourceText, checkResults = parseAndCheck source
     ClosureCapture.find tree sourceText checkResults
 
+[<Literal>]
 let private sourcePrefix =
     "type Src() =\n    let fired = Event<int>()\n    member _.Fired = fired.Publish\n"
 

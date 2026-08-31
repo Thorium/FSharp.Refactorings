@@ -117,6 +117,9 @@ type private Options =
         /// Honor every suppression comment regardless of the config's
         /// "suppressions" policy — the CI override.
         HonorSuppressions: bool
+        /// List fix-less advisory notes inline instead of the one-line
+        /// per-category summary.
+        Notes: bool
         /// Machine-readable stdout: prose moves to stderr, and the run's
         /// findings leave as one JSON document on stdout.
         Json: bool
@@ -185,6 +188,10 @@ OPTIONS
   --honor-suppressions  honor every suppression comment regardless of the
                         config's "suppressions" policy — the CI override
                         for a repo that wants comments inert locally
+  --notes               list fix-less advisory notes inline. By default a
+                        run prints its FIXES and ends with one per-category
+                        note count; SARIF (--report) and --format json
+                        always carry the notes in full
   --format json         machine-readable stdout: progress prose moves to
                         stderr and the findings leave as one JSON document.
                         The default stays human-readable
@@ -241,6 +248,7 @@ let rec private parseArgsLoop opts args =
     | "--baseline" :: file :: rest -> parseArgsLoop { opts with Baseline = Some file } rest
     | "--fail-on-findings" :: rest -> parseArgsLoop { opts with FailOnFindings = true } rest
     | "--honor-suppressions" :: rest -> parseArgsLoop { opts with HonorSuppressions = true } rest
+    | "--notes" :: rest -> parseArgsLoop { opts with Notes = true } rest
     | "--format" :: "json" :: rest -> parseArgsLoop { opts with Json = true } rest
     | "--format" :: other :: _ -> Error $"--format knows 'json' (the default output is human-readable); got '{other}'"
     | "--rules" :: rest -> parseArgsLoop { opts with ListRules = true } rest
@@ -289,6 +297,7 @@ let private parseArgs (argv: string[]) =
           Baseline = None
           FailOnFindings = false
           HonorSuppressions = false
+          Notes = false
           Json = false
           ListRules = false
           Mcp = false
@@ -408,7 +417,9 @@ let private vsMsBuildPath =
 /// Framework monikers have no dot (net48, net481) where modern ones do
 /// (net8.0, net10.0), which is what separates the two.
 let private tfmRank (tfm: string) =
-    let t = tfm.ToLowerInvariant()
+    // the OS suffix's digits would swamp the version: net8.0-windows10.0.19041.0
+    // must rank as net8.0, not overflow Int32 and sort before net6.0
+    let t = (tfm.ToLowerInvariant().Split '-').[0]
     let digits = String(t |> Seq.filter Char.IsDigit |> Seq.toArray)
 
     let version =
@@ -466,9 +477,24 @@ let private parseOnlyArgs (projectPath: string) =
         | :? IOException
         | :? UnauthorizedAccessException -> ""
 
-    let sources =
+    let projectDir = Path.GetDirectoryName(Path.GetFullPath projectPath)
+
+    // <Compile Include> is read verbatim, so an item carrying an
+    // unexpanded MSBuild property ($(SourcesRoot)\X.fs) or pointing at a
+    // file that is not on disk yet (mid-development trees, generated
+    // sources) must be SKIPPED, not crash the sweep files later
+    let sources, dropped =
         [| for m in compileItemRegex.Matches projectText -> m.Groups.[1].Value |]
         |> Array.filter (fun s -> not (s.Contains '*'))
+        |> Array.partition (fun s ->
+            not (s.Contains "$(")
+            && (try
+                    File.Exists(Path.Combine(projectDir, s.Replace('\\', Path.DirectorySeparatorChar)))
+                with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                    false))
+
+    if dropped.Length > 0 then
+        eprintfn $"  ({dropped.Length} <Compile Include> item(s) skipped: unexpanded MSBuild properties or files not on disk)"
 
     if sources.Length = 0 then
         Error "no <Compile Include> items to parse (wildcards and imported items are beyond --parse-only)"
@@ -636,6 +662,8 @@ let private cliAnalyzers () =
 let private parseOnlySafeAnalyzers =
     set
         [ "AbbreviatedType"
+          "CommentDoc"
+          "LiterateComment"
           "ArgNames"
           "AttributeMerge"
           "AutoProperty"
@@ -665,7 +693,13 @@ let private parseOnlySafeAnalyzers =
           "RedundantParens"
           "RedundantSyntax"
           "RegexUsage"
+          "LiteralConst"
           "MatchArmMerge"
+          "MatchGuards"
+          "ObsoleteCrypto"
+          "RecGroup"
+          "RegexValidity"
+          "SecretLiterals"
           "SecurityRules"
           "StructDu"
           "StructHints"
@@ -676,6 +710,7 @@ let private parseOnlySafeAnalyzers =
           "TypeChecks"
           "TypeParens"
           "TypeTestChain"
+          "UnicodeHygiene"
           "UnimplementedBranch"
           "WhileBang"
           "XmlDocParams" ]
@@ -706,11 +741,22 @@ let private encodingOf (path: string) : System.Text.Encoding =
 let private writeSource (path: string) (text: string) =
     File.WriteAllText(path, text, encodingOf path)
 
+/// Set for the run by executeRun. In --parse-only mode nothing resolves,
+/// so only PARSE-phase diagnostics are meaningful: a fix that spells a
+/// new identifier (`CultureInfo.InvariantCulture`) adds unresolved-
+/// reference errors to the pile, and a raw count comparison then blamed
+/// the fix for pre-existing noise (found on PethostBackup: every FR0067
+/// culture fix rolled back for inflating FS0039s that were ignored to
+/// begin with).
+let mutable internal parseOnlyRun = false
+
 let private projectErrors (checker: FSharpChecker) (options: FSharpProjectOptions) =
     let results = checker.ParseAndCheckProject options |> Async.RunSynchronously
 
     results.Diagnostics
-    |> Array.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+    |> Array.filter (fun d ->
+        d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error
+        && (not parseOnlyRun || d.Subcategory = "parse"))
 
 let private errorCount (checker: FSharpChecker) (options: FSharpProjectOptions) = (projectErrors checker options).Length
 
@@ -1178,6 +1224,38 @@ let private sourcesUseConditionals (projectPath: string) =
 /// the start of each run.
 let private sweptFiles = System.Collections.Generic.HashSet<string * string>()
 
+/// Fixes applied anywhere in this run so far — the whole-compilation skip
+/// is only sound while the tree is untouched (or the run is a dry run).
+let mutable internal runTotalApplied = 0
+
+/// A source file with no `#if` in it parses identically under EVERY
+/// define set, so one sweep covers all frameworks and all projects — the
+/// key degrades to "". Files carrying directives keep the exact-defines
+/// key. Cached: solutions ask per project.
+///
+/// Documented limit: identical parse tree does not mean identical TYPED
+/// findings — a sibling file's `#if` or a project's different references
+/// can change what a typed rule sees. The trade is deliberate: those
+/// deltas are rare, the narrowest-first ordering analyses the most
+/// restrictive context first, and the alternative is the full N×TFM
+/// re-sweep this dedup exists to remove.
+let private directiveFreeCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, bool>()
+
+let private isDirectiveFree (path: string) =
+    directiveFreeCache.GetOrAdd(
+        path,
+        fun p ->
+            try
+                File.ReadLines p
+                |> Seq.forall (fun l -> not (l.TrimStart().StartsWith "#if"))
+            with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                false
+    )
+
+let private fileSweepKey (definesKeyStr: string) (path: string) =
+    if isDirectiveFree path then "" else definesKeyStr
+
 /// Every finding the run surfaced, for the --report SARIF file: fixable or
 /// not, applied or held back. Deduplicated because passes re-analyze and a
 /// multi-targeted project sweeps the same file once per framework.
@@ -1249,6 +1327,14 @@ let mutable private suppressionOverridden = 0
 /// --honor-suppressions: comments silence everything regardless of the
 /// config policy — the CI override.
 let mutable private honorAllSuppressions = false
+
+/// --notes: list fix-less advisory notes inline. Off by default — the
+/// fixes are the product; held notes are counted per category and
+/// summarized at the end (SARIF/JSON always carry them in full).
+let mutable private showNotes = false
+
+/// Category name -> held note count for the run summary.
+let private heldNoteCounts = System.Collections.Generic.Dictionary<string, int>()
 
 let private reportedFindings = ResizeArray<ReportedFinding>()
 
@@ -1370,7 +1456,8 @@ let private markSwept (options: FSharpProjectOptions) =
 
     for f in options.SourceFiles do
         if not (Configuration.isIgnoredPath f) then
-            sweptFiles.Add(Path.GetFullPath(f).ToLowerInvariant(), key) |> ignore
+            sweptFiles.Add(Path.GetFullPath(f).ToLowerInvariant(), fileSweepKey key f)
+            |> ignore
 
 let private runPass
     (checker: FSharpChecker)
@@ -1608,7 +1695,8 @@ let private runPass
     // (twenty projects compiling one Common) pay for each file once.
     let alreadySwept, filesToSweep =
         filesToSweep
-        |> Array.partition (fun f -> sweptFiles.Contains(Path.GetFullPath(f).ToLowerInvariant(), definesKey options))
+        |> Array.partition (fun f ->
+            sweptFiles.Contains(Path.GetFullPath(f).ToLowerInvariant(), fileSweepKey (definesKey options) f))
 
     if named.Length - alreadySwept.Length - filesToSweep.Length > 0 then
         printfn $"  ({named.Length - alreadySwept.Length - filesToSweep.Length} ignored-path file(s) skipped)"
@@ -1620,9 +1708,25 @@ let private runPass
     Console.Out.Flush()
     let sweepSw = Stopwatch.StartNew()
 
+    // a heartbeat on stderr: on a big project a sweep is half a minute of
+    // silence when the files are clean, which reads as a hang. Stderr so
+    // that piped/JSON stdout stays intact
+    let sweptCount = ref 0
+
+    let progress () =
+        let n = System.Threading.Interlocked.Increment sweptCount
+
+        if n % 25 = 0 then
+            eprintf $"[{n}/{filesToSweep.Length}] "
+
     let outcomes =
         filesToSweep
-        |> Array.map analyzeFile
+        |> Array.map (fun file ->
+            async {
+                let! outcome = analyzeFile file
+                progress ()
+                return outcome
+            })
         |> fun work -> Async.Parallel(work, maxDegreeOfParallelism = jobs)
         |> Async.RunSynchronously
 
@@ -1643,29 +1747,40 @@ let private runPass
                  | false, _ -> 0L)
                 + ms
 
-        // fix-less findings (FR0055, FR0028...) have no edit to apply, so
-        // without this they would be invisible outside --report — the note
-        // IS the rule's entire output. Printed once per run: later passes
-        // recompute the same notes, and repeating them is noise
+        // fix-less findings (FR0055, FR0028...) have no edit to apply — the
+        // note IS the rule's entire output. Counted once per run; the wall
+        // of advice is opt-in: the fixes are the product, and a screen of
+        // structural homework after them is an anticlimax nobody reads.
+        // --notes lists them, --report/--format json always carry them
         for note in outcome.Notes do
             let key =
                 $"{note.Code}|{outcome.File}|{note.Range.StartLine}|{note.Range.StartColumn}|{note.Message}"
 
             if printedNotes.Add key then
-                let firstSentence =
-                    let text = note.Message
-                    // a bare '.' is not a sentence end — "String.Equals"
-                    // must survive the cut
-                    let cutAt =
-                        [ text.IndexOf ". "; text.IndexOf ".\n"; text.IndexOf '\n' ]
-                        |> List.filter (fun i -> i >= 0)
+                if showNotes then
+                    let firstSentence =
+                        let text = note.Message
+                        // a bare '.' is not a sentence end — "String.Equals"
+                        // must survive the cut
+                        let cutAt =
+                            [ text.IndexOf ". "; text.IndexOf ".\n"; text.IndexOf '\n' ]
+                            |> List.filter (fun i -> i >= 0)
 
-                    match cutAt with
-                    | [] -> text
-                    | cuts -> text.Substring(0, List.min cuts + 1)
+                        match cutAt with
+                        | [] -> text
+                        | cuts -> text.Substring(0, List.min cuts + 1)
 
-                printfn
-                    $"  {note.Code} {kindColumn note.Code} {Path.GetFileName outcome.File}({note.Range.StartLine},{note.Range.StartColumn}) note: {firstSentence}"
+                    printfn
+                        $"  {note.Code} {kindColumn note.Code} {Path.GetFileName outcome.File}({note.Range.StartLine},{note.Range.StartColumn}) note: {firstSentence}"
+                else
+                    let kind = RuleCatalog.name (RuleCatalog.categoryOf note.Code)
+
+                    lock heldNoteCounts (fun () ->
+                        heldNoteCounts.[kind] <-
+                            (match heldNoteCounts.TryGetValue kind with
+                             | true, n -> n
+                             | false, _ -> 0)
+                            + 1)
 
         // a fix whose span contains a comment the replacement does not carry
         // would silently DELETE it — a match collapsed to one line takes its
@@ -1698,7 +1813,21 @@ let private runPass
                 let sameFile =
                     String.Equals(target, Path.GetFullPath outcome.File, StringComparison.OrdinalIgnoreCase)
 
-                if sameFile && losesComment [ for sibling in msg.Fixes -> sibling.ToText ] f then
+                // a cross-file fix guards against the TARGET file's comments,
+                // parsed through ProjectSources — the same rule as same-file
+                let losesCrossFileComment () =
+                    match ProjectSources.tryParse target with
+                    | Some(targetTree, targetSource) ->
+                        Text.commentsWithText targetTree targetSource
+                        |> List.exists (fun (r, text) ->
+                            Range.rangeContainsRange f.FromRange r
+                            && not (msg.Fixes |> List.exists (fun sibling -> sibling.ToText.Contains text)))
+                    | None -> false
+
+                if
+                    (sameFile && losesComment [ for sibling in msg.Fixes -> sibling.ToText ] f)
+                    || (not sameFile && apiChanges && losesCrossFileComment ())
+                then
                     commentHeldBack <- commentHeldBack + 1
 
                     printfn
@@ -2128,22 +2257,51 @@ let private verifyPass
                     restore rest
                     changedFiles
             else
+                // every error sits in a file this pass never touched. That
+                // can still be our doing (an edit's inference ripple), so
+                // TEST it: restore, recount — if the errors stay, they were
+                // never ours (a vendored file broken for another reason —
+                // the SQLProvider paket-files case burned 40 minutes of
+                // apply-restore on exactly this), so the fixes go back in
+                let currentTexts =
+                    changedFiles
+                    |> List.map (fun cf -> cf.Path, (try Some(File.ReadAllText cf.Path) with _ -> None)) // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+
                 restore changedFiles
-                changedFiles
 
-        eprintfn "  this pass introduced type errors — its changes were rolled back and the offending fixes suppressed:"
+                if (projectErrors checker options).Length <= baselineErrors then
+                    changedFiles
+                else
+                    for path, text in currentTexts do
+                        match text with
+                        | Some t -> writeSource path t
+                        | None -> ()
 
-        // the errors themselves, or diagnosing WHICH fix broke means
-        // re-running the whole thing by hand
-        for d in errors |> Array.truncate 5 do
-            eprintfn $"    {Path.GetFileName d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}"
+                    checker.InvalidateConfiguration options
 
-        for cf in rolledBack do
-            for code, f in cf.Fixes do
-                eprintfn
-                    $"    {code} {Path.GetFileName cf.Path}({f.FromRange.StartLine},{f.FromRange.StartColumn}) rolled back"
+                    eprintfn
+                        "  (the new errors persist without this pass's fixes — pre-existing breakage elsewhere, fixes kept)"
 
-        false
+                    []
+
+        if rolledBack.IsEmpty then
+            // the errors survived the un-apply test: not ours, fixes kept
+            true
+        else
+            eprintfn
+                "  this pass introduced type errors — its changes were rolled back and the offending fixes suppressed:"
+
+            // the errors themselves, or diagnosing WHICH fix broke means
+            // re-running the whole thing by hand
+            for d in errors |> Array.truncate 5 do
+                eprintfn $"    {Path.GetFileName d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}"
+
+            for cf in rolledBack do
+                for code, f in cf.Fixes do
+                    eprintfn
+                        $"    {code} {Path.GetFileName cf.Path}({f.FromRange.StartLine},{f.FromRange.StartColumn}) rolled back"
+
+            false
 
 /// Analyze and fix one compilation; returns its exit code.
 let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool) (target: Target) =
@@ -2167,7 +2325,14 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
     match optionsFor checker opts.ParseOnly opts.Framework target with
     | Error message ->
         eprintfn $"{message}"
-        1
+
+        // NOT-APPLICABLE targets are not failures: a dacpac project or a
+        // wildcard-item fsproj beyond --parse-only was skipped, not broken
+        // (a solution containing one used to fail the whole run's exit)
+        if message.Contains "— skipped" || message.Contains "beyond --parse-only" then
+            0
+        else
+            1
     | Ok options ->
         let analyzers =
             cliAnalyzers ()
@@ -2197,8 +2362,47 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
         // before anything is written, so a pass that turns out to break the
         // build — this framework's or another's — can be undone rather than
         // merely reported
+        // cross-file migrations (internal FR0069/FR0093 under --api-changes)
+        // classify uses in OTHER files against those files' parse trees;
+        // this host supplies them, under THIS compilation's defines
+        (let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions options
+
+         ProjectSources.configure (
+             Some(fun path ->
+                 try
+                     let sourceText = SourceText.ofString (File.ReadAllText path)
+
+                     let parseResults =
+                         checker.ParseFile(path, sourceText, parsingOptions) |> Async.RunSynchronously
+
+                     Some(parseResults.ParseTree, sourceText)
+                 with
+                 | :? IOException
+                 | :? UnauthorizedAccessException -> None)
+         ))
+
+        // every sweepable source already swept by an earlier compilation of
+        // this run (same defines, or directive-free): the sweep will visit
+        // zero files, so the project typecheck buys nothing. Only while the
+        // tree is untouched (or dry) — applied fixes make the recheck the
+        // cross-project verification, which must stay
+        let skipCompilationCheck =
+            (opts.DryRun || runTotalApplied = 0)
+            && onlyFile.IsNone
+            // the api pass ignores the sweep dedup and can still WRITE this
+            // project's files — skipping would leave it an empty snapshot to
+            // roll back to and a zero error baseline to verify against
+            && not opts.ApiChanges
+            && (let sweepable =
+                    options.SourceFiles |> Array.filter (Configuration.isIgnoredPath >> not)
+
+                sweepable.Length > 0
+                && sweepable
+                   |> Array.forall (fun f ->
+                       sweptFiles.Contains(Path.GetFullPath(f).ToLowerInvariant(), fileSweepKey (definesKey options) f)))
+
         let snapshot =
-            if opts.DryRun then
+            if opts.DryRun || skipCompilationCheck then
                 Map.empty
             else
                 takeSnapshot options.SourceFiles
@@ -2207,12 +2411,18 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
         let suppressed =
             System.Collections.Generic.HashSet<string * string * string * string>()
 
-        printf "typechecking the project... "
-        Console.Out.Flush()
-        let baselineSw = Stopwatch.StartNew()
-        let baselineErrors = errorCount checker options
-        baselineSw.Stop()
-        printfn $"{baselineSw.ElapsedMilliseconds} ms"
+        let baselineErrors =
+            if skipCompilationCheck then
+                printfn "  (every source file already swept in an earlier compilation — project check skipped)"
+                0
+            else
+                printf "typechecking the project... "
+                Console.Out.Flush()
+                let baselineSw = Stopwatch.StartNew()
+                let n = errorCount checker options
+                baselineSw.Stop()
+                printfn $"{baselineSw.ElapsedMilliseconds} ms"
+                n
 
         // a SCRIPT that does not resolve is not refused: scripts routinely
         // reference things fsi would supply at run time (or nothing at all —
@@ -2276,6 +2486,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
                 while apiPass < opts.MaxPasses && apiApplied <> 0 do
                     apiPass <- apiPass + 1
+                    ProjectSources.invalidate ()
                     printfn $"api pass {apiPass}:"
 
                     let applied, changedFiles =
@@ -2283,6 +2494,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
                     apiApplied <- applied
                     totalApplied <- totalApplied + applied
+                    runTotalApplied <- runTotalApplied + applied
                     printfn $"  {apiApplied} api-changing fix(es) applied"
 
                     if opts.DryRun then
@@ -2299,6 +2511,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
             while pass < opts.MaxPasses && lastApplied <> 0 do
                 pass <- pass + 1
+                ProjectSources.invalidate ()
                 printfn $"pass {pass}:"
 
                 let applied, changedFiles =
@@ -2315,6 +2528,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
                 lastApplied <- applied
                 totalApplied <- totalApplied + applied
+                runTotalApplied <- runTotalApplied + applied
 
                 let prefix = if opts.DryRun then "would be " else ""
                 printfn $"  {lastApplied} fix(es) {prefix}applied"
@@ -2375,13 +2589,39 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                             // resolve. Reporting is not enough: put the
                             // files back, or the caller is left with a
                             // project that does not build.
+                            //
+                            // ...unless the framework was ALREADY broken by
+                            // something this run never wrote (a vendored
+                            // paket-files source, most famously): test by
+                            // un-applying — if the build still fails, the
+                            // breakage is not ours and the fixes go back.
+                            let currentTexts =
+                                snapshot
+                                |> Map.toList
+                                |> List.choose (fun (path, _) ->
+                                    try
+                                        Some(path, File.ReadAllText path)
+                                    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                                        None)
+
                             let restored = restoreSnapshot snapshot
 
-                            eprintfn
-                                $"Applying broke a target framework this run did not analyze, so the {restored} file(s) it changed were put back:"
+                            match buildAllFrameworks project with
+                            | Error _ ->
+                                for path, text in currentTexts do
+                                    writeSource path text
 
-                            eprintfn $"{output}"
-                            1
+                                eprintfn
+                                    "A target framework fails to build, but it fails WITHOUT this run's fixes too — pre-existing breakage, fixes kept:"
+
+                                eprintfn $"{output}"
+                                1
+                            | Ok() ->
+                                eprintfn
+                                    $"Applying broke a target framework this run did not analyze, so the {restored} file(s) it changed were put back:"
+
+                                eprintfn $"{output}"
+                                1
                     | Target.Script _ ->
                         printfn "done; project still checks clean"
                         markSwept options
@@ -2450,6 +2690,47 @@ let private rulesAsRows () =
     RuleCatalog.allRules
     |> List.map (fun (code, category) -> code, RuleCatalog.name category, Configuration.isEnabledIn Map.empty code "")
 
+/// Order a multi-compilation run NARROWEST TARGET FIRST, solution-wide.
+/// Within one project the narrowest framework already goes first; across
+/// projects the same principle protects shared source files — a fix
+/// proposed while analysing the net8.0-only project would compile there
+/// and break the netstandard2.0 sibling a whole compilation later. With
+/// the restrictive context up front, capability-gated rules see the
+/// narrow surface, the fixes they offer hold everywhere wider, and the
+/// sweep dedup then skips the already-clean shared files. Scripts keep
+/// their place at the end; projects whose framework a textual read
+/// cannot see (Directory.Build.props inheritance) sort after the known
+/// ones, in their original order.
+let private orderNarrowestFirst (targets: Target list) =
+    if targets.Length < 2 then
+        targets
+    else
+        let projectRank (path: string) =
+            try
+                let text = File.ReadAllText path
+
+                let m =
+                    Text.RegularExpressions.Regex.Match(text, "<TargetFrameworks?>([^<]+)</TargetFrameworks?>")
+
+                if m.Success then
+                    m.Groups.[1].Value.Split ';'
+                    |> Array.map _.Trim()
+                    |> Array.filter (fun t -> t <> "" && not (t.Contains "$("))
+                    |> Array.map tfmRank
+                    |> Array.sort
+                    |> Array.tryHead
+                    |> Option.defaultValue (98, 0)
+                else
+                    (98, 0)
+            with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                (98, 0)
+
+        targets
+        |> List.sortBy (fun t ->
+            match t with
+            | Target.Project(path, _) -> projectRank path
+            | Target.Script _ -> (99, 0))
+
 /// The whole run for one Options value: resolve targets, sweep, verify,
 /// report. The checker comes from the caller so a resident host (--mcp)
 /// can keep it — and every reference assembly FCS has parsed — warm
@@ -2460,13 +2741,19 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
         eprintfn $"{message}"
         2
     | Ok targets ->
+        let targets = orderNarrowestFirst targets
         let several = targets.Length > 1
 
         if several then
-            printfn $"{targets.Length} compilations to work through"
+            printfn $"{targets.Length} compilations to work through (narrowest target first)"
 
         sweptFiles.Clear()
+        directiveFreeCache.Clear()
+        runTotalApplied <- 0
         honorAllSuppressions <- opts.HonorSuppressions
+        parseOnlyRun <- opts.ParseOnly
+        showNotes <- opts.Notes
+        lock heldNoteCounts heldNoteCounts.Clear
         // the corpus harness runs main in-process, so per-run stores
         // must not leak findings across invocations
         lock reportedFindings (fun () ->
@@ -2560,6 +2847,19 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
                 writeSarifReport reportPath (lock reportedFindings (fun () -> List.ofSeq reportedFindings))
                 printfn $"{reportedFindings.Count} finding(s) written to {reportPath}"
             | None -> ()
+
+            let heldNotes = lock heldNoteCounts (fun () -> heldNoteCounts |> List.ofSeq)
+
+            if not heldNotes.IsEmpty then
+                let total = heldNotes |> List.sumBy (fun kv -> kv.Value)
+
+                let breakdown =
+                    heldNotes
+                    |> List.sortByDescending (fun kv -> kv.Value)
+                    |> List.map (fun kv -> $"{kv.Value} {kv.Key}")
+                    |> String.concat ", "
+
+                printfn $"  {total} advisory note(s) held: {breakdown} — list with --notes, export with --report"
 
             if baselineSuppressed > 0 then
                 printfn $"  ({baselineSuppressed} finding(s) matched the baseline and were suppressed)"
@@ -2723,7 +3023,7 @@ let private runMcp () =
 
                 let categories =
                     getString "categories"
-                    |> Option.map (fun s -> s.Split ',' |> Array.choose (fun c -> RuleCatalog.parse c) |> Set.ofArray)
+                    |> Option.map (fun s -> s.Split ',' |> Array.choose RuleCatalog.parse |> Set.ofArray)
 
                 let opts =
                     { baseOpts with

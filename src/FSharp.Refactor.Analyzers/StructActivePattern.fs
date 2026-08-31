@@ -71,7 +71,10 @@ let rec private collectResultsLoop (acc: ResizeArray<range * string>) (pending: 
             collectResultsLoop acc rest
         | SynExpr.IfThenElse(thenExpr = thenExpr; elseExpr = Some elseExpr) ->
             collectResultsLoop acc (thenExpr :: elseExpr :: rest)
-        | SynExpr.Match(clauses = clauses) ->
+        | SynExpr.Match(clauses = clauses)
+        // a point-free `let (|P|_|) = function ...` body: the clause
+        // results are the pattern's result positions all the same
+        | SynExpr.MatchLambda(matchClauses = clauses) ->
             let results =
                 clauses |> List.map (fun (SynMatchClause(resultExpr = result)) -> result)
 
@@ -113,7 +116,17 @@ let find
                     ->
                     let results = ResizeArray<range * string>()
 
-                    if collectResults results body && results.Count > 0 then
+                    // the attribute line lands at the decl's start line, so
+                    // that line must be the decl's own (a one-line nested
+                    // module or `;;`-chained decl would get the attribute
+                    // spliced against the WRONG construct)
+                    let ownLine =
+                        decl.Range.StartColumn = 0
+                        || (source.GetLineString(decl.Range.StartLine - 1))
+                            .Substring(0, decl.Range.StartColumn)
+                            .Trim() = ""
+
+                    if ownLine && collectResults results body && results.Count > 0 then
                         // below any XML doc, so the attribute sits against
                         // the binding it marks
                         let insertPos = attributeInsertPos source decl.Range

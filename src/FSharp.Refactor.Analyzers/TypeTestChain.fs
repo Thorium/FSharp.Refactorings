@@ -44,6 +44,7 @@ let private (|SubjectTypeTest|_|) (source: ISourceText) (e: SynExpr) =
 
 /// The if/elif chain: (subject, type text, body) per branch plus the final
 /// else body, or None when any link breaks the shape.
+[<TailCall>]
 let rec private chain
     (source: ISourceText)
     (acc: (Ident * string * SynExpr) list)

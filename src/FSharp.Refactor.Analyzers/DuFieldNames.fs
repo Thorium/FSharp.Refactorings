@@ -1,5 +1,11 @@
 /// Refactoring (slide 3, single-file variant): give the unnamed tuple fields
-/// of a non-public union case the names its match sites already use.
+/// of a non-public union case the names the code already spells — from the
+/// strongest source that yields them:
+///
+///   1. its MATCH SITES:      | Line(qty, price) -> ..
+///   2. its TRAILING COMMENT: | Line of int * decimal // qty and price
+///                            (also `// qty * price` and `// qty, price`)
+///   3. its OWN NAME:         | QtyAndPrice of int * decimal
 ///
 ///     type private Order =                type private Order =
 ///         | Line of int * decimal    →        | Line of qty: int * price: decimal
@@ -32,13 +38,164 @@ open FSharp.Refactor.Text
 type Suggestion =
     {
         CaseName: string
-        /// Field names harvested from the match sites, in field order.
+        /// Field names in field order, from the winning source.
         Names: string list
+        /// Where the names came from, for the message: "its match sites",
+        /// "its trailing comment" or "its own name".
+        Source: string
         /// The union case definition, for the hint location.
         Range: range
         /// One insertion per field ((range, original, replacement)).
         Edits: (range * string * string) list
     }
+
+/// Words that spell TYPES or syntax, not field names — `// string * int`
+/// is a type note, and a keyword would not compile as a field name.
+let private notFieldNames =
+    set
+        [ "string"
+          "int"
+          "int8"
+          "int16"
+          "int32"
+          "int64"
+          "uint"
+          "uint8"
+          "uint16"
+          "uint32"
+          "uint64"
+          "byte"
+          "sbyte"
+          "float"
+          "float32"
+          "double"
+          "single"
+          "decimal"
+          "bool"
+          "char"
+          "unit"
+          "obj"
+          "option"
+          "voption"
+          "list"
+          "array"
+          "seq"
+          "nativeint"
+          "unativeint"
+          "let"
+          "type"
+          "of"
+          "if"
+          "then"
+          "else"
+          "match"
+          "with"
+          "fun"
+          "function"
+          "when"
+          "true"
+          "false"
+          "null"
+          "begin"
+          "end"
+          "module"
+          "member"
+          "use"
+          "do"
+          "done"
+          "rec"
+          "in"
+          "and"
+          "or"
+          "not"
+          "to"
+          "val"
+          "open"
+          "base"
+          "default"
+          "delegate"
+          "interface"
+          "inherit"
+          "lazy"
+          "return"
+          "yield"
+          "mutable"
+          "internal"
+          "private"
+          "public"
+          "static"
+          "override"
+          "abstract"
+          "new"
+          "try"
+          "finally"
+          "while"
+          "for"
+          "as"
+          "assert"
+          "class"
+          "struct"
+          "exception"
+          "extern"
+          "fixed"
+          "global"
+          "namespace"
+          "elif"
+          "downcast"
+          "upcast" ]
+
+/// Names from the case's own name: `InterestAndRate` -> [interest; rate],
+/// `StartDateAndEndDate` -> [startDate; endDate]. The `And` must sit at a
+/// camel boundary, so `Command` never splits — and a part that lowers to
+/// a keyword (`BeginAndEnd`) would not compile as a field name.
+let namesFromCaseName (caseName: string) (arity: int) : string list option =
+    let parts =
+        Text.RegularExpressions.Regex.Split(caseName, @"(?<=[a-z0-9])And(?=[A-Z])")
+
+    if
+        parts.Length = arity
+        && parts
+           |> Array.forall (fun p -> p.Length > 0 && Char.IsUpper p.[0] && not (p.Contains '_'))
+    then
+        let lowered =
+            parts
+            |> Array.map (fun p -> string (Char.ToLowerInvariant p.[0]) + p.Substring 1)
+            |> List.ofArray
+
+        if
+            (lowered |> List.distinct |> List.length) = arity
+            && lowered |> List.forall (notFieldNames.Contains >> not)
+        then
+            Some lowered
+        else
+            None
+    else
+        None
+
+/// Names from a trailing same-line comment with a clear list format:
+/// `// interest and rate`, `// interest * rate`, `// interest, rate`.
+let namesFromComment (commentText: string) (arity: int) : string list option =
+    let body = (commentText.TrimStart '/').Trim()
+
+    let parts =
+        Text.RegularExpressions.Regex.Split(body, @"\s+and\s+|\s*\*\s*|\s*,\s*")
+        |> Array.filter (fun s -> s <> "")
+
+    if
+        parts.Length = arity
+        && parts
+           |> Array.forall (fun p ->
+               Text.RegularExpressions.Regex.IsMatch(p, @"^[a-z][A-Za-z0-9_]*$")
+               && not (notFieldNames.Contains p))
+    then
+        let names = List.ofArray parts
+
+        if (names |> List.distinct |> List.length) = arity then
+            Some names
+        else
+            None
+    else
+        None
 
 /// What one destructuring site tells us about a case's field names.
 [<RequireQualifiedAccess>]
@@ -173,6 +330,12 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
             | SynExpr.ForEach(pat = p) -> walkPat record p
             | _ -> ()
 
+        // trailing line comments, for the comment name source
+        let comments =
+            lazy
+                (commentsWithText parseTree source
+                 |> List.filter (fun (_, t) -> t.StartsWith "//" && not (t.StartsWith "///")))
+
         [ for caseName, fields, caseRange in candidates do
               let sites =
                   match observations.TryGetValue caseName with
@@ -183,20 +346,52 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                   sites
                   |> List.choose (function
                       | Observation.Names names -> Some names
-                      | _ -> None)
+                      | Observation.Opaque | Observation.Bad -> None)
 
-              let usable =
-                  caseNameCounts.[caseName] = 1
-                  && not (sites |> List.exists ((=) Observation.Bad))
-                  && not tupleSites.IsEmpty
-                  && tupleSites |> List.forall ((=) tupleSites.Head)
-                  && tupleSites.Head.Length = fields.Length
-                  && (tupleSites.Head |> List.distinct |> List.length) = fields.Length
-                  && tupleSites.Head |> List.forall (fun n -> n.Length > 0 && Char.IsLower n.[0])
+              let siteNames =
+                  if
+                      caseNameCounts.[caseName] = 1
+                      && not (sites |> List.exists ((=) Observation.Bad))
+                      && not tupleSites.IsEmpty
+                      && tupleSites |> List.forall ((=) tupleSites.Head)
+                      && tupleSites.Head.Length = fields.Length
+                      && (tupleSites.Head |> List.distinct |> List.length) = fields.Length
+                      && tupleSites.Head |> List.forall (fun n -> n.Length > 0 && Char.IsLower n.[0])
+                  then
+                      Some(tupleSites.Head, "its match sites")
+                  else
+                      None
 
-              if usable then
-                  let names = tupleSites.Head
+              // weaker sources only speak when the sites are silent — a
+              // definition-only edit is safe either way, so site quality
+              // never blocks them
+              let commentNames =
+                  comments.Value
+                  |> List.tryPick (fun (cr, ctext) ->
+                      let lineText = source.GetLineString(cr.StartLine - 1)
 
+                      if
+                          cr.StartLine = caseRange.EndLine
+                          && cr.StartColumn >= caseRange.EndColumn
+                          && lineText.Substring(cr.EndColumn).Trim() = ""
+                          // one case per line: with `| A of .. | B of .. // names`
+                          // the comment cannot say WHICH case it describes
+                          && (lineText.Substring(0, cr.StartColumn)
+                              |> Seq.filter ((=) '|')
+                              |> Seq.length) <= 1
+                      then
+                          namesFromComment ctext fields.Length
+                      else
+                          None)
+                  |> Option.map (fun n -> n, "its trailing comment")
+
+              let named =
+                  siteNames
+                  |> Option.orElse commentNames
+                  |> Option.orElse (namesFromCaseName caseName fields.Length |> Option.map (fun n -> n, "its own name"))
+
+              match named with
+              | Some(names, sourceName) ->
                   let edits =
                       List.zip names fields
                       |> List.map (fun (name, SynField(range = fieldRange)) ->
@@ -205,5 +400,7 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
 
                   { CaseName = caseName
                     Names = names
+                    Source = sourceName
                     Range = caseRange
-                    Edits = edits } ]
+                    Edits = edits }
+              | None -> () ]

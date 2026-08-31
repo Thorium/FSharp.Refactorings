@@ -812,3 +812,308 @@ let ``a ValueTask Result binding inside async stays advice`` () =
 
     for s in blockingIn source do
         Assert.Empty s.Fixes
+
+// ---- FR0118 CancellationOverload ----
+
+let private cancellationIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    CancellationOverload.find tree sourceText checkResults
+
+[<Fact>]
+let ``an omitted token is appended from the in-scope parameter`` () =
+    let source =
+        "open System.Threading\nopen System.Threading.Tasks\nlet pause (ct: CancellationToken) = task {\n    do! Task.Delay(100)\n    return 1\n}"
+
+    match cancellationIn source with
+    | [ s ] ->
+        Assert.Equal(CancellationOverload.TokenGap.Omitted, s.Kind)
+        Assert.Equal(", ct", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement
+        Assert.Contains("Task.Delay(100, ct)", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one token suggestion, got %A" other
+
+[<Fact>]
+let ``CancellationToken None is replaced by the in-scope token`` () =
+    let source =
+        "open System.Threading\nopen System.Threading.Tasks\nlet pause (ct: CancellationToken) = task {\n    do! Task.Delay(100, CancellationToken.None)\n    return 1\n}"
+
+    match cancellationIn source with
+    | [ s ] ->
+        Assert.Equal(CancellationOverload.TokenGap.NonePassed, s.Kind)
+        let patched = applyEdit source s.Range s.Replacement
+        Assert.Contains("Task.Delay(100, ct)", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one propagation suggestion, got %A" other
+
+[<Fact>]
+let ``no token in scope means no suggestion`` () =
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading.Tasks\nlet pause () = task {\n    do! Task.Delay(100)\n    return 1\n}"
+    )
+
+[<Fact>]
+let ``two tokens in scope make the choice a human call`` () =
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading\nopen System.Threading.Tasks\nlet pause (a: CancellationToken) (b: CancellationToken) = task {\n    do! Task.Delay(100)\n    return 1\n}"
+    )
+
+[<Fact>]
+let ``a call already passing the token is left alone`` () =
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading\nopen System.Threading.Tasks\nlet pause (ct: CancellationToken) = task {\n    do! Task.Delay(100, ct)\n    return 1\n}"
+    )
+
+[<Fact>]
+let ``a token passed as the PAYLOAD is not appended again`` () =
+    // CreateLinkedTokenSource(ct) takes the token as its argument — a
+    // params/two-token sibling overload would happily compile `(ct, ct)`
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading\nlet link (ct: CancellationToken) =\n    CancellationTokenSource.CreateLinkedTokenSource(ct)"
+    )
+
+[<Fact>]
+let ``a NAMED argument defeats arity counting and vetoes the append`` () =
+    // `cancellationToken = ct` may well BE the token; appending `, ct`
+    // after a named argument is a syntax error besides
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading\nopen System.Threading.Tasks\ntype C() =\n    member _.Get(a: int) = Task.FromResult a\n    member _.Get(a: int, ct: CancellationToken) = Task.FromResult a\nlet f (c: C) (ct: CancellationToken) = task {\n    let! x = c.Get(a = 1)\n    return x\n}"
+    )
+
+[<Fact>]
+let ``a method with no token overload is left alone`` () =
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading\nlet check (ct: CancellationToken) (s: string) = s.Contains(\"x\")"
+    )
+
+[<Fact>]
+let ``a stored None binding is not rewritten`` () =
+    // not an argument: replacing a binding's RHS rewrites intent the
+    // scan cannot see
+    Assert.Empty(
+        cancellationIn
+            "open System.Threading\nlet keep (ct: CancellationToken) =\n    let none = CancellationToken.None\n    none"
+    )
+
+// ---- FR0119 AwaitableOverload ----
+
+let private awaitableIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    AwaitableOverload.find tree sourceText checkResults
+
+let private applyAwaitable (source: string) (s: AwaitableOverload.Suggestion) =
+    s.Fixes
+    |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+    |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+[<Fact>]
+let ``a blocking read inside task becomes its async twin`` () =
+    let source =
+        "open System.IO\nlet head (reader: TextReader) = task {\n    let line = reader.ReadLine()\n    return line\n}"
+
+    match awaitableIn source with
+    | [ s ] ->
+        Assert.Equal("ReadLine", s.MethodName)
+        let patched = applyAwaitable source s
+        Assert.Contains("let! line = reader.ReadLineAsync()", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one awaitable suggestion, got %A" other
+
+[<Fact>]
+let ``a blocking statement inside task becomes do-bang`` () =
+    let source =
+        "open System.IO\nlet push (writer: TextWriter) (s: string) = task {\n    writer.Write(s)\n    return 1\n}"
+
+    match awaitableIn source with
+    | [ s ] ->
+        let patched = applyAwaitable source s
+        Assert.Contains("do! writer.WriteAsync(s)", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one statement suggestion, got %A" other
+
+[<Fact>]
+let ``inside async the twin bridges via AwaitTask`` () =
+    let source =
+        "open System.IO\nlet head (reader: TextReader) = async {\n    let line = reader.ReadLine()\n    return line\n}"
+
+    match awaitableIn source with
+    | [ s ] ->
+        let patched = applyAwaitable source s
+        Assert.Contains("let! line = reader.ReadLineAsync() |> Async.AwaitTask", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one bridged suggestion, got %A" other
+
+[<Fact>]
+let ``outside any CE the blocking call is fine`` () =
+    Assert.Empty(awaitableIn "open System.IO\nlet head (reader: TextReader) = reader.ReadLine()")
+
+[<Fact>]
+let ``inside a lambda within the task nothing fires`` () =
+    Assert.Empty(
+        awaitableIn
+            "open System.IO\nlet all (readers: TextReader list) = task {\n    let lines = readers |> List.map (fun r -> r.ReadLine())\n    return lines\n}"
+    )
+
+[<Fact>]
+let ``a method with no async twin is left alone`` () =
+    Assert.Empty(
+        awaitableIn "let f (s: string) = task {\n    let u = s.ToUpperInvariant()\n    return u\n}"
+    )
+
+[<Fact>]
+let ``FR0119 a local function inside the task is a plain function`` () =
+    // its body is a closure the AST does not spell as a Lambda — a do!
+    // injected there would land in ordinary code
+    let source =
+        "open System.IO\nlet go (writer: TextWriter) (s: string) = task {\n    let flushTwice () =\n        writer.Write(s)\n        writer.Write(s)\n    flushTwice ()\n    return 1\n}"
+
+    Assert.Empty(awaitableIn source)
+
+[<Fact>]
+let ``FR0119 the juxtaposed atomic argument is the common F# spelling`` () =
+    let source =
+        "open System.IO\nlet push (writer: TextWriter) (s: string) = task {\n    writer.Write s\n    return 1\n}"
+
+    match awaitableIn source with
+    | [ s ] ->
+        let patched = applyAwaitable source s
+        Assert.Contains("do! writer.WriteAsync s", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one juxtaposed suggestion, got %A" other
+
+// ---- FR0049 Taskify: file-private boundary drains become task-returning ----
+
+let private taskifyIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    Taskify.find tree sourceText checkResults None
+
+let private applyTaskify (source: string) (s: Taskify.Suggestion) =
+    let lines = source.Split '\n'
+
+    let offsetOf (line: int) (col: int) =
+        (lines |> Seq.take (line - 1) |> Seq.sumBy (fun l -> l.Length + 1)) + col
+
+    s.Edits
+    |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+    |> List.fold
+        (fun (acc: string) (r, _, replacement) ->
+            let st = offsetOf r.StartLine r.StartColumn
+            let en = offsetOf r.EndLine r.EndColumn
+            acc.Substring(0, st) + replacement + acc.Substring en)
+        source
+
+[<Fact>]
+let ``a private boundary drain becomes a task and its caller awaits`` () =
+    let source =
+        "module Test\nopen System.Threading.Tasks\nlet private fetch (x: int) =\n    let t = Task.FromResult x\n    t.GetAwaiter().GetResult()\nlet consume () = task {\n    let s = fetch 1\n    return s\n}"
+
+    match taskifyIn source with
+    | [ s ] ->
+        Assert.Equal("fetch", s.Name)
+        let patched = applyTaskify source s
+        Assert.Contains("    task {\n        let t = Task.FromResult x\n        return! t\n    }", patched)
+        Assert.Contains("let! s = fetch 1", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one taskify suggestion, got %A" other
+
+[<Fact>]
+let ``an async caller bridges with Async.AwaitTask`` () =
+    let source =
+        "module Test\nopen System.Threading.Tasks\nlet private fetch (x: int) =\n    let t = Task.FromResult x\n    t.GetAwaiter().GetResult()\nlet consume () = async {\n    let s = fetch 2\n    return s\n}"
+
+    match taskifyIn source with
+    | [ s ] ->
+        let patched = applyTaskify source s
+        Assert.Contains("let! s = Async.AwaitTask (fetch 2)", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one async-caller suggestion, got %A" other
+
+[<Fact>]
+let ``a return-position caller becomes return-bang`` () =
+    let source =
+        "module Test\nopen System.Threading.Tasks\nlet private fetch (x: int) =\n    let t = Task.FromResult x\n    t.GetAwaiter().GetResult()\nlet consume () = task {\n    return fetch 3\n}"
+
+    match taskifyIn source with
+    | [ s ] ->
+        let patched = applyTaskify source s
+        Assert.Contains("return! fetch 3", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one return-position suggestion, got %A" other
+
+[<Fact>]
+let ``a public function is a wider refactor and stays`` () =
+    Assert.Empty(
+        taskifyIn
+            "module Test\nopen System.Threading.Tasks\nlet fetch (x: int) =\n    let t = Task.FromResult x\n    t.GetAwaiter().GetResult()\nlet consume () = task {\n    let s = fetch 1\n    return s\n}"
+    )
+
+[<Fact>]
+let ``a caller outside any CE vetoes the rewrite`` () =
+    Assert.Empty(
+        taskifyIn
+            "module Test\nopen System.Threading.Tasks\nlet private fetch (x: int) =\n    let t = Task.FromResult x\n    t.GetAwaiter().GetResult()\nlet consume () = fetch 1 + 1"
+    )
+
+[<Fact>]
+let ``a caller under a lambda inside the CE vetoes the rewrite`` () =
+    Assert.Empty(
+        taskifyIn
+            "module Test\nopen System.Threading.Tasks\nlet private fetch (x: int) =\n    let t = Task.FromResult x\n    t.GetAwaiter().GetResult()\nlet consume () = task {\n    let xs = [ 1; 2 ] |> List.map (fun i -> fetch i)\n    return xs\n}"
+    )
+
+[<Fact>]
+let ``a blocking site under a lambda in the body vetoes the rewrite`` () =
+    Assert.Empty(
+        taskifyIn
+            "module Test\nopen System.Threading.Tasks\nlet private sum (xs: Task<int> list) =\n    xs |> List.map (fun t -> t.GetAwaiter().GetResult()) |> List.sum\nlet consume () = task {\n    let s = sum []\n    return s\n}"
+    )
+
+[<Fact>]
+let ``an internal boundary drain taskifies across files under api-changes`` () =
+    let sourceA =
+        "module A\nlet internal fetch (x: int) =\n    let t = System.Threading.Tasks.Task.FromResult x\n    t.GetAwaiter().GetResult()"
+
+    let sourceB = "module B\nlet consume () = task {\n    let s = A.fetch 1\n    return s\n}"
+
+    let treeA, sourceTextA, checkA, projectResults, _, _, recheck = parseAndCheckPair sourceA sourceB
+    System.Environment.SetEnvironmentVariable("FSREF_API_CHANGES", "1")
+
+    try
+        match Taskify.find treeA sourceTextA checkA (Some projectResults) with
+        | [ s ] ->
+            let byFile =
+                s.Edits
+                |> List.groupBy (fun (r, _, _) -> System.IO.Path.GetFileName r.FileName)
+                |> Map.ofList
+
+            let apply (source: string) (es: (FSharp.Compiler.Text.range * string * string) list) =
+                es
+                |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+                |> List.fold (fun acc (r, _, rep) -> applyEdit acc r rep) source
+
+            let patchedA = apply sourceA byFile.["A.fs"]
+            let patchedB = apply sourceB byFile.["B.fs"]
+            Assert.Contains("task {", patchedA)
+            Assert.Contains("return! t", patchedA)
+            Assert.Contains("let! s = A.fetch 1", patchedB)
+            let errors = recheck patchedA patchedB
+            Assert.True(Array.isEmpty errors, sprintf "patched pair does not typecheck: %A" errors)
+        | other -> failwithf "Expected one internal taskify, got %A" other
+    finally
+        System.Environment.SetEnvironmentVariable("FSREF_API_CHANGES", null)
+
+[<Fact>]
+let ``an internal drain without api-changes stays a note`` () =
+    let sourceA =
+        "module A\nlet internal fetch2 (x: int) =\n    let t = System.Threading.Tasks.Task.FromResult x\n    t.GetAwaiter().GetResult()"
+
+    let sourceB = "module B\nlet consume () = task {\n    let s = A.fetch2 1\n    return s\n}"
+
+    let treeA, sourceTextA, checkA, projectResults, _, _, _ = parseAndCheckPair sourceA sourceB
+    Assert.Empty(Taskify.find treeA sourceTextA checkA (Some projectResults))

@@ -155,6 +155,25 @@ let private categories =
       "FR0115", Category.Idiom // base case first behind a compound guard: advice on arm order
       "FR0116", Category.Idiom // a non-recursive member leaves its let rec group
       "FR0117", Category.Idiom // adjacent same-result match arms fold into an or-pattern
+      "FR0118", Category.Correctness // a CancellationToken in scope should reach the calls that take one
+      "FR0119", Category.Correctness // inside task/async, the awaitable twin should be used
+      "FR0120", Category.Correctness // a catch-clause log should mention the caught exception
+      "FR0121", Category.Correctness // UtcNow.Date/Today are timezone-random; Now->UtcNow opt-in
+      "FR0122", Category.Correctness // literal regex patterns must compile
+      "FR0123", Category.Correctness // Monitor.Enter/Exit is the lock function spelled dangerously
+      "FR0124", Category.Correctness // structured-log templates that lie
+      "FR0125", Category.Correctness // invisible and bidirectional Unicode in source
+      "FR0126", Category.Correctness // dynamic strings into process-execution sinks
+      "FR0127", Category.Correctness // provider-format API keys in literals
+      "FR0128", Category.Idiom // obsolete crypto constructors become static factories
+      "FR0129", Category.Idiom // a guard that only equality-tests the binder is the literal pattern
+      "FR0130", Category.Idiom // module-level constants gain Literal
+      "FR0131", Category.Idiom // provably tail-recursive functions gain TailCall
+      "FR0132", Category.Idiom // trailing comment promoted to XML doc position
+      "FR0133", Category.Cosmetic // five-word names become double-backtick names (tests by default)
+      "FR0134", Category.Idiom // DateTime record fields migrate to DateTimeOffset (default off)
+      "FR0135", Category.Cosmetic // markdown-bearing block comments in scripts become literate cells
+      "FR0136", Category.Correctness // zero-argument Guid constructor: Guid.Empty stated, NewGuid offered
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

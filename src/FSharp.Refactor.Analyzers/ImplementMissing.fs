@@ -113,8 +113,8 @@ let private requiredMembers (entity: FSharpEntity) : (string * Required list) op
     with OptionModule.FcsSymbolFailure ->
         None
 
-let private stubFor (required: Required) =
-    let ni = "raise (System.NotImplementedException())"
+let private stubFor (niPrefix: string) (required: Required) =
+    let ni = $"raise ({niPrefix}NotImplementedException())"
 
     match required with
     | Method(name, []) -> $"member _.{name}() = {ni}"
@@ -257,13 +257,15 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                   let memberIndent = System.String(' ', lastMember.Range.StartColumn)
                                   let interfaceIndent = System.String(' ', newExprRange.StartColumn)
 
+                                  let niPrefix = if opensSystemNamespace source then "" else "System."
+
                                   let insertText =
-                                      [ for m in mainMissing -> $"\n{memberIndent}{stubFor m}"
+                                      [ for m in mainMissing -> $"\n{memberIndent}{stubFor niPrefix m}"
                                         for baseName, missing in inherited do
                                             yield $"\n{interfaceIndent}interface {baseName} with"
 
                                             for m in missing do
-                                                yield $"\n{interfaceIndent}    {stubFor m}" ]
+                                                yield $"\n{interfaceIndent}    {stubFor niPrefix m}" ]
                                       |> String.concat ""
 
                                   let insertAt =

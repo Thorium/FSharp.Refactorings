@@ -72,7 +72,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   | SynExpr.Tuple(exprs = [ StringConst "-"; StringConst "" ]) ->
                       { Range = expr.Range
                         OriginalText = textOfRange source expr.Range
-                        ReplacementText = $"System.Convert.ToHexString {argumentText source bytes}" }
+                        ReplacementText =
+                          (let prefix = if opensSystemNamespace source then "" else "System."
+                           $"{prefix}Convert.ToHexString {argumentText source bytes}") }
                   | _ -> ()
               | _ -> () ]
 

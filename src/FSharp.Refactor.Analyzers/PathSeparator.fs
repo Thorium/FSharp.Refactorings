@@ -116,7 +116,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                   operands
                   |> List.choose (fun o ->
                       match o with
-                      | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) -> Some text
+                      | SynExpr.Const(SynConst.String(text, _, _), _) -> Some text
                       | _ -> None)
 
               // A separator only JOINS when the chain has something on both
@@ -133,7 +133,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                   |> List.indexed
                   |> List.choose (fun (i, o) ->
                       match o with
-                      | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) ->
+                      | SynExpr.Const(SynConst.String(text, _, _), _) ->
                           separatorOf text
                           |> Option.filter (fun sep ->
                               let sepChar = sep.[0]
@@ -182,7 +182,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               // wants the stronger evidence.
               let opensWithSlashLiteral =
                   match operands with
-                  | SynExpr.Const(SynConst.String(text, SynStringKind.Regular, _), _) :: _ -> text.StartsWith '/'
+                  | SynExpr.Const(SynConst.String(text, _, _), _) :: _ -> text.StartsWith '/'
                   | _ -> false
 
               let hasPathEvidence (_separator: string) =

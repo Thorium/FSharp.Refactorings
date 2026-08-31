@@ -128,7 +128,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         { new SyntaxCollectorBase() with
             override _.WalkExpr(path, expr) =
                 match expr with
-                | SynExpr.Match(clauses = clauses) ->
+                | SynExpr.Match(clauses = clauses)
+                | SynExpr.MatchBang(clauses = clauses)
+                | SynExpr.MatchLambda(matchClauses = clauses) ->
                     // only plain module-level lets: inserting before a type
                     // declaration (a guard inside a member) would reference
                     // member parameters that are out of scope there, and a
@@ -161,7 +163,17 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                 ->
                                 let patternName = capitalize fnName
 
-                                if not (fileText.Value.Contains $"(|{patternName}|") then
+                                // the generated binding is spliced at the
+                                // decl's start, so that position must open
+                                // its line (a one-line nested module or
+                                // `;;`-chained decl would corrupt the line)
+                                let ownLine =
+                                    decl.Range.StartColumn = 0
+                                    || (source.GetLineString(decl.Range.StartLine - 1))
+                                        .Substring(0, decl.Range.StartColumn)
+                                        .Trim() = ""
+
+                                if ownLine && not (fileText.Value.Contains $"(|{patternName}|") then
                                     match inputParameter check source fnExpr with
                                     | ValueNone -> ()
                                     | ValueSome inputParam ->

@@ -41,7 +41,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               isInfix = false
               funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
               argExpr = SynExpr.Paren(
-                  expr = SynExpr.Tuple(exprs = SynExpr.Const(SynConst.String(fmt, SynStringKind.Regular, _), _) :: args))) when
+                  expr = SynExpr.Tuple(exprs = SynExpr.Const(SynConst.String(fmt, _, _), _) :: args))) when
               pathEndsWith "String" "Format" ids && not args.IsEmpty
               ->
               // `{{` is an escaped brace in composite formats

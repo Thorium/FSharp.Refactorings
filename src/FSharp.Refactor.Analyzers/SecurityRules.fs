@@ -23,8 +23,19 @@ type WeakKind =
     | Hash of name: string
     | Cipher of name: string
     | CertificateBypass
+    /// Ssl3/Tls/Tls11 protocol constants: broken or deprecated on the wire.
+    | Protocol of name: string
 
-type WeakCryptoSuggestion = { Range: range; Kind: WeakKind }
+type WeakCryptoSuggestion =
+    { Range: range
+      Kind: WeakKind
+      /// The algorithm identifier itself, when a swap fix can target it.
+      AlgoRange: range option }
+
+/// A dynamically built string reaching a process-execution sink — the
+/// command-injection shape SonarQube's agentic-workflow rules target,
+/// which matters doubly when the string carries LLM output.
+type ProcessSinkSuggestion = { Range: range; Sink: string }
 
 type SqlStringSuggestion =
     {
@@ -69,7 +80,12 @@ let private isDynamicString (e: SynExpr) =
             match p with
             | SynInterpolatedStringPart.FillExpr _ -> true
             | SynInterpolatedStringPart.String _ -> false)
+    // infix + parses its operator as a one-segment LongIdent, not Ident
     | SynExpr.App(funcExpr = SynExpr.App(funcExpr = IdentName "op_Addition")) -> true
+    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ op ])))) when
+        op.idText = "op_Addition"
+        ->
+        true
     | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent f)) when f.idText = "sprintf" -> true
     | SynExpr.App(funcExpr = SingleIdent f) when f.idText = "sprintf" -> true
     | SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))) when
@@ -80,12 +96,17 @@ let private isDynamicString (e: SynExpr) =
         true
     | _ -> false
 
-/// Find weak cryptography and string-built SQL.
-let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion list * SqlStringSuggestion list =
+/// Find weak cryptography, string-built SQL, and string-built process
+/// execution.
+let find
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    : WeakCryptoSuggestion list * SqlStringSuggestion list * ProcessSinkSuggestion list =
     ignore source
     let index = AstIndex.ofTree parseTree
     let crypto = ResizeArray<WeakCryptoSuggestion>()
     let sql = ResizeArray<SqlStringSuggestion>()
+    let processSinks = ResizeArray<ProcessSinkSuggestion>()
 
     for _, e in index.Exprs do
         match e with
@@ -100,11 +121,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion l
                 if weakHashes.Contains owner then
                     crypto.Add
                         { Range = e.Range
-                          Kind = WeakKind.Hash owner }
+                          Kind = WeakKind.Hash owner
+                          AlgoRange = Some ownerId.idRange }
                 elif weakCiphers.Contains owner then
                     crypto.Add
                         { Range = e.Range
-                          Kind = WeakKind.Cipher owner }
+                          Kind = WeakKind.Cipher owner
+                          AlgoRange = Some ownerId.idRange }
             | _ -> ()
         // new MD5CryptoServiceProvider() and friends
         | SynExpr.New(targetType = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty ->
@@ -113,11 +136,13 @@ let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion l
             if weakHashTypes.Contains name then
                 crypto.Add
                     { Range = e.Range
-                      Kind = WeakKind.Hash name }
+                      Kind = WeakKind.Hash name
+                      AlgoRange = None }
             elif weakCipherTypes.Contains name then
                 crypto.Add
                     { Range = e.Range
-                      Kind = WeakKind.Cipher name }
+                      Kind = WeakKind.Cipher name
+                      AlgoRange = None }
             elif commandTypes.Contains name then
                 // new SqlCommand(dynamicSql, ...)
                 match e with
@@ -129,6 +154,21 @@ let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion l
 
                     if isDynamicString first then
                         sql.Add { Range = e.Range; Sink = name }
+                | _ -> ()
+            elif name = "ProcessStartInfo" then
+                // new ProcessStartInfo(dynamicFile, dynamicArgs): the
+                // command/argument-injection sink
+                match e with
+                | SynExpr.New(expr = arg) ->
+                    let argsOf =
+                        match stripParens arg with
+                        | SynExpr.Tuple(exprs = es) -> es
+                        | single -> [ single ]
+
+                    if argsOf |> List.exists isDynamicString then
+                        processSinks.Add
+                            { Range = e.Range
+                              Sink = "ProcessStartInfo" }
                 | _ -> ()
         // SqlCommand(dynamicSql, ...) without `new`
         | SynExpr.App(isInfix = false; funcExpr = SingleIdent ctor; argExpr = arg) when
@@ -152,7 +192,14 @@ let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion l
             | "ServerCertificateCustomValidationCallback" ->
                 crypto.Add
                     { Range = e.Range
-                      Kind = WeakKind.CertificateBypass }
+                      Kind = WeakKind.CertificateBypass
+                      AlgoRange = None }
+            // psi.Arguments <- dynamic: the argument-injection sink;
+            // FileName is any DTO's field and stays out
+            | "Arguments" when isDynamicString rhs ->
+                processSinks.Add
+                    { Range = e.Range
+                      Sink = "Arguments" }
             | _ -> ()
         | SynExpr.DotSet(_, SynLongIdent(id = ids), rhs, _) when not ids.IsEmpty ->
             match (List.last ids).idText with
@@ -164,8 +211,41 @@ let find (parseTree: ParsedInput) (source: ISourceText) : WeakCryptoSuggestion l
             | "ServerCertificateCustomValidationCallback" ->
                 crypto.Add
                     { Range = e.Range
-                      Kind = WeakKind.CertificateBypass }
+                      Kind = WeakKind.CertificateBypass
+                      AlgoRange = None }
+            | "Arguments" when isDynamicString rhs ->
+                processSinks.Add
+                    { Range = e.Range
+                      Sink = "Arguments" }
+            | _ -> ()
+        // Process.Start with a dynamically built command — the
+        // command-injection sink; distinctive by name, so no typed gate
+        | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = pids)); argExpr = parg) when
+            pids.Length >= 2
+            && (List.last pids).idText = "Start"
+            && (pids |> List.item (pids.Length - 2)).idText = "Process"
+            ->
+            let argsOf =
+                match stripParens parg with
+                | SynExpr.Tuple(exprs = es) -> es
+                | single -> [ single ]
+
+            if argsOf |> List.exists isDynamicString then
+                processSinks.Add
+                    { Range = e.Range
+                      Sink = "Process.Start" }
+        // SecurityProtocolType.Ssl3 / SslProtocols.Tls11 and friends:
+        // broken or deprecated on the wire. The modern default is to set
+        // NOTHING and let the OS negotiate
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when ids.Length >= 2 ->
+            match (ids |> List.item (ids.Length - 2)).idText, (List.last ids).idText with
+            | ("SecurityProtocolType" | "SslProtocols"), ("Ssl2" | "Ssl3" | "Tls" | "Tls11" as proto) ->
+                crypto.Add
+                    { Range = e.Range
+                      Kind = WeakKind.Protocol proto
+                      // the constant ident itself: the Tls12 swap's target
+                      AlgoRange = Some (List.last ids).idRange }
             | _ -> ()
         | _ -> ()
 
-    List.ofSeq crypto, List.ofSeq sql
+    List.ofSeq crypto, List.ofSeq sql, List.ofSeq processSinks

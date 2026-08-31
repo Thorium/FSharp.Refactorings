@@ -109,3 +109,65 @@ let applyEdit (source: string) (range: range) (newText: string) : string =
     let patchedMiddle = startLinePrefix + newText + endLineSuffix
 
     String.concat "\n" (before @ [ patchedMiddle ] @ after)
+
+/// Typecheck a REAL two-file project in a temp directory — the harness for
+/// cross-file migrations. Returns the first file's parse tree, source and
+/// check results, the whole-project results, the two paths, and a recheck
+/// function for the patched pair. ProjectSources is configured so rules
+/// can classify uses in the sibling file.
+let parseAndCheckPair (sourceA: string) (sourceB: string) =
+    let dir =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsref-tests", System.Guid.NewGuid().ToString "N")
+
+    System.IO.Directory.CreateDirectory dir |> ignore
+    let pathA = System.IO.Path.Combine(dir, "A.fs")
+    let pathB = System.IO.Path.Combine(dir, "B.fs")
+    System.IO.File.WriteAllText(pathA, sourceA)
+    System.IO.File.WriteAllText(pathB, sourceB)
+
+    let probeOptions, _ =
+        checker.GetProjectOptionsFromScript(
+            System.IO.Path.Combine(dir, "probe.fsx"),
+            SourceText.ofString "",
+            assumeDotNetFramework = false
+        )
+        |> Async.RunSynchronously
+
+    let options =
+        { probeOptions with
+            ProjectFileName = System.IO.Path.Combine(dir, "Pair.fsproj")
+            SourceFiles = [| pathA; pathB |] }
+
+    let projectResults = checker.ParseAndCheckProject options |> Async.RunSynchronously
+
+    let sourceTextA = SourceText.ofString sourceA
+
+    let parseResultsA, answerA =
+        checker.ParseAndCheckFileInProject(pathA, 0, sourceTextA, options)
+        |> Async.RunSynchronously
+
+    let checkA =
+        match answerA with
+        | FSharpCheckFileAnswer.Succeeded c -> c
+        | FSharpCheckFileAnswer.Aborted -> failwith "pair typecheck aborted"
+
+    let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions options
+
+    FSharp.Refactor.ProjectSources.configure (
+        Some(fun path ->
+            let text = SourceText.ofString (System.IO.File.ReadAllText path)
+            let r = checker.ParseFile(path, text, parsingOptions) |> Async.RunSynchronously
+            Some(r.ParseTree, text))
+    )
+
+    let recheck (patchedA: string) (patchedB: string) =
+        System.IO.File.WriteAllText(pathA, patchedA)
+        System.IO.File.WriteAllText(pathB, patchedB)
+
+        let results =
+            checker.ParseAndCheckProject { options with Stamp = Some 1L } |> Async.RunSynchronously
+
+        results.Diagnostics
+        |> Array.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+
+    parseResultsA.ParseTree, sourceTextA, checkA, projectResults, pathA, pathB, recheck

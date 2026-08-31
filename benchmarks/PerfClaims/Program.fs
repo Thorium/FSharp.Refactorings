@@ -1066,7 +1066,26 @@ let notApplicable =
       "FR0114", "branch reorder: identical branches, swapped positions"
       "FR0115", "advice on match arm order: no fix to measure"
       "FR0116", "rec-group membership: same compiled calls either way"
-      "FR0117", "or-pattern fold: identical decision tree after compilation" ]
+      "FR0117", "or-pattern fold: identical decision tree after compilation"
+      "FR0118", "cancellation plumbing: correctness of propagation, not speed"
+      "FR0119", "sync-to-async twin: thread-pool behavior, scheduler-bound in-process"
+      "FR0120", "log completeness: diagnostic quality, not speed"
+      "FR0121", "wall-clock semantics: correctness, not speed"
+      "FR0122", "pattern validity: correctness, not speed"
+      "FR0123", "lock shape: release-on-all-paths correctness, not speed"
+      "FR0124", "template arity: diagnostic quality, not speed"
+      "FR0125", "invisible characters: review integrity, not speed"
+      "FR0126", "injection sink: security, not speed"
+      "FR0127", "credential formats: security, not speed"
+      "FR0128", "same algorithm behind a factory: spelling, not speed"
+      "FR0129", "guard removal: identical decision, one fewer test"
+      "FR0130", "Literal const-folds at use sites; no in-process pair isolates it"
+      "FR0131", "TailCall is metadata only — it changes no codegen to measure"
+      "FR0132", "moving a comment to the doc position changes no executed code"
+      "FR0133", "a rename is spelling only — nothing to measure"
+      "FR0134", "DateTimeOffset carries the offset the DateTime dropped; no perf claim"
+      "FR0135", "one star in a comment; nothing executes differently"
+      "FR0136", "Guid.Empty is the same value the constructor made; no perf claim" ]
 
 [<EntryPoint>]
 let main argv =

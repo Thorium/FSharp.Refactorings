@@ -57,6 +57,18 @@ let ``an equality chain over one ident becomes a match`` () =
     | other -> failwithf "Expected one chain suggestion, got %A" other
 
 [<Fact>]
+let ``verbatim string literals chain into a match with their prefix intact`` () =
+    let source =
+        "module Test\nlet f (x: string) =\n    if x = @\"a\\b\" then 1\n    elif x = @\"c\\d\" then 2\n    else 3"
+
+    match chainsIn source with
+    | [ s ] ->
+        Assert.Contains("| @\"a\\b\" -> 1", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one verbatim chain suggestion, got %A" other
+
+[<Fact>]
 let ``a chain over a CALL is left alone: re-evaluation is the semantics`` () =
     Assert.Empty(
         chainsIn
@@ -578,3 +590,93 @@ let ``differing bodies do not merge even when adjacent`` () =
         armMergesIn
             "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    | 2 -> not false\n    | _ -> false"
     )
+
+[<Fact>]
+let ``a mutual active-pattern group stays whole: bars are not the use-name`` () =
+    // the SQLProvider Patterns.fs catch: `(|Odd|_|)` is USED as `Odd`,
+    // so checking the decorated definition name found no references and
+    // offered to pull mutually recursive patterns apart
+    let source =
+        "module Test\n"
+        + "let rec (|Even|_|) (n: int) =\n"
+        + "    match n with\n"
+        + "    | 0 -> Some()\n"
+        + "    | _ -> match n - 1 with\n"
+        + "           | Odd -> Some()\n"
+        + "           | _ -> None\n"
+        + "and (|Odd|_|) (n: int) =\n"
+        + "    match n with\n"
+        + "    | 0 -> None\n"
+        + "    | _ -> match n - 1 with\n"
+        + "           | Even -> Some()\n"
+        + "           | _ -> None"
+
+    Assert.Empty(recGroupsIn source)
+    Assert.Empty(headRecrownsIn source)
+
+[<Fact>]
+let ``an active pattern referencing nobody still leaves its group`` () =
+    let source =
+        "module Test\n"
+        + "let rec (|Even|_|) (n: int) =\n"
+        + "    match n with\n"
+        + "    | 0 -> Some()\n"
+        + "    | _ -> match n - 1 with\n"
+        + "           | Odd -> Some()\n"
+        + "           | _ -> None\n"
+        + "and (|Blue|_|) (s: string) = if s = \"b\" then Some() else None\n"
+        + "and (|Odd|_|) (n: int) =\n"
+        + "    match n with\n"
+        + "    | 0 -> None\n"
+        + "    | _ -> match n - 1 with\n"
+        + "           | Even -> Some()\n"
+        + "           | _ -> None"
+
+    match recGroupsIn source with
+    | [ s ] -> Assert.Equal("|Blue|_|", s.MemberName)
+    | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a group with two extractable members offers one per pass`` () =
+    // several suggestions would all insert at the group's start and only
+    // be held back against each other; the multi-pass loop does the rest
+    let source =
+        "module Test\nlet rec f1 (x: int) : int = if x = 0 then 0 else f4 (x - 1) + x\nand f2 (y: int) = y + 1\nand f3 (w: int) = w * 2\nand f4 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    match recGroupsIn source with
+    | [ s ] -> Assert.Equal("f2", s.MemberName)
+    | other -> failwithf "Expected exactly one suggestion per pass, got %A" other
+
+[<Fact>]
+let ``an INDENTED group's commented member extracts without eating indentation`` () =
+    // the FSharp.Azure.Quantum VQC.fs catch: inside a nested module the
+    // comment-extended remove ran from column 0 to the next `and`'s
+    // column, deleting its indentation and orphaning the keyword at the
+    // margin; the insert side doubled the comment's indent
+    let source =
+        "module Test\n\nmodule Inner =\n    let rec f1 (x: int) : int = if x = 0 then 0 else f3 (x - 1)\n\n    /// Adds one; used outside the group.\n    and f2 (y: int) = y + 1\n\n    and f3 (z: int) : int = if z = 0 then 0 else f1 (z - 1)"
+
+    match recGroupsIn source with
+    | [ s ] ->
+        Assert.Equal("f2", s.MemberName)
+
+        let lines = source.Split '\n'
+
+        let offsetOf (line: int) (col: int) =
+            (lines |> Seq.take (line - 1) |> Seq.sumBy (fun l -> l.Length + 1)) + col
+
+        let removeStart = offsetOf s.RemoveRange.StartLine s.RemoveRange.StartColumn
+        let removeEnd = offsetOf s.RemoveRange.EndLine s.RemoveRange.EndColumn
+        let afterRemove = source.Substring(0, removeStart) + source.Substring removeEnd
+        let insertAt = offsetOf s.InsertRange.StartLine s.InsertRange.StartColumn
+
+        let patched =
+            afterRemove.Substring(0, insertAt) + s.InsertText + afterRemove.Substring insertAt
+
+        // the surviving `and f3` keeps its indentation, and the moved
+        // comment sits at the group's indent, not doubled
+        Assert.Contains("\n    and f3", patched)
+        Assert.Contains("\n    /// Adds one", patched)
+        Assert.DoesNotContain("\n        /// Adds one", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one extraction, got %A" other

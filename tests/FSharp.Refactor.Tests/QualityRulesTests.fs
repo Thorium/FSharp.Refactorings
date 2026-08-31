@@ -1,5 +1,8 @@
 module FSharp.Refactor.Tests.QualityRulesTests
 
+// the FR0125 fixtures below carry REAL invisible characters on purpose
+// fsharpanalyzer: ignore-file FR0125
+
 open Xunit
 open FSharp.Refactor
 open FSharp.Refactor.Tests.Parsing
@@ -99,7 +102,7 @@ let private securityIn (source: string) =
 
 [<Fact>]
 let ``MD5 Create is noted as weak`` () =
-    let crypto, _ =
+    let crypto, _, _ =
         securityIn "module Test\nlet hash () = System.Security.Cryptography.MD5.Create()"
 
     match crypto with
@@ -108,14 +111,14 @@ let ``MD5 Create is noted as weak`` () =
 
 [<Fact>]
 let ``SHA256 is fine`` () =
-    let crypto, _ =
+    let crypto, _, _ =
         securityIn "module Test\nlet hash () = System.Security.Cryptography.SHA256.Create()"
 
     Assert.Empty crypto
 
 [<Fact>]
 let ``interpolated CommandText is noted`` () =
-    let _, sql =
+    let _, sql, _ =
         securityIn
             "module Test\nlet q (cmd: obj) (setText: string -> unit) (name: string) =\n    setText $\"select * from users where name = '{name}'\""
 
@@ -124,7 +127,7 @@ let ``interpolated CommandText is noted`` () =
 
 [<Fact>]
 let ``CommandText assignment from interpolation is noted`` () =
-    let _, sql =
+    let _, sql, _ =
         securityIn
             "module Test\ntype Cmd() =\n    member val CommandText = \"\" with get, set\nlet q (cmd: Cmd) (name: string) = cmd.CommandText <- $\"select * from t where n = '{name}'\""
 
@@ -134,7 +137,7 @@ let ``CommandText assignment from interpolation is noted`` () =
 
 [<Fact>]
 let ``a literal CommandText is fine`` () =
-    let _, sql =
+    let _, sql, _ =
         securityIn
             "module Test\ntype Cmd() =\n    member val CommandText = \"\" with get, set\nlet q (cmd: Cmd) = cmd.CommandText <- \"select * from t where n = @n\""
 
@@ -153,6 +156,16 @@ let ``public module-level mutable is noted`` () =
 
     match mutables with
     | [ s ] -> Assert.Equal("counter", s.Name)
+    | other -> failwithf "Expected exactly one mutable-state note, got %A" other
+
+[<Fact>]
+let ``an UPPERCASE public mutable is noted too`` () =
+    // a lone uppercase binder parses as a no-argument LongIdent, not Named
+    let mutables, _, _ =
+        miscIn "module Test\nlet mutable Instance = 0\nlet bump () = Instance <- Instance + 1"
+
+    match mutables with
+    | [ s ] -> Assert.Equal("Instance", s.Name)
     | other -> failwithf "Expected exactly one mutable-state note, got %A" other
 
 [<Fact>]
@@ -496,3 +509,1566 @@ let ``a public record tuple is offered under api changes`` () =
 [<Fact>]
 let ``a plain struct field is not a tuple`` () =
     Assert.Empty(structTuplesIn "module Test\ntype private Row = { Count: int }")
+
+[<Fact>]
+let ``the small struct record gains an attribute fix that typechecks`` () =
+    let source =
+        "module Test\n\nmodule Inner =\n    /// A point.\n    type private Point = { X: int; Y: int }\n\n    let private origin = { X = 0; Y = 0 }"
+
+    let _, structs, _ = structHintsIn source
+
+    match structs with
+    | [ s ] ->
+        match s.Fix with
+        | Some(r, text) ->
+            Assert.Equal("    [<Struct>]\n", text)
+
+            let lines = source.Split '\n'
+
+            let offset =
+                (lines |> Seq.take (r.StartLine - 1) |> Seq.sumBy (fun l -> l.Length + 1))
+                + r.StartColumn
+
+            let patched = source.Substring(0, offset) + text + source.Substring offset
+            // the attribute lands between the doc comment and the type
+            Assert.Contains("/// A point.\n    [<Struct>]\n    type private Point", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "Expected an attribute fix"
+    | other -> failwithf "Expected one struct suggestion, got %A" other
+
+[<Fact>]
+let ``an attributed record stays advice`` () =
+    // CLIMutable + Struct conflict outright; any existing attribute
+    // keeps this a note
+    let source =
+        "module Test\n[<CLIMutable>]\ntype private Point = { X: int; Y: int }\nlet origin = { X = 0; Y = 0 }"
+
+    let _, structs, _ = structHintsIn source
+
+    for s in structs do
+        Assert.Equal(None, s.Fix)
+
+
+// ---- FR0069 voption migration ----
+
+let private voptionFixIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    let voptions, _, _ = StructHints.find false tree sourceText
+
+    voptions
+    |> List.map (fun s ->
+        s,
+        if s.IsFilePrivate then
+            VOptionMigration.migrate tree sourceText checkResults s.FieldIdRange s.FieldName s.OptionNameRange
+        else
+            None)
+
+let private applyMigration (source: string) (edits: (FSharp.Compiler.Text.range * string * string) list) =
+    edits
+    |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+    |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+[<Fact>]
+let ``a file-private option field migrates with every use`` () =
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime option; Name: string }\n"
+        + "let private mk (d: System.DateTime) = { Seen = Some d; Name = \"a\" }\n"
+        + "let private clear (r: Row) = { r with Seen = None }\n"
+        + "let private describe (r: Row) =\n"
+        + "    match r.Seen with\n"
+        + "    | Some d -> string d\n"
+        + "    | None -> \"never\"\n"
+        + "let private year (r: Row) = r.Seen |> Option.map (fun d -> d.Year)\n"
+        + "let private known (r: Row) = r.Seen.IsSome\n"
+        + "let private orNow (r: Row) (now: System.DateTime) = defaultArg r.Seen now"
+
+    match voptionFixIn source with
+    | [ (_, Some edits) ] ->
+        let patched = applyMigration source edits
+        Assert.Contains("Seen: System.DateTime voption", patched)
+        Assert.Contains("{ Seen = ValueSome d; Name = \"a\" }", patched)
+        Assert.Contains("{ r with Seen = ValueNone }", patched)
+        Assert.Contains("| ValueSome d -> string d", patched)
+        Assert.Contains("| ValueNone -> \"never\"", patched)
+        Assert.Contains("r.Seen |> ValueOption.map", patched)
+        Assert.Contains("r.Seen.IsSome", patched)
+        Assert.Contains("defaultValueArg r.Seen now", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one migratable field, got %A" other
+
+[<Fact>]
+let ``a use that binds the option value keeps the note`` () =
+    // `let s = r.Seen` starts dataflow the scan does not follow
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime option }\n"
+        + "let private mk (d: System.DateTime) = { Seen = Some d }\n"
+        + "let private stash (r: Row) =\n"
+        + "    let s = r.Seen\n"
+        + "    s"
+
+    match voptionFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the migration to bail, got %A" other
+
+// ---- FR0093 struct-tuple migration ----
+
+let private structTupleFixIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    let _, _, structTuples = StructHints.find false tree sourceText
+
+    structTuples
+    |> List.map (fun s ->
+        s,
+        if s.IsFilePrivate then
+            StructTupleMigration.migrate tree sourceText checkResults s.FieldIdRange s.FieldName s.Range
+        else
+            None)
+
+[<Fact>]
+let ``a file-private tuple field migrates with every use`` () =
+    let source =
+        "module Test\n"
+        + "type private P = { A: int * int; Tag: string }\n"
+        + "let private mk (x: int) = { A = (x, x + 1); Tag = \"t\" }\n"
+        + "let private flip (p: P) = { p with A = p.Tag.Length, 0 }\n"
+        + "let private show (p: P) =\n"
+        + "    match p.A with\n"
+        + "    | (0, _) | (_, 0) -> \"edge\"\n"
+        + "    | (x, y) -> string (x + y)\n"
+        + "let private parts (p: P) =\n"
+        + "    let (a, b) = p.A\n"
+        + "    a - b\n"
+        + "let private isOrigin (p: P) = p.A = (0, 0)"
+
+    match structTupleFixIn source with
+    | [ (_, Some edits) ] ->
+        let patched = applyMigration source edits
+        Assert.Contains("A: struct (int * int)", patched)
+        Assert.Contains("{ A = struct (x, x + 1); Tag = \"t\" }", patched)
+        Assert.Contains("{ p with A = struct (p.Tag.Length, 0) }", patched)
+        Assert.Contains("| struct (0, _) | struct (_, 0) -> \"edge\"", patched)
+        Assert.Contains("| struct (x, y) -> string (x + y)", patched)
+        Assert.Contains("let struct (a, b) = p.A", patched)
+        Assert.Contains("p.A = struct (0, 0)", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one migratable tuple field, got %A" other
+
+[<Fact>]
+let ``a tuple field passed along whole keeps the note`` () =
+    // `fst p.A` needs the reference tuple — dataflow the scan cannot follow
+    let source =
+        "module Test\n"
+        + "type private P = { A: int * int }\n"
+        + "let private mk () = { A = (1, 2) }\n"
+        + "let private first (p: P) = fst p.A"
+
+    match structTupleFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the tuple migration to bail, got %A" other
+
+[<Fact>]
+let ``an internal tuple field keeps the note`` () =
+    let source =
+        "module Test\n"
+        + "type internal P = { A: int * int }\n"
+        + "let internal mk () = { A = (1, 2) }"
+
+    match structTupleFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected no migration for internal, got %A" other
+
+[<Fact>]
+let ``an option value flowing in from a variable keeps the note`` () =
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime option }\n"
+        + "let private mk (d: System.DateTime option) = { Seen = d }"
+
+    match voptionFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the migration to bail, got %A" other
+
+[<Fact>]
+let ``a non-private contained type keeps the note`` () =
+    let source =
+        "module Test\n"
+        + "type internal Row = { Seen: System.DateTime option }\n"
+        + "let internal mk (d: System.DateTime) = { Seen = Some d }"
+
+    match voptionFixIn source with
+    | [ (s, migration) ] ->
+        Assert.False s.IsFilePrivate
+        Assert.Equal(None, migration)
+    | other -> failwithf "Expected one non-private suggestion, got %A" other
+
+[<Fact>]
+let ``a binder match arm keeps the note`` () =
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime option }\n"
+        + "let private mk (d: System.DateTime) = { Seen = Some d }\n"
+        + "let private peek (r: Row) =\n"
+        + "    match r.Seen with\n"
+        + "    | x -> x"
+
+    match voptionFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the migration to bail, got %A" other
+
+[<Fact>]
+let ``equality with None migrates the literal too`` () =
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime option }\n"
+        + "let private mk (d: System.DateTime) = { Seen = Some d }\n"
+        + "let private empty (r: Row) = r.Seen = None"
+
+    match voptionFixIn source with
+    | [ (_, Some edits) ] ->
+        let patched = applyMigration source edits
+        Assert.Contains("r.Seen = ValueNone", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected a migratable field, got %A" other
+
+[<Fact>]
+let ``a record pattern destructuring Some migrates`` () =
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime option; Name: string }\n"
+        + "let private mk (d: System.DateTime) = { Seen = Some d; Name = \"x\" }\n"
+        + "let private label (r: Row) =\n"
+        + "    match r with\n"
+        + "    | { Seen = Some d } -> string d\n"
+        + "    | { Seen = None } -> \"never\""
+
+    match voptionFixIn source with
+    | [ (_, Some edits) ] ->
+        let patched = applyMigration source edits
+        Assert.Contains("{ Seen = ValueSome d }", patched)
+        Assert.Contains("{ Seen = ValueNone }", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected a migratable field, got %A" other
+
+// ---- FR0120 CatchLogException ----
+
+// a stand-in for Microsoft.Extensions.Logging so the typed gate has a
+// real entity to resolve without the package reference
+let private loggerScaffold =
+    "namespace Microsoft.Extensions.Logging\n"
+    + "type ILogger = interface end\n"
+    + "[<System.Runtime.CompilerServices.Extension>]\n"
+    + "type LoggerExtensions =\n"
+    + "    [<System.Runtime.CompilerServices.Extension>]\n"
+    + "    static member LogError(logger: ILogger, message: string, [<System.ParamArray>] args: obj[]) = ignore (logger, message, args)\n"
+    + "    [<System.Runtime.CompilerServices.Extension>]\n"
+    + "    static member LogError(logger: ILogger, ex: exn, message: string, [<System.ParamArray>] args: obj[]) = ignore (logger, ex, message, args)\n"
+    + "namespace Test\n"
+    + "open Microsoft.Extensions.Logging\n"
+
+let private catchLogsIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck (loggerScaffold + source)
+    CatchLogException.find tree sourceText checkResults
+
+[<Fact>]
+let ``a handler log without the exception gains it first`` () =
+    let source =
+        "module M =\n    let run (logger: ILogger) (work: unit -> int) =\n        try\n            work ()\n        with ex ->\n            logger.LogError(\"work failed\")\n            0"
+
+    match catchLogsIn source with
+    | [ s ] ->
+        Assert.Equal("ex", s.ExceptionName)
+
+        let full = loggerScaffold + source
+        let patched = applyEdit full s.Range $"{s.ExceptionName}, "
+        Assert.Contains("logger.LogError(ex, \"work failed\")", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one catch-log suggestion, got %A" other
+
+[<Fact>]
+let ``logging the message only is a legitimate PII choice`` () =
+    let source =
+        "module M =\n    let run (logger: ILogger) (work: unit -> int) =\n        try\n            work ()\n        with ex ->\n            logger.LogError(\"work failed: {Error}\", ex.Message)\n            0"
+
+    Assert.Empty(catchLogsIn source)
+
+[<Fact>]
+let ``a log already passing the exception is left alone`` () =
+    let source =
+        "module M =\n    let run (logger: ILogger) (work: unit -> int) =\n        try\n            work ()\n        with ex ->\n            logger.LogError(ex, \"work failed\")\n            0"
+
+    Assert.Empty(catchLogsIn source)
+
+[<Fact>]
+let ``a log outside any handler is left alone`` () =
+    let source =
+        "module M =\n    let run (logger: ILogger) =\n        logger.LogError(\"routine complaint\")\n        0"
+
+    Assert.Empty(catchLogsIn source)
+
+[<Fact>]
+let ``a user type with a LogError member is not a logger`` () =
+    let source =
+        "module M =\n    type Fake() =\n        member _.LogError(msg: string) = ignore msg\n    let run (f: Fake) (work: unit -> int) =\n        try\n            work ()\n        with ex ->\n            f.LogError(\"work failed\")\n            0"
+
+    Assert.Empty(catchLogsIn source)
+
+// ---- FR0121 DateTimeRules ----
+
+let private wallClocksIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    DateTimeRules.find tree sourceText checkResults
+
+[<Fact>]
+let ``UtcNow Date is a timezone-random calendar cut`` () =
+    match wallClocksIn "module M\nlet today () = System.DateTime.UtcNow.Date" with
+    | [ s ] ->
+        match s.Kind with
+        | DateTimeRules.WallClockKind.UtcDateCut _ -> ()
+        | other -> failwithf "Expected the date-cut note, got %A" other
+    | other -> failwithf "Expected one wall-clock note, got %A" other
+
+[<Fact>]
+let ``Today is the server's calendar date`` () =
+    match wallClocksIn "module M\nlet today () = System.DateTime.Today" with
+    | [ s ] ->
+        match s.Kind with
+        | DateTimeRules.WallClockKind.UtcDateCut _ -> ()
+        | other -> failwithf "Expected the date-cut note, got %A" other
+    | other -> failwithf "Expected one wall-clock note, got %A" other
+
+[<Fact>]
+let ``a bare Now carries the opt-in UtcNow rewrite`` () =
+    let source = "module M\nlet stamp () = System.DateTime.Now"
+
+    match wallClocksIn source with
+    | [ s ] ->
+        Assert.Equal(DateTimeRules.WallClockKind.LocalNow, s.Kind)
+
+        match s.FixRange with
+        | Some r ->
+            let patched = applyEdit source r "UtcNow"
+            Assert.Contains("System.DateTime.UtcNow", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "Expected the Now fix range"
+    | other -> failwithf "Expected one wall-clock suggestion, got %A" other
+
+[<Fact>]
+let ``Now under a calendar read gets no rewrite: it would create the date-cut bug`` () =
+    // DateTime.Now.Date is a LOCAL calendar read; swapping Now for UtcNow
+    // underneath it manufactures exactly the UtcNow.Date defect
+    Assert.Empty(wallClocksIn "module M\nlet today () = System.DateTime.Now.Date")
+
+[<Fact>]
+let ``a user type named DateTime is not the BCL clock`` () =
+    Assert.Empty(
+        wallClocksIn "module M\ntype DateTime = { Now: int }\nlet fake (d: DateTime) = d.Now"
+    )
+
+// ---- FR0122 RegexValidity ----
+
+let private invalidPatternsIn (source: string) =
+    let tree, _ = parse source
+    RegexUsage.findInvalidPatterns tree
+
+[<Fact>]
+let ``an unclosed group is a guaranteed runtime exception`` () =
+    match invalidPatternsIn "module M\nlet f (s: string) = System.Text.RegularExpressions.Regex.IsMatch(s, \"(unclosed\")" with
+    | [ (_, pattern, _) ] -> Assert.Equal("(unclosed", pattern)
+    | other -> failwithf "Expected one invalid pattern, got %A" other
+
+[<Fact>]
+let ``a valid pattern stays quiet`` () =
+    Assert.Empty(invalidPatternsIn "module M\nlet f (s: string) = System.Text.RegularExpressions.Regex.IsMatch(s, @\"\d+\")")
+
+[<Fact>]
+let ``an invalid ctor pattern is caught too`` () =
+    match invalidPatternsIn "module M\nlet r = System.Text.RegularExpressions.Regex(\"[a-\")" with
+    | [ (_, pattern, _) ] -> Assert.Equal("[a-", pattern)
+    | other -> failwithf "Expected one invalid ctor pattern, got %A" other
+
+[<Fact>]
+let ``a dynamic pattern is out of reach and stays quiet`` () =
+    Assert.Empty(
+        invalidPatternsIn
+            "module M\nlet f (s: string) (p: string) = System.Text.RegularExpressions.Regex.IsMatch(s, p)"
+    )
+
+// ---- FR0123 MonitorLock ----
+
+let private monitorLocksIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    MonitorLock.find tree sourceText checkResults
+
+[<Fact>]
+let ``the canonical Enter-try-finally-Exit becomes lock`` () =
+    let source =
+        "module M =\n    let gate = obj ()\n    let mutable count = 0\n    let bump () =\n        System.Threading.Monitor.Enter gate\n        try\n            // guarded increment\n            count <- count + 1\n            count\n        finally\n            System.Threading.Monitor.Exit gate"
+
+    match monitorLocksIn source with
+    | [ s ] ->
+        match s.Fix with
+        | Some(r, _, replacement) ->
+            Assert.StartsWith("lock gate (fun () ->", replacement)
+            let patched = applyEdit source r replacement
+            Assert.Contains("lock gate (fun () ->", patched)
+            Assert.Contains("// guarded increment", patched)
+            Assert.DoesNotContain("Monitor.Exit", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "Expected the lock rewrite"
+    | other -> failwithf "Expected one monitor suggestion, got %A" other
+
+[<Fact>]
+let ``mismatched lock objects keep their hands off`` () =
+    let source =
+        "module M =\n    let a = obj ()\n    let b = obj ()\n    let bump () =\n        System.Threading.Monitor.Enter a\n        try\n            1\n        finally\n            System.Threading.Monitor.Exit b"
+
+    match monitorLocksIn source with
+    | [ s ] -> Assert.Equal(None, s.Fix)
+    | other -> failwithf "Expected one fix-less suggestion, got %A" other
+
+[<Fact>]
+let ``a bare Enter without try is the leak note`` () =
+    let source =
+        "module M =\n    let gate = obj ()\n    let mutable count = 0\n    let bump () =\n        System.Threading.Monitor.Enter gate\n        count <- count + 1\n        System.Threading.Monitor.Exit gate\n        count"
+
+    match monitorLocksIn source with
+    | [ s ] -> Assert.Equal(None, s.Fix)
+    | other -> failwithf "Expected one bare-Enter note, got %A" other
+
+[<Fact>]
+let ``the two-argument Enter overload carries protocol and stays`` () =
+    let source =
+        "module M =\n    let gate = obj ()\n    let bump () =\n        let mutable taken = false\n        System.Threading.Monitor.Enter(gate, &taken)\n        try\n            1\n        finally\n            if taken then System.Threading.Monitor.Exit gate"
+
+    Assert.Empty(monitorLocksIn source)
+
+[<Fact>]
+let ``a user Monitor type is not the BCL one`` () =
+    let source =
+        "module M =\n    type Monitor = static member Enter(_: obj) = ()\n    let bump () =\n        Monitor.Enter(obj ())\n        1"
+
+    Assert.Empty(monitorLocksIn source)
+
+// ---- FR0124 LogTemplates ----
+
+let private logTemplatesIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck (loggerScaffold + source)
+    LogTemplates.find tree sourceText checkResults
+
+[<Fact>]
+let ``a template with more placeholders than arguments is a lie`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) (user: string) =\n        logger.LogError(\"user {User} did {Action}\", user)"
+
+    match logTemplatesIn source with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.CountMismatch(2, 1), s.Problem)
+    | other -> failwithf "Expected one template mismatch, got %A" other
+
+[<Fact>]
+let ``a matching template stays quiet`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) (user: string) (act: string) =\n        logger.LogError(\"user {User} did {Action}\", user, act)"
+
+    Assert.Empty(logTemplatesIn source)
+
+[<Fact>]
+let ``a leading exception argument is skipped before counting`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) (work: unit -> int) (id: int) =\n        try\n            work ()\n        with ex ->\n            logger.LogError(ex, \"work {Id} failed\", id)\n            0"
+
+    Assert.Empty(logTemplatesIn source)
+
+[<Fact>]
+let ``duplicate placeholder names overwrite each other`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) (a: int) (b: int) =\n        logger.LogError(\"{Id} then {Id}\", a, b)"
+
+    match logTemplatesIn source with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.DuplicateName "Id", s.Problem)
+    | other -> failwithf "Expected one duplicate note, got %A" other
+
+[<Fact>]
+let ``an interpolated template destroys structured logging`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) (user: string) =\n        logger.LogError($\"failed for {user}\")"
+
+    match logTemplatesIn source with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.Interpolated, s.Problem)
+    | other -> failwithf "Expected one interpolation note, got %A" other
+
+[<Fact>]
+let ``escaped braces are literal text not placeholders`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) =\n        logger.LogError(\"literal {{braces}} here\")"
+
+    Assert.Empty(logTemplatesIn source)
+
+// ---- FR0065 weak TLS protocols ----
+
+[<Fact>]
+let ``a weak TLS protocol constant is noted`` () =
+    let crypto, _, _ =
+        securityIn
+            "module Test\nlet setup () = System.Net.ServicePointManager.SecurityProtocol <- System.Net.SecurityProtocolType.Tls11"
+
+    match crypto with
+    | [ s ] -> Assert.Equal(SecurityRules.WeakKind.Protocol "Tls11", s.Kind)
+    | other -> failwithf "Expected one weak-protocol note, got %A" other
+
+[<Fact>]
+let ``Tls12 is fine`` () =
+    let crypto, _, _ =
+        securityIn
+            "module Test\nlet setup () = System.Net.ServicePointManager.SecurityProtocol <- System.Net.SecurityProtocolType.Tls12"
+
+    Assert.Empty crypto
+
+// ---- adversarial pins for the new-rule guard rails ----
+
+[<Fact>]
+let ``FR0123 a body awaiting inside a task is not wrapped in a lambda`` () =
+    // do! cannot live in a plain lambda — the rewrite would not compile
+    let source =
+        "module M =\n    let gate = obj ()\n    let go () = task {\n        System.Threading.Monitor.Enter gate\n        try\n            do! System.Threading.Tasks.Task.Delay 1\n            return 1\n        finally\n            System.Threading.Monitor.Exit gate\n    }"
+
+    for s in monitorLocksIn source do
+        Assert.Equal(None, s.Fix)
+
+[<Fact>]
+let ``FR0123 a body touching an enclosing local mutable is not wrapped`` () =
+    // a closure cannot capture a local mutable (FS0407)
+    let source =
+        "module M =\n    let gate = obj ()\n    let go () =\n        let mutable count = 0\n        System.Threading.Monitor.Enter gate\n        try\n            count <- count + 1\n            count\n        finally\n            System.Threading.Monitor.Exit gate"
+
+    for s in monitorLocksIn source do
+        Assert.Equal(None, s.Fix)
+
+[<Fact>]
+let ``FR0120 an EventId-first log gets no exception inserted before it`` () =
+    // LoggerExtensions wants (EventId, Exception, template) — inserting
+    // the exception FIRST matches no overload
+    let source =
+        "module M =\n    let go (logger: ILogger) (eventId: int) (work: unit -> int) =\n        try\n            work ()\n        with ex ->\n            logger.LogError(eventId, \"work failed\")\n            0"
+
+    Assert.Empty(catchLogsIn source)
+
+[<Fact>]
+let ``FR0121 DateTimeOffset Now carries its offset and stays quiet`` () =
+    Assert.Empty(wallClocksIn "module M\nlet stamp () = System.DateTimeOffset.Now")
+
+[<Fact>]
+let ``FR0121 the date cut is caught mid-chain too`` () =
+    match wallClocksIn "module M\nlet tomorrow () = System.DateTime.UtcNow.Date.AddDays 1.0" with
+    | [ s ] ->
+        match s.Kind with
+        | DateTimeRules.WallClockKind.UtcDateCut _ -> ()
+        | other -> failwithf "Expected the date-cut note, got %A" other
+    | other -> failwithf "Expected one mid-chain note, got %A" other
+
+[<Fact>]
+let ``FR0121 Today survives a following call too`` () =
+    match wallClocksIn "module M\nlet tomorrow () = System.DateTime.Today.AddDays 1.0" with
+    | [ s ] ->
+        match s.Kind with
+        | DateTimeRules.WallClockKind.UtcDateCut _ -> ()
+        | other -> failwithf "Expected the date-cut note, got %A" other
+    | other -> failwithf "Expected one Today note, got %A" other
+
+[<Fact>]
+let ``FR0124 a params array passed whole is not an arity claim`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) (args: obj[]) =\n        logger.LogError(\"a {X} and {Y}\", args)"
+
+    Assert.Empty(logTemplatesIn source)
+
+[<Fact>]
+let ``FR0124 a hole-free interpolation compiles to a constant and stays quiet`` () =
+    let source =
+        "module M =\n    let go (logger: ILogger) =\n        logger.LogError($\"plain text\")"
+
+    Assert.Empty(logTemplatesIn source)
+
+// ---- FR0125 UnicodeHygiene ----
+
+let private unicodeIn (source: string) =
+    let tree, sourceText = parse source
+    UnicodeHygiene.find tree sourceText
+
+[<Fact>]
+let ``a bidi override in source is Trojan Source`` () =
+    // U+202E RIGHT-TO-LEFT OVERRIDE inside a comment
+    let source = "module M\n// check ‮access granted\nlet ok = 1"
+
+    match unicodeIn source with
+    | [ s ] ->
+        Assert.Equal("U+202E", s.CodePoint)
+        Assert.Equal(None, s.Fix) // in a comment: nothing safe to rewrite
+    | other -> failwithf "Expected one bidi finding, got %A" other
+
+[<Fact>]
+let ``a zero-width space inside a regular literal gains the escape fix`` () =
+    let source = "module M\nlet name = \"user​name\""
+
+    match unicodeIn source with
+    | [ s ] ->
+        match s.Fix with
+        | Some(r, _, replacement) ->
+            Assert.Equal("\\u200B", replacement)
+            let patched = applyEdit source r replacement
+            Assert.Contains("\\u200B", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "Expected the escape fix inside a regular literal"
+    | other -> failwithf "Expected one invisible finding, got %A" other
+
+[<Fact>]
+let ``a Unicode tag block character is the smuggling channel`` () =
+    // U+E0041 TAG LATIN CAPITAL LETTER A (astral, surrogate pair)
+    let source = "module M\nlet prompt = \"hello \U000E0041world\""
+
+    match unicodeIn source with
+    | [ s ] -> Assert.Equal("U+0E0041", s.CodePoint)
+    | other -> failwithf "Expected one tag-block finding, got %A" other
+
+[<Fact>]
+let ``emoji ZWJ sequences are legitimate and stay quiet`` () =
+    // family emoji uses U+200D ZERO WIDTH JOINER by design
+    let source = "module M\nlet family = \"👨‍👩\""
+
+    Assert.Empty(unicodeIn source)
+
+[<Fact>]
+let ``plain unicode text is not flagged`` () =
+    Assert.Empty(unicodeIn "module M\nlet greeting = \"tervetuloa — päivää\"")
+
+// ---- FR0126 process sinks ----
+
+[<Fact>]
+let ``an interpolated Process Start command is the injection sink`` () =
+    let _, _, sinks =
+        securityIn
+            "module Test\nlet run (userInput: string) = System.Diagnostics.Process.Start($\"tool {userInput}\")"
+
+    match sinks with
+    | [ s ] -> Assert.Equal("Process.Start", s.Sink)
+    | other -> failwithf "Expected one process sink, got %A" other
+
+[<Fact>]
+let ``a fixed command with dynamic arguments still flags the ctor`` () =
+    let _, _, sinks =
+        securityIn
+            "module Test\nlet run (v: string) = new System.Diagnostics.ProcessStartInfo(\"git\", \"clone \" + v)"
+
+    match sinks with
+    | [ s ] -> Assert.Equal("ProcessStartInfo", s.Sink)
+    | other -> failwithf "Expected one ctor sink, got %A" other
+
+[<Fact>]
+let ``an Arguments property fed a sprintf is flagged`` () =
+    let _, _, sinks =
+        securityIn
+            "module Test\nlet configure (psi: System.Diagnostics.ProcessStartInfo) (v: string) =\n    psi.Arguments <- sprintf \"run %s\" v"
+
+    match sinks with
+    | [ s ] -> Assert.Equal("Arguments", s.Sink)
+    | other -> failwithf "Expected one Arguments sink, got %A" other
+
+[<Fact>]
+let ``a constant command line is fine`` () =
+    let _, _, sinks =
+        securityIn "module Test\nlet run () = System.Diagnostics.Process.Start(\"notepad.exe\")"
+
+    Assert.Empty sinks
+
+// ---- FR0127 SecretLiterals ----
+
+let private secretsIn (source: string) =
+    let tree, _ = parse source
+    SecretLiterals.find tree
+
+[<Fact>]
+let ``an Anthropic-format key literal is a leaked credential`` () =
+    // the fixture key is assembled at TEST-source level so this file's
+    // own literal cannot match the format
+    let key = "sk-ant-" + "api03-abcdefghijklmnop"
+    let source = $"module M\nlet k = \"%s{key}\""
+
+    match secretsIn source with
+    | [ s ] -> Assert.Equal("Anthropic", s.Provider)
+    | other -> failwithf "Expected one key finding, got %A" other
+
+[<Fact>]
+let ``an AWS access key id matches its documented shape`` () =
+    let key = "AKIA" + "IOSFODNN7EXAMPLE"
+    let source = $"module M\nlet k = \"%s{key}\""
+
+    match secretsIn source with
+    | [ s ] -> Assert.Equal("AWS", s.Provider)
+    | other -> failwithf "Expected one key finding, got %A" other
+
+[<Fact>]
+let ``a PEM private key header is key material`` () =
+    let header = "-----BEGIN RSA PRIVATE" + " KEY-----"
+    let source = $"module M\nlet pem = \"%s{header}\""
+
+    match secretsIn source with
+    | [ s ] -> Assert.Equal("PEM private key", s.Provider)
+    | other -> failwithf "Expected one PEM finding, got %A" other
+
+[<Fact>]
+let ``ordinary prefixed identifiers are not keys`` () =
+    Assert.Empty(secretsIn "module M\nlet sku = \"sk-1234\"\nlet gh = \"ghx_short\"")
+
+// ---- FR0128 ObsoleteCrypto ----
+
+let private obsoleteCryptoIn (source: string) =
+    let tree, sourceText = parse source
+    ObsoleteCrypto.find tree sourceText
+
+[<Fact>]
+let ``an obsolete Managed constructor becomes the static factory`` () =
+    let source = "module M\nlet hash () = new System.Security.Cryptography.SHA256Managed()"
+
+    match obsoleteCryptoIn source with
+    | [ s ] ->
+        Assert.Equal("System.Security.Cryptography.SHA256.Create()", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one obsolete-ctor suggestion, got %A" other
+
+[<Fact>]
+let ``RNGCryptoServiceProvider maps to RandomNumberGenerator`` () =
+    let source = "module M\nopen System.Security.Cryptography\nlet rng () = new RNGCryptoServiceProvider()"
+
+    match obsoleteCryptoIn source with
+    | [ s ] ->
+        Assert.Equal("RandomNumberGenerator.Create()", s.Replacement)
+        let patched = applyEdit source s.Range s.Replacement
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one RNG suggestion, got %A" other
+
+[<Fact>]
+let ``a constructor with arguments carries state and stays`` () =
+    Assert.Empty(
+        obsoleteCryptoIn
+            "module M\ntype AesManaged(key: byte[]) = member _.K = key\nlet a (key: byte[]) = new AesManaged(key)"
+    )
+
+[<Fact>]
+let ``an obsolete name mentioned in a type position vetoes the rewrite`` () =
+    // SHA256.Create() returns the BASE type — an explicit SHA256Managed
+    // annotation (or `:?` test / typeof<>) would break or change meaning
+    Assert.Empty(
+        obsoleteCryptoIn
+            "module M\nopen System.Security.Cryptography\nlet h: SHA256Managed = new SHA256Managed()"
+    )
+
+[<Fact>]
+let ``the veto is per name, not per file`` () =
+    let source =
+        "module M\nopen System.Security.Cryptography\nlet h: SHA256Managed = new SHA256Managed()\nlet g () = new SHA512Managed()"
+
+    match obsoleteCryptoIn source with
+    | [ s ] -> Assert.Equal("SHA512Managed", s.ObsoleteName)
+    | other -> failwithf "Expected only the SHA512 suggestion, got %A" other
+
+// ---- FR0129 MatchGuards ----
+
+let private guardEqualsIn (source: string) =
+    let tree, sourceText = parse source
+    MatchGuards.find tree sourceText
+
+[<Fact>]
+let ``a guard that only tests the binder becomes the literal pattern`` () =
+    let source =
+        "module M\nlet f (a: string) =\n    match a with\n    | x when x = \"A\" -> 1\n    | x when x = \"B\" -> 2\n    | _ -> 3"
+
+    match guardEqualsIn source with
+    | [ s1; s2 ] ->
+        Assert.Equal("\"A\"", s1.LiteralText)
+        let patched = applyEdit (applyEdit source s2.Range s2.LiteralText) s1.Range s1.LiteralText
+        Assert.Contains("| \"A\" -> 1", patched)
+        Assert.Contains("| \"B\" -> 2", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected two guard suggestions, got %A" other
+
+[<Fact>]
+let ``function-style matching gets the same rewrite`` () =
+    let source = "module M\nlet f = function\n    | x when x = 42 -> \"yes\"\n    | _ -> \"no\""
+
+    match guardEqualsIn source with
+    | [ s ] ->
+        Assert.Equal("42", s.LiteralText)
+        let patched = applyEdit source s.Range s.LiteralText
+        Assert.Contains("| 42 -> \"yes\"", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one function-guard suggestion, got %A" other
+
+[<Fact>]
+let ``a body still using the binder keeps the guard`` () =
+    Assert.Empty(
+        guardEqualsIn
+            "module M\nlet f (a: string) =\n    match a with\n    | x when x = \"A\" -> x + \"!\"\n    | _ -> \"no\""
+    )
+
+[<Fact>]
+let ``a compound guard is more than the literal`` () =
+    Assert.Empty(
+        guardEqualsIn
+            "module M\nlet f (a: string) (b: bool) =\n    match a with\n    | x when x = \"A\" && b -> 1\n    | _ -> 3"
+    )
+
+[<Fact>]
+let ``a decimal literal is not spellable in the pattern language`` () =
+    Assert.Empty(guardEqualsIn "module M\nlet f (a: decimal) =\n    match a with\n    | x when x = 1.5m -> 1\n    | _ -> 3")
+
+[<Fact>]
+let ``a guard against a VARIABLE cannot become a pattern`` () =
+    Assert.Empty(
+        guardEqualsIn
+            "module M\nlet f (a: string) (expected: string) =\n    match a with\n    | x when x = expected -> 1\n    | _ -> 3"
+    )
+
+// ---- FR0130 LiteralConst ----
+
+let private literalsIn (source: string) =
+    let tree, sourceText = parse source
+    LiteralConst.find false tree sourceText
+
+[<Fact>]
+let ``a private constant string gains the Literal attribute`` () =
+    let source = "module M\nlet private Greeting = \"hello world\"\nlet show () = Greeting"
+
+    match literalsIn source with
+    | [ s ] ->
+        Assert.Equal("Greeting", s.Name)
+        let r, text = s.Fix
+        let patched = applyEdit source r text
+        Assert.Contains("[<Literal>]\nlet private Greeting", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one literal suggestion, got %A" other
+
+[<Fact>]
+let ``a public constant is an api change and stays without the flag`` () =
+    Assert.Empty(literalsIn "module M\nlet Greeting = \"hello world\"")
+
+[<Fact>]
+let ``a computed value is not a literal`` () =
+    Assert.Empty(literalsIn "module M\nlet private greeting = \"hello \" + \"world\"")
+
+[<Fact>]
+let ``a name also used as a match binder must not become a constant pattern`` () =
+    // once `greeting` is a literal, `| greeting ->` MATCHES it instead of
+    // binding — compiles fine, behavior silently changes
+    Assert.Empty(
+        literalsIn
+            "module M\nlet private greeting = \"hello\"\nlet f (s: string) =\n    match s with\n    | greeting -> greeting"
+    )
+
+[<Fact>]
+let ``a name also bound by a local let must not become a partial match`` () =
+    Assert.Empty(literalsIn "module M\nlet private greeting = \"hello\"\nlet f (s: string) =\n    let greeting = s\n    greeting")
+
+// ---- FR0110 / FR0117 over function-style matching ----
+
+[<Fact>]
+let ``missing DU cases are added to function-style matches too`` () =
+    let source =
+        "module Test\ntype Color = Red | Green | Blue\nlet f : Color -> string = function\n    | Red -> \"r\"\n    | Green -> \"g\""
+
+    let tree, sourceText, checkResults = parseAndCheck source
+
+    match MissingCases.find tree sourceText checkResults with
+    | [ s ] -> Assert.Equal<string list>([ "Blue" ], s.MissingCases)
+    | other -> failwithf "Expected one missing-case suggestion, got %A" other
+
+[<Fact>]
+let ``adjacent same-result arms merge in function-style matches too`` () =
+    let source =
+        "module Test\nlet f : int -> bool = function\n    | 1 -> true\n    | 2 -> true\n    | _ -> false"
+
+    let tree, sourceText = parse source
+
+    match MissingCases.findMergeableArms tree sourceText with
+    | [ s ] -> Assert.Equal(2, s.Count)
+    | other -> failwithf "Expected one function-arm merge, got %A" other
+
+// ---- FR0131 RecTailCall ----
+
+let private tailCallsIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    RecTailCall.find tree sourceText checkResults
+
+/// The attribute's whole point is FS3569 — the patched source must carry
+/// NEITHER errors nor that warning.
+let private assertTailCallClean (patched: string) =
+    let _, _, checkResults = parseAndCheck patched
+
+    let offending =
+        checkResults.Diagnostics
+        |> Array.filter (fun d ->
+            d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error
+            || d.ErrorNumber = 3569)
+
+    Assert.True(Array.isEmpty offending, $"Patched source raises %A{offending}:\n%s{patched}")
+
+[<Fact>]
+let ``an accumulator loop over match gains TailCall`` () =
+    let source =
+        "module M\nlet rec sum (acc: int) (xs: int list) =\n    match xs with\n    | [] -> acc\n    | h :: t -> sum (acc + h) t"
+
+    match tailCallsIn source with
+    | [ s ] ->
+        Assert.Equal("sum", s.Name)
+        let r, text = s.Fix
+        let patched = applyEdit source r text
+        Assert.Contains("[<TailCall>]\nlet rec sum", patched)
+        assertTailCallClean patched
+    | other -> failwithf "Expected one TailCall suggestion, got %A" other
+
+[<Fact>]
+let ``function-style accumulator loops count their implicit parameter`` () =
+    let source =
+        "module M\nlet rec go (acc: int) = function\n    | [] -> acc\n    | (h: int) :: t -> go (acc + h) t"
+
+    match tailCallsIn source with
+    | [ s ] ->
+        let r, text = s.Fix
+        let patched = applyEdit source r text
+        assertTailCallClean patched
+    | other -> failwithf "Expected one function-style suggestion, got %A" other
+
+[<Fact>]
+let ``a piped self-call is a tail call`` () =
+    let source =
+        "module M\nlet rec drain (n: int) (xs: int list) =\n    match xs with\n    | [] -> n\n    | _ :: t -> t |> drain (n + 1)"
+
+    match tailCallsIn source with
+    | [ s ] ->
+        let r, text = s.Fix
+        assertTailCallClean (applyEdit source r text)
+    | other -> failwithf "Expected one piped suggestion, got %A" other
+
+[<Fact>]
+let ``a cons around the self-call is not a tail call`` () =
+    Assert.Empty(
+        tailCallsIn "module M\nlet rec twice (xs: int list) =\n    match xs with\n    | [] -> []\n    | h :: t -> h :: h :: twice t"
+    )
+
+[<Fact>]
+let ``the function passed as a VALUE cannot be verified`` () =
+    Assert.Empty(
+        tailCallsIn
+            "module M\nlet rec flatten (acc: int list) (xss: int list list) =\n    match xss with\n    | [] -> acc\n    | _ -> List.fold flatten acc xss"
+    )
+
+[<Fact>]
+let ``a self-call inside try-with is never tail`` () =
+    Assert.Empty(
+        tailCallsIn
+            "module M\nlet rec retry (n: int) (f: unit -> int) =\n    try f ()\n    with _ -> if n > 0 then retry (n - 1) f else 0"
+    )
+
+[<Fact>]
+let ``mutual and-groups stay untouched`` () =
+    Assert.Empty(
+        tailCallsIn
+            "module M\nlet rec even (n: int) = if n = 0 then true else odd (n - 1)\nand odd (n: int) = if n = 0 then false else even (n - 1)"
+    )
+
+[<Fact>]
+let ``an unverifiable call shape is left alone`` () =
+    // `(k (n - 1)) x` — the parenthesised head hides the spine, so the
+    // conservative catch-all vetoes rather than guesses
+    Assert.Empty(
+        tailCallsIn "module M\nlet rec k (n: int) (x: int) : int =\n    if n <= 0 then x else (k (n - 1)) x"
+    )
+
+// ---- cross-file migrations (internal visibility, --api-changes class) ----
+
+[<Fact>]
+let ``an internal option field migrates across files`` () =
+    let sourceA =
+        "module A\ntype internal Row = { Seen: System.DateTime option }\nlet internal mk (d: System.DateTime) = { Seen = Some d }"
+
+    let sourceB =
+        "module B\nlet internal clear (r: A.Row) = { r with Seen = None }\nlet internal describe (r: A.Row) =\n    match r.Seen with\n    | Some d -> string d\n    | None -> \"never\""
+
+    let treeA, sourceTextA, checkA, projectResults, pathA, _, recheck = parseAndCheckPair sourceA sourceB
+
+    let voptions, _, _ = StructHints.find true treeA sourceTextA
+
+    match voptions with
+    | [ s ] ->
+        match
+            VOptionMigration.migrateProject treeA sourceTextA checkA projectResults s.FieldIdRange s.FieldName s.OptionNameRange
+        with
+        | Some edits ->
+            // edits span both files
+            let byFile =
+                edits
+                |> List.groupBy (fun (r, _, _) -> System.IO.Path.GetFileName r.FileName)
+                |> Map.ofList
+
+            Assert.True(byFile.ContainsKey "A.fs")
+            Assert.True(byFile.ContainsKey "B.fs")
+
+            let apply (source: string) (fileEdits: (FSharp.Compiler.Text.range * string * string) list) =
+                fileEdits
+                |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+                |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+            let patchedA = apply sourceA byFile.["A.fs"]
+            let patchedB = apply sourceB byFile.["B.fs"]
+            Assert.Contains("System.DateTime voption", patchedA)
+            Assert.Contains("Seen = ValueSome d", patchedA)
+            Assert.Contains("Seen = ValueNone", patchedB)
+            Assert.Contains("| ValueSome d -> string d", patchedB)
+
+            let errors = recheck patchedA patchedB
+            Assert.True(Array.isEmpty errors, sprintf "patched pair does not typecheck: %A" errors)
+        | None -> failwith "expected a cross-file migration"
+    | other -> failwithf "Expected one voption suggestion, got %A" other
+
+[<Fact>]
+let ``a sibling use outside the shapes vetoes the cross-file migration`` () =
+    let sourceA =
+        "module A\ntype internal Row = { Seen: System.DateTime option }\nlet internal mk (d: System.DateTime) = { Seen = Some d }"
+
+    // `let s = r.Seen` in the OTHER file starts dataflow the scan cannot follow
+    let sourceB = "module B\nlet internal stash (r: A.Row) =\n    let s = r.Seen\n    s"
+
+    let treeA, sourceTextA, checkA, projectResults, _, _, _ = parseAndCheckPair sourceA sourceB
+
+    let voptions, _, _ = StructHints.find true treeA sourceTextA
+
+    match voptions with
+    | [ s ] ->
+        Assert.Equal(
+            None,
+            VOptionMigration.migrateProject treeA sourceTextA checkA projectResults s.FieldIdRange s.FieldName s.OptionNameRange
+        )
+    | other -> failwithf "Expected one voption suggestion, got %A" other
+
+// ---- FR0132 CommentDoc ----
+
+let private commentDocIn (source: string) =
+    let tree, sourceText = parse source
+    CommentDoc.find tree sourceText
+
+[<Fact>]
+let ``a trailing comment on a public binding becomes its XML doc`` () =
+    let source = "module M\nlet interestRate r n = r * n // monthly, non-compounding"
+
+    match commentDocIn source with
+    | [ s ] ->
+        let patched = applyMigration source s.Edits
+        Assert.Contains("/// monthly, non-compounding\nlet interestRate r n = r * n", patched)
+        Assert.False(patched.Contains "n // monthly")
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one doc promotion, got %A" other
+
+[<Fact>]
+let ``a union case's trailing comment docs the case`` () =
+    let source = "module M\ntype Money =\n    | Rate of float // interest and rate\n    | Amount of int"
+
+    match commentDocIn source with
+    | [ s ] ->
+        let patched = applyMigration source s.Edits
+        Assert.Contains("    /// interest and rate\n    | Rate of float", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one case promotion, got %A" other
+
+[<Fact>]
+let ``a private binding keeps its trailing note`` () =
+    Assert.Empty(commentDocIn "module M\nlet private helper r n = r * n // internal scratch")
+
+[<Fact>]
+let ``an existing XML doc wins`` () =
+    Assert.Empty(commentDocIn "module M\n/// documented already\nlet interestRate r n = r * n // stale note")
+
+[<Fact>]
+let ``a suppression comment is an instruction, not documentation`` () =
+    Assert.Empty(commentDocIn "module M\nlet rate r = r * 2 // fsharpanalyzer: ignore-line FR0001")
+
+// ---- FR0133 NameQuoting ----
+
+let private nameQuotingIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    NameQuoting.find true tree sourceText checkResults None
+
+[<Fact>]
+let ``a five-word private name becomes a double-backtick name everywhere`` () =
+    let source =
+        "module M\nlet private thisIsMyVeryComplexMethod (x: int) = x + 1\nlet use1 () = thisIsMyVeryComplexMethod 1\nlet use2 () = thisIsMyVeryComplexMethod 2"
+
+    match nameQuotingIn source with
+    | [ s ] ->
+        Assert.Equal("this is my very complex method", s.Quoted)
+        let patched = applyMigration source s.Edits
+        Assert.Contains("let private ``this is my very complex method`` (x: int)", patched)
+        Assert.Contains("let use1 () = ``this is my very complex method`` 1", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one quoting suggestion, got %A" other
+
+[<Fact>]
+let ``a snake-case local renames inside its function`` () =
+    let source =
+        "module M\nlet f () =\n    let this_is_my_very_complex_case = 4\n    this_is_my_very_complex_case + 1"
+
+    match nameQuotingIn source with
+    | [ s ] ->
+        let patched = applyMigration source s.Edits
+        Assert.Contains("let ``this is my very complex case`` = 4", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one local quoting suggestion, got %A" other
+
+[<Fact>]
+let ``an acronym is a word already`` () =
+    Assert.Empty(nameQuotingIn "module M\nlet private calcAPRUnitRateForLoan (x: int) = x")
+
+[<Fact>]
+let ``four words are readable as they are`` () =
+    Assert.Empty(nameQuotingIn "module M\nlet private thisIsComplexMethod (x: int) = x")
+
+[<Fact>]
+let ``a public non-test name is a contract`` () =
+    Assert.Empty(nameQuotingIn "module M\nlet thisIsMyVeryComplexMethod (x: int) = x")
+
+[<Fact>]
+let ``a test-attributed public name renames when the project proves it local`` () =
+    let sourceA =
+        "module ATests\n[<System.Obsolete>]\nlet fake () = ()\ntype FactAttribute() =\n    inherit System.Attribute()\n[<Fact>]\nlet checkThatRatesRoundCorrectly () = ()"
+
+    let sourceB = "module B\nlet unrelated = 1"
+
+    let treeA, sourceTextA, checkA, projectResults, _, _, _ = parseAndCheckPair sourceA sourceB
+
+    match NameQuoting.find false treeA sourceTextA checkA (Some projectResults) with
+    | [ s ] ->
+        Assert.Equal("check that rates round correctly", s.Quoted)
+    | other -> failwithf "Expected one test-name quoting, got %A" other
+
+[<Fact>]
+let ``without the locals opt-in only test names rewrite`` () =
+    // default configuration: private five-word names stay put
+    let tree, sourceText, checkResults =
+        parseAndCheck "module M\nlet private thisIsMyVeryComplexHelper (x: int) = x\nlet go () = thisIsMyVeryComplexHelper 2"
+
+    Assert.Empty(NameQuoting.find false tree sourceText checkResults None)
+
+// ---- FR0022 new name sources ----
+
+let private duNamesIn (source: string) =
+    let tree, sourceText = parse source
+    DuFieldNames.find false tree sourceText
+
+[<Fact>]
+let ``an XAndY case name names its own fields`` () =
+    let source = "module M\ntype private Pricing =\n    | InterestAndRate of float * float\n    | Empty"
+
+    match duNamesIn source with
+    | [ s ] ->
+        Assert.Equal<string list>([ "interest"; "rate" ], s.Names)
+        let patched = applyMigration source s.Edits
+        Assert.Contains("| InterestAndRate of interest: float * rate: float", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one name-sourced suggestion, got %A" other
+
+[<Fact>]
+let ``a clear trailing comment names the fields`` () =
+    let source = "module M\ntype private Pricing =\n    | Pair of float * float // interest and rate\n    | Empty"
+
+    match duNamesIn source with
+    | [ s ] ->
+        Assert.Equal<string list>([ "interest"; "rate" ], s.Names)
+        let patched = applyMigration source s.Edits
+        Assert.Contains("| Pair of interest: float * rate: float // interest and rate", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one comment-sourced suggestion, got %A" other
+
+[<Fact>]
+let ``a star-separated comment works too`` () =
+    let source = "module M\ntype private Pricing =\n    | Pair of float * float // interest * rate\n    | Empty"
+
+    match duNamesIn source with
+    | [ s ] -> Assert.Equal<string list>([ "interest"; "rate" ], s.Names)
+    | other -> failwithf "Expected one star-comment suggestion, got %A" other
+
+[<Fact>]
+let ``a type-note comment is not a name list`` () =
+    // `// string * int` spells TYPES — using them as field names would
+    // shadow the type names and read as nonsense
+    Assert.Empty(duNamesIn "module M\ntype private T =\n    | Pair of string * int // string * int\n    | Empty")
+
+[<Fact>]
+let ``Command does not split at its lowercase and`` () =
+    Assert.Empty(duNamesIn "module M\ntype private T =\n    | Command of string * int\n    | Empty")
+
+[<Fact>]
+let ``match sites still outrank the weaker sources`` () =
+    let source =
+        "module M\ntype private Pricing =\n    | InterestAndRate of float * float // wrong and comment\n    | Empty\nlet f (p: Pricing) =\n    match p with\n    | InterestAndRate(basis, spread) -> basis + spread\n    | Empty -> 0.0"
+
+    match duNamesIn source with
+    | [ s ] -> Assert.Equal<string list>([ "basis"; "spread" ], s.Names)
+    | other -> failwithf "Expected the site names to win, got %A" other
+
+// ---- FR0134 DateTimeOffset migration ----
+
+let private dtoFixIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+
+    DateTimeOffsetMigration.find false tree sourceText
+    |> List.map (fun s ->
+        s,
+        if s.IsFilePrivate then
+            DateTimeOffsetMigration.migrate tree sourceText checkResults s
+        else
+            None)
+
+[<Fact>]
+let ``a UtcNow-fed private DateTime field migrates to DateTimeOffset`` () =
+    let source =
+        "module Test\nopen System\n"
+        + "type private Row = { Seen: DateTime; Name: string }\n"
+        + "let private mk () = { Seen = DateTime.UtcNow; Name = \"a\" }\n"
+        + "let private year (r: Row) = r.Seen.Year\n"
+        + "let private later (r: Row) = r.Seen.AddDays 1.0\n"
+        + "let private newer (a: Row) (b: Row) = a.Seen > b.Seen\n"
+        + "let private gap (a: Row) (b: Row) = a.Seen - b.Seen"
+
+    match dtoFixIn source with
+    | [ (_, Some edits) ] ->
+        let patched = applyMigration source edits
+        Assert.Contains("Seen: DateTimeOffset", patched)
+        Assert.Contains("{ Seen = DateTimeOffset.UtcNow; Name = \"a\" }", patched)
+        Assert.Contains("r.Seen.Year", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one DateTimeOffset migration, got %A" other
+
+[<Fact>]
+let ``a ToString read escapes the envelope`` () =
+    let source =
+        "module Test\nopen System\n"
+        + "type private Row = { Seen: DateTime }\n"
+        + "let private mk () = { Seen = DateTime.UtcNow }\n"
+        + "let private show (r: Row) = r.Seen.ToString \"o\""
+
+    match dtoFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the migration to bail on ToString, got %A" other
+
+[<Fact>]
+let ``mixed Now and UtcNow writes bail`` () =
+    let source =
+        "module Test\nopen System\n"
+        + "type private Row = { Seen: DateTime }\n"
+        + "let private a () = { Seen = DateTime.UtcNow }\n"
+        + "let private b () = { Seen = DateTime.Now }"
+
+    match dtoFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the mixed-clock bail, got %A" other
+
+[<Fact>]
+let ``a computed write escapes the envelope`` () =
+    let source =
+        "module Test\nopen System\n"
+        + "type private Row = { Seen: DateTime }\n"
+        + "let private mk (d: DateTime) = { Seen = d }"
+
+    match dtoFixIn source with
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected the computed-write bail, got %A" other
+
+[<Fact>]
+let ``an attributed binding keeps its comment where it is`` () =
+    // the /// would land between the attribute and the let — FS3520 territory
+    Assert.Empty(commentDocIn "module M\n[<System.Obsolete>]\nlet rate r = r * 2 // monthly figure")
+
+[<Fact>]
+let ``a user-defined DateTime type never migrates`` () =
+    let source =
+        "module Test\n"
+        + "type DateTime = { Ticks: int64 }\n"
+        + "module private Clock =\n"
+        + "    let UtcNow = { Ticks = 0L }\n"
+        + "type private Row = { Seen: DateTime }\n"
+        + "let private mk () = { Seen = Clock.UtcNow }"
+
+    match dtoFixIn source with
+    | [] -> ()
+    | [ (_, None) ] -> ()
+    | other -> failwithf "Expected no migration for the user type, got %A" other
+
+// ---- audit gates: cross-file confinement and classifier soundness ----
+
+[<Fact>]
+let ``a public field is never confined, even under api-changes`` () =
+    let tree, sourceText = parse "module M\ntype Row = { Seen: System.DateTime option }"
+    let voptions, _, _ = StructHints.find true tree sourceText
+
+    match voptions with
+    | [ s ] ->
+        Assert.False s.IsFilePrivate
+        Assert.False s.IsConfined
+    | other -> failwithf "Expected one public voption hint, got %A" other
+
+[<Fact>]
+let ``an internal field is confined but not file-private`` () =
+    let tree, sourceText = parse "module M\ntype internal Row = { Seen: System.DateTime option }"
+    let voptions, _, _ = StructHints.find true tree sourceText
+
+    match voptions with
+    | [ s ] ->
+        Assert.False s.IsFilePrivate
+        Assert.True s.IsConfined
+    | other -> failwithf "Expected one internal voption hint, got %A" other
+
+[<Fact>]
+let ``BeginAndEnd would name fields with keywords and stays`` () =
+    Assert.Empty(duNamesIn "module M\ntype private T =\n    | BeginAndEnd of int * int\n    | Nothing")
+
+[<Fact>]
+let ``an XML-hostile comment stays where escaping cannot follow`` () =
+    Assert.Empty(commentDocIn "module M\nlet cmp a b = a < b // true when a < b")
+
+[<Fact>]
+let ``a fake DateTime clock never migrates to the real one`` () =
+    let source =
+        "module Test\n"
+        + "module DateTime =\n"
+        + "    let mutable UtcNow = System.DateTime(2020, 1, 1)\n"
+        + "type private Row = { Seen: System.DateTime }\n"
+        + "let private mk () = { Seen = DateTime.UtcNow }"
+
+    match dtoFixIn source with
+    | [ (_, None) ] -> ()
+    | [] -> ()
+    | other -> failwithf "Expected the fake-clock bail, got %A" other
+
+[<Fact>]
+let ``a same-named field on another type is not a sound comparison operand`` () =
+    let source =
+        "module Test\nopen System\n"
+        + "type private Row = { Seen: DateTime }\n"
+        + "type Other = { Seen: DateTime }\n"
+        + "let private mk () = { Row.Seen = DateTime.UtcNow }\n"
+        + "let private newer (r: Row) (o: Other) = r.Seen > o.Seen"
+
+    match dtoFixIn source with
+    | [ (_, None) ] -> ()
+    | [] -> ()
+    | other -> failwithf "Expected the cross-type comparison bail, got %A" other
+
+[<Fact>]
+let ``a name referenced by string never renames`` () =
+    // [<TestCaseSource("...")>]-style references resolve at runtime
+    let tree, sourceText, checkResults =
+        parseAndCheck
+            "module M\nlet private thisIsMyVeryLongCaseSource = [ 1 ]\nlet describe () = \"thisIsMyVeryLongCaseSource drives the tests\"\nlet go () = thisIsMyVeryLongCaseSource"
+
+    Assert.Empty(NameQuoting.find true tree sourceText checkResults None)
+
+// ---- FR0135 LiterateComment ----
+
+let private literateIn (source: string) =
+    let tree, sourceText = parseNamed "Doc.fsx" source
+    LiterateComment.find tree sourceText
+
+[<Fact>]
+let ``a fenced block comment in a script becomes a literate cell`` () =
+    let source = "(*\n### Setup\n```fsharp\nlet x = 1\n```\n*)\nlet go = 2"
+
+    match literateIn source with
+    | [ s ] ->
+        let r, text = s.Fix
+        let patched = applyEdit source r text
+        Assert.StartsWith("(**\n### Setup", patched)
+        Assert.True(parsesCleanlyNamed "Doc.fsx" patched)
+    | other -> failwithf "Expected one literate suggestion, got %A" other
+
+[<Fact>]
+let ``a heading alone is evidence too`` () =
+    let source = "(*\n### Usage notes\nplain prose here\n*)\nlet go = 2"
+
+    match literateIn source with
+    | [ s ] -> Assert.Equal("a ### heading", s.Evidence)
+    | other -> failwithf "Expected one heading suggestion, got %A" other
+
+[<Fact>]
+let ``an existing literate cell is already one`` () =
+    Assert.Empty(literateIn "(**\n### Setup\n*)\nlet go = 2")
+
+[<Fact>]
+let ``a command cell is tooling syntax, not markdown`` () =
+    Assert.Empty(literateIn "(*** hide ***)\nlet go = 2")
+
+[<Fact>]
+let ``prose without markdown stays a comment`` () =
+    Assert.Empty(literateIn "(*\njust words\nacross lines\n*)\nlet go = 2")
+
+[<Fact>]
+let ``a compiled file is not a literate script`` () =
+    let tree, sourceText = parse "module M\n(*\n### Setup\n```\nx\n```\n*)\nlet go = 2"
+    Assert.Empty(LiterateComment.find tree sourceText)
+
+[<Fact>]
+let ``a name referenced from an ATTRIBUTE argument never renames`` () =
+    // the real TestCaseSource shape: the string lives in the attribute's
+    // argument, which is not an indexed expression
+    let tree, sourceText, checkResults =
+        parseAndCheck
+            "module M\nlet private thisIsMyVeryLongCaseSource = [ 1 ]\n[<System.Obsolete(\"see thisIsMyVeryLongCaseSource\")>]\nlet go () = thisIsMyVeryLongCaseSource"
+
+    Assert.Empty(NameQuoting.find true tree sourceText checkResults None)
+
+[<Fact>]
+let ``a fully qualified UtcNow write migrates too`` () =
+    let source =
+        "module Test\n"
+        + "type private Row = { Seen: System.DateTime }\n"
+        + "let private mk () = { Seen = System.DateTime.UtcNow }"
+
+    match dtoFixIn source with
+    | [ (_, Some edits) ] ->
+        let patched = applyMigration source edits
+        Assert.Contains("{ Seen = System.DateTimeOffset.UtcNow }", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected the qualified migration, got %A" other
+
+// ---- FR0062 setup-singleton gate / FR0067 culture fixes ----
+
+[<Fact>]
+let ``a set-once config mutable is the poor man's DI, not churn`` () =
+    // assigned once, not from itself: the startup-config / test-seam
+    // pattern — no note
+    let mutables, _, _ =
+        miscIn "module Test\nlet mutable Config = \"default\"\nlet setup (c: string) = Config <- c\nlet get () = Config"
+
+    Assert.Empty mutables
+
+[<Fact>]
+let ``a repeatedly assigned public mutable keeps the note`` () =
+    let mutables, _, _ =
+        miscIn
+            "module Test\nlet mutable Current = \"a\"\nlet setA () = Current <- \"a\"\nlet setB () = Current <- \"b\""
+
+    match mutables with
+    | [ s ] -> Assert.Equal("Current", s.Name)
+    | other -> failwithf "Expected one churn note, got %A" other
+
+[<Fact>]
+let ``the culture fix grows the parenthesised argument list`` () =
+    let _, parses, _ = miscIn "module Test\nlet f (s: string) = System.DateTime.Parse(s)"
+
+    match parses with
+    | [ p ] ->
+        match p.CultureFix with
+        | Some mk ->
+            let r, _, replacement = mk "InvariantCulture"
+            let source = "module Test\nlet f (s: string) = System.DateTime.Parse(s)"
+            let patched = applyEdit source r replacement
+            Assert.Contains("System.DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture)", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "expected a culture fix"
+    | other -> failwithf "Expected one culture suggestion, got %A" other
+
+[<Fact>]
+let ``the culture fix wraps a juxtaposed argument`` () =
+    let _, parses, _ = miscIn "module Test\nlet f (s: string) = System.DateTime.Parse s"
+
+    match parses with
+    | [ p ] ->
+        match p.CultureFix with
+        | Some mk ->
+            let r, _, replacement = mk "InvariantCulture"
+            let source = "module Test\nlet f (s: string) = System.DateTime.Parse s"
+            let patched = applyEdit source r replacement
+            Assert.Contains("System.DateTime.Parse (s, System.Globalization.CultureInfo.InvariantCulture)", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "expected a culture fix"
+    | other -> failwithf "Expected one culture suggestion, got %A" other
+
+[<Fact>]
+let ``the weak protocol constant swaps to Tls12`` () =
+    let tree, sourceText = parse "module Test\nopen System.Net\nlet setup () =\n    ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls11"
+    let crypto, _, _ = SecurityRules.find tree sourceText
+
+    match crypto with
+    | [ s ] ->
+        match s.AlgoRange with
+        | Some r ->
+            let source = "module Test\nopen System.Net\nlet setup () =\n    ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls11"
+            let patched = applyEdit source r "Tls12"
+            Assert.Contains("SecurityProtocolType.Tls12", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "expected the protocol ident range"
+    | other -> failwithf "Expected one protocol suggestion, got %A" other
+
+[<Fact>]
+let ``an existing Globalization open keeps the culture spelling short`` () =
+    let source = "module Test\nopen System.Globalization\nlet f (s: string) = System.DateTime.Parse(s)"
+    let _, parses, _ = miscIn source
+
+    match parses with
+    | [ p ] ->
+        match p.CultureFix with
+        | Some mk ->
+            let r, _, replacement = mk "InvariantCulture"
+            let patched = applyEdit source r replacement
+            Assert.Contains("System.DateTime.Parse(s, CultureInfo.InvariantCulture)", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> failwith "expected a culture fix"
+    | other -> failwithf "Expected one culture suggestion, got %A" other
+
+// ---- FR0136 EmptyGuid ----
+
+let private emptyGuidIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    EmptyGuid.find tree sourceText checkResults
+
+[<Fact>]
+let ``a zero-argument Guid constructor states Empty`` () =
+    let source = "module M\nopen System\nlet id = Guid()"
+
+    match emptyGuidIn source with
+    | [ s ] ->
+        Assert.Equal("Guid.Empty", s.EmptyText)
+        Assert.Equal("Guid.NewGuid()", s.NewGuidText)
+        let patched = applyEdit source s.Range s.EmptyText
+        Assert.Contains("let id = Guid.Empty", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one Guid suggestion, got %A" other
+
+[<Fact>]
+let ``new System Guid keeps its qualification`` () =
+    let source = "module M\nlet id = new System.Guid()"
+
+    match emptyGuidIn source with
+    | [ s ] ->
+        Assert.Equal("System.Guid.Empty", s.EmptyText)
+        let patched = applyEdit source s.Range s.NewGuidText
+        Assert.Contains("let id = System.Guid.NewGuid()", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified Guid suggestion, got %A" other
+
+[<Fact>]
+let ``a Guid built FROM something is deliberate`` () =
+    Assert.Empty(emptyGuidIn "module M\nlet id (s: string) = System.Guid(s)")
+
+[<Fact>]
+let ``a user type named Guid is not System Guid`` () =
+    Assert.Empty(emptyGuidIn "module M\ntype Guid() = class end\nlet g = Guid()")
+
+[<Fact>]
+let ``inside a query the whole culture suggestion stands down`` () =
+    // the quotation belongs to the database's type system — no cultures
+    // there, and the two-argument Parse can stop a provider translating
+    let source =
+        "module M\nlet f (xs: System.Linq.IQueryable<string>) =\n    query {\n        for x in xs do\n        where (System.DateTime.Parse(x) > System.DateTime.MinValue)\n        select x\n    }"
+
+    let _, parses, _ = miscIn source
+    Assert.Empty parses

@@ -54,9 +54,20 @@ let private objExprMemberBindings (e: SynExpr) : SynBinding list =
 /// side alike — so `logits[0L, int64 pos, key] <- v` hid `pos` and `key`
 /// from every index-based rule (found the hard way: FR0101 rewrote a loop
 /// whose index was plainly used as a value inside one of these).
+///
+/// SynExpr.MatchBang has the same hole for its CLAUSES: guards and arm
+/// bodies alike are invisible to the walker, so every `let!` inside a
+/// `match!` arm escaped every index-based rule (found the hard way:
+/// FR0029 saw a 17-await match! task as having ONE await).
 let private setChildren (e: SynExpr) : SynExpr list =
     match e with
     | SynExpr.Set(targetExpr = target; rhsExpr = rhs) -> [ target; rhs ]
+    | SynExpr.MatchBang(clauses = cs) ->
+        cs
+        |> List.collect (fun (SynMatchClause(whenExpr = w; resultExpr = r)) ->
+            match w with
+            | Some g -> [ g; r ]
+            | None -> [ r ])
     | _ -> []
 
 /// Wrap bindings in a one-declaration synthetic file so the SDK walker can
@@ -207,8 +218,39 @@ let private build (tree: ParsedInput) : Index =
     let supplementalPats = ResizeArray()
     let supplementalTypes = ResizeArray()
 
+    // MatchBang clause PATTERNS: the walker skips the clauses entirely and
+    // the setChildren supplement lifts only their guards and bodies — the
+    // patterns (and their binders) must go into Pats directly, or every
+    // pattern-driven rule stays blind inside `match!` arms
+    let rec liftPats (path: SyntaxNode list) (p: SynPat) =
+        supplementalPats.Add(path, p)
+
+        let children =
+            match p with
+            | SynPat.Paren(pat = inner)
+            | SynPat.Typed(pat = inner)
+            | SynPat.Attrib(pat = inner) -> [ inner ]
+            | SynPat.As(lhsPat = l; rhsPat = r)
+            | SynPat.Or(lhsPat = l; rhsPat = r)
+            | SynPat.ListCons(lhsPat = l; rhsPat = r) -> [ l; r ]
+            | SynPat.Ands(pats = ps)
+            | SynPat.Tuple(elementPats = ps)
+            | SynPat.ArrayOrList(elementPats = ps) -> ps
+            | SynPat.LongIdent(argPats = SynArgPats.Pats ps) -> ps
+            | _ -> []
+
+        children |> List.iter (liftPats path)
+
     while pending.Count > 0 do
         let objPath, objExpr = pending.Dequeue()
+
+        match objExpr with
+        | SynExpr.MatchBang(clauses = cs) ->
+            let clausePath = SyntaxNode.SynExpr objExpr :: objPath
+
+            for SynMatchClause(pat = p) in cs do
+                liftPats clausePath p
+        | _ -> ()
 
         let synthetic =
             match objExprMemberBindings objExpr with

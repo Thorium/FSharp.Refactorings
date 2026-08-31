@@ -59,6 +59,11 @@ type Suggestion =
         /// waypoint toward a full-async refactor, and swapping to the
         /// sync API walks the code the other way.
         AlternativeFixes: (range * string * string) list
+        /// For a BOUNDARY site (Builder = None): the task-typed receiver
+        /// being drained, when the shape exposes one — `t.Result` gives
+        /// `t`, `t.GetAwaiter().GetResult()` gives `t`. The taskify fix
+        /// binds this with let!/return!.
+        Receiver: range voption
     }
 
 let private ceBuilders = set [ "async"; "task"; "backgroundTask" ]
@@ -367,11 +372,24 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               syncSiblingFix check source recv expr
                           | _ -> []
 
+                      let receiver =
+                          match kind, expr with
+                          | BlockKind.AwaiterGetResult,
+                            SynExpr.App(funcExpr = SynExpr.DotGet(expr = AwaiterReceiverRange recvRange)) ->
+                              ValueSome recvRange
+                          | BlockKind.TaskResult, SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
+                              ids.Length >= 2
+                              ->
+                              ValueSome(prefixRangeOf expr ids)
+                          | BlockKind.TaskResult, SynExpr.DotGet(expr = recv) -> ValueSome recv.Range
+                          | _ -> ValueNone
+
                       { Range = expr.Range
                         Kind = kind
                         Builder = None
                         Fixes = []
-                        AlternativeFixes = alternatives }
+                        AlternativeFixes = alternatives
+                        Receiver = receiver }
                   | Some(builder, ceRange) ->
                       let fixes =
                           match kind, sleepArg with
@@ -504,6 +522,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         Kind = kind
                         Builder = Some builder
                         Fixes = fixes
-                        AlternativeFixes = [] }
+                        AlternativeFixes = []
+                        Receiver = ValueNone }
                   | None -> ()
               | None -> () ]

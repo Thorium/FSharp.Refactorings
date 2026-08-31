@@ -114,7 +114,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         [ for _, expr in index.Exprs do
               match expr with
               | SynExpr.Match(clauses = clauses)
-              | SynExpr.MatchBang(clauses = clauses) when not clauses.IsEmpty ->
+              | SynExpr.MatchBang(clauses = clauses)
+              | SynExpr.MatchLambda(matchClauses = clauses) when not clauses.IsEmpty ->
                   // any total (wildcard/variable) clause completes the match
                   let anyCatchAll =
                       clauses
@@ -195,7 +196,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                               else
                                                   $"{qualifier}{name}"
 
-                                          $"\n{indent}| {pattern} -> raise (System.NotImplementedException())")
+                                          let prefix = if opensSystemNamespace source then "" else "System."
+                                          $"\n{indent}| {pattern} -> raise ({prefix}NotImplementedException())")
                                       |> String.concat ""
 
                                   let insertAt =
@@ -276,7 +278,8 @@ let findMergeableArms (parseTree: ParsedInput) (source: ISourceText) : ArmMerge 
           let clauses =
               match expr with
               | SynExpr.Match(clauses = cs)
-              | SynExpr.MatchBang(clauses = cs) -> cs
+              | SynExpr.MatchBang(clauses = cs)
+              | SynExpr.MatchLambda(matchClauses = cs) -> cs
               | _ -> []
 
           if clauses.Length >= 2 then

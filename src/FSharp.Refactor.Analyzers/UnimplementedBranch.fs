@@ -162,7 +162,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         suggestions.Add
                             { Range = body.Range
                               OriginalText = textOfRange source body.Range
-                              ReplacementText = "raise (System.NotImplementedException())" }
+                              ReplacementText =
+                                (let prefix = if opensSystemNamespace source then "" else "System."
+                                 $"raise ({prefix}NotImplementedException())") }
                 | _ -> ()
 
     for _, expr in index.Exprs do

@@ -143,7 +143,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   match lou.Bindings with
                   | [ SynBinding(
                           isMutable = false
-                          headPat = SynPat.Named(ident = SynIdent(ident = binder); accessibility = None)
+                          headPat = (SynPat.Named(ident = SynIdent(ident = binder); accessibility = None) | SynPat.LongIdent(
+                              longDotId = SynLongIdent(id = [ binder ])
+                              argPats = SynArgPats.Pats []
+                              accessibility = None))
                           expr = rhs) ] when
                       locallyConstructed check source rhs
                       && ObjectDesign.resolvesToDisposable check source binder

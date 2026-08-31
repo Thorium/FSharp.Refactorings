@@ -47,6 +47,7 @@ let private (|BoolConst|_|) (e: SynExpr) =
 
 /// The head of an application chain: `a > b` leads to `op_GreaterThan`,
 /// `f x y` to `f`.
+[<TailCall>]
 let rec private appHead (e: SynExpr) =
     match e with
     | SynExpr.App(funcExpr = f) -> appHead f

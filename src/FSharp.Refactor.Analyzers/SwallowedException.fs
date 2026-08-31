@@ -83,6 +83,7 @@ let inline private (|IsDefaultFallback|_|) input =
         ValueNone
 
 /// The expression a block evaluates to — the tail of its Sequential chain.
+[<TailCall>]
 let rec private lastExprOf (e: SynExpr) =
     match e with
     | SynExpr.Sequential(expr2 = e2) -> lastExprOf e2

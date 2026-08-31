@@ -104,7 +104,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         [ for _, expr in index.Exprs do
               match expr with
               | SynExpr.Match(clauses = clauses)
-              | SynExpr.MatchBang(clauses = clauses) when clauses.Length >= 2 ->
+              | SynExpr.MatchBang(clauses = clauses)
+              | SynExpr.MatchLambda(matchClauses = clauses) when clauses.Length >= 2 ->
                   let unguarded =
                       clauses |> List.forall (fun (SynMatchClause(whenExpr = g)) -> g.IsNone)
 

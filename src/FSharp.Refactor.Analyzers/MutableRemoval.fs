@@ -137,7 +137,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                 match expr with
                 | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
                     match lou.Bindings with
-                    | [ SynBinding(isMutable = true; headPat = SynPat.Named(ident = SynIdent(ident = var)) as pat) ] when
+                    | [ SynBinding(
+                            isMutable = true
+                            headPat = (SynPat.Named(ident = SynIdent(ident = var)) | SynPat.LongIdent(
+                                longDotId = SynLongIdent(id = [ var ]); argPats = SynArgPats.Pats [])) as pat) ] when
                         not (mayMutate (textOfRange source lou.Body.Range) var.idText)
                         && resolvesToSafeType var
                         ->
@@ -166,7 +169,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                 | SynMemberDefn.LetBindings(
                                     bindings = [ SynBinding(
                                                      isMutable = true
-                                                     headPat = SynPat.Named(ident = SynIdent(ident = var)) as pat) ]) when
+                                                     headPat = (SynPat.Named(ident = SynIdent(ident = var)) | SynPat.LongIdent(
+                                                         longDotId = SynLongIdent(id = [ var ])
+                                                         argPats = SynArgPats.Pats [])) as pat) ]) when
                                     not (mayMutate typeText.Value var.idText) && resolvesToSafeType var
                                     ->
                                     match

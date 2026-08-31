@@ -44,6 +44,7 @@ let private (|Ignored|_|) (e: SynExpr) =
 /// applied to it: `f a b` → (f, 2); `x.M(a)` → (M, 1); `x |> g` → (g, 1).
 /// Real fire-and-forget bugs are written as a direct call ignored —
 /// `saveUserAsync user |> ignore` — almost never as a named binding.
+[<TailCall>]
 let rec private headAndDepth (depth: int) (e: SynExpr) =
     match e with
     | SynExpr.Paren(expr = inner) -> headAndDepth depth inner

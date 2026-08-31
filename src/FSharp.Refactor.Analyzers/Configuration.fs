@@ -79,6 +79,8 @@ let parse (json: string) : Map<string, bool> =
 let private defaultOff =
     set
         [ "fr0002"
+          "fr0134"
+          "datetimeoffsetmigration"
           "optionmodule"
           "fr0099"
           "trailingsemicolon"

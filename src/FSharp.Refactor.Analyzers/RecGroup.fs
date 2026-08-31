@@ -64,6 +64,24 @@ let private bindingName (SynBinding(headPat = pat)) =
     | SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ]); argPats = SynArgPats.Pats _) -> Some id.idText
     | _ -> None
 
+/// The identifiers a binding is USED by. An active pattern's definition
+/// name is `|SqlColumnGet|_|`, but every use site says `SqlColumnGet` —
+/// checking the decorated name finds nothing, which read as "references
+/// no sibling" on SQLProvider's mutually recursive pattern grammar and
+/// offered extractions that could not hold together.
+let private referenceNames (name: string) =
+    if name.Contains '|' then
+        name.Split '|'
+        |> Array.filter (fun part -> part <> "" && part <> "_")
+        |> List.ofArray
+    else
+        [ name ]
+
+/// Any use of `name` (by any of its reference identifiers) in the text.
+let private mentions (text: string) (name: string) =
+    referenceNames name
+    |> List.exists (fun part -> Regex.IsMatch(text, identifierPattern part))
+
 let rec private declsOf (decls: SynModuleDecl list) : SynModuleDecl list =
     decls
     |> List.collect (fun d ->
@@ -103,7 +121,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                       Range.mkRange decl.Range.FileName start finish
 
-                  for i in 1 .. bindings.Length - 1 do
+                  let suggestionFor i =
                       let keywordLine = (List.item i keywordStarts).StartLine
                       let name = List.item i names
 
@@ -121,7 +139,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                               if
                                   above.StartsWith "///"
-                                  || (above.StartsWith "//" && Regex.IsMatch(above, identifierPattern name))
+                                  || (above.StartsWith "//" && mentions above name)
                               then
                                   first <- first - 1
                               else
@@ -135,9 +153,23 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       let companionComments =
                           [ for l in commentStartLine .. keywordLine - 1 -> source.GetLineString(l - 1) ]
 
+                      // an INDENTED group's plain block runs keyword-to-
+                      // keyword: removing it is column-symmetric and the
+                      // next binding keeps its indentation. The comment-
+                      // extended block starts at column 0, so it must END
+                      // at column 0 too — ending at the next keyword's
+                      // column ate the following `and`'s indent inside
+                      // nested modules (VQC.fs, FSharp.Azure.Quantum) and
+                      // left it orphaned at the margin
                       let block =
                           if commentStartLine < keywordLine then
-                              Range.mkRange plainBlock.FileName (Position.mkPos commentStartLine 0) plainBlock.End
+                              let endPos =
+                                  if i < bindings.Length - 1 && plainBlock.End.Column > 0 then
+                                      Position.mkPos plainBlock.EndLine 0
+                                  else
+                                      plainBlock.End
+
+                              Range.mkRange plainBlock.FileName (Position.mkPos commentStartLine 0) endPos
                           else
                               plainBlock
 
@@ -147,13 +179,14 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       // comment naming a sibling should not keep it in
                       let referencesGroup =
                           names
-                          |> List.exists (fun other ->
-                              other <> name && Regex.IsMatch(bindingText, identifierPattern other))
+                          |> List.exists (fun other -> other <> name && mentions bindingText other)
 
                       // its own name beyond the header means self-recursion:
                       // the member still leaves, but as its own `let rec` —
                       // a plain `let` would not compile
-                      let isSelfRecursive = Regex.Matches(bindingText, identifierPattern name).Count >= 2
+                      let isSelfRecursive =
+                          referenceNames name
+                          |> List.exists (fun part -> Regex.Matches(bindingText, identifierPattern part).Count >= 2)
 
                       if
                           attrs.IsEmpty
@@ -178,11 +211,27 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                           let keyword = if isSelfRecursive then "let rec" else "let"
                           let extracted = commentPrefix + keyword + bindingText.Substring(3)
 
-                          { RemoveRange = block
-                            InsertRange = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
-                            InsertText = extracted.TrimEnd() + $"\n\n{indent}"
-                            MemberName = name
-                            IsSelfRecursive = isSelfRecursive }
+                          Some
+                              { RemoveRange = block
+                                InsertRange = Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
+                                // the insert point sits AFTER the group's
+                                // existing indentation: the first inserted
+                                // line must not bring its own (raw comment
+                                // lines carry it; inside a nested module
+                                // that doubled up)
+                                InsertText = extracted.TrimStart().TrimEnd() + $"\n\n{indent}"
+                                MemberName = name
+                                IsSelfRecursive = isSelfRecursive }
+                      else
+                          None
+
+                  // ONE suggestion per group per pass: several would all
+                  // insert at the group's start, and every message after
+                  // the first would only be held back as un-appliable —
+                  // the multi-pass loop revisits for the rest
+                  match [ 1 .. bindings.Length - 1 ] |> List.tryPick suggestionFor with
+                  | Some s -> s
+                  | None -> ()
           | _ -> () ]
 
 let private letRecKeywordRegex = Regex @"^let\s+rec$"
@@ -228,12 +277,17 @@ let findHeadRecrowns (parseTree: ParsedInput) (source: ISourceText) : HeadSugges
 
                   let referencesAnyMember =
                       // itself included: a self-recursive head must keep its
-                      // `rec`, and that variant is not worth the surgery
+                      // `rec`, and that variant is not worth the surgery.
+                      // Names are checked by their USE identifiers — an
+                      // active pattern is used by its case names, not its
+                      // decorated `|A|_|` definition name
                       names
                       |> List.exists (fun other ->
                           let occurrencesBeyondHeader = if other = headName then 1 else 0
 
-                          Regex.Matches(headText, identifierPattern other).Count > occurrencesBeyondHeader)
+                          referenceNames other
+                          |> List.exists (fun part ->
+                              Regex.Matches(headText, identifierPattern part).Count > occurrencesBeyondHeader))
 
                   let startsOwnLine (r: range) =
                       (source.GetLineString(r.StartLine - 1)).Substring(0, r.StartColumn).Trim() = ""

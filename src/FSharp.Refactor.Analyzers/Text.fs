@@ -263,6 +263,10 @@ let rec patBoundNamesLoop (acc: string list) (pending: SynPat list) =
             | SynPat.Ands(pats = ps) -> acc, ps @ rest
             | SynPat.As(lhsPat = l; rhsPat = r)
             | SynPat.Or(lhsPat = l; rhsPat = r) -> acc, l :: r :: rest
+            // a no-argument lone identifier (the uppercase binder's parse
+            // shape) BINDS the name — record it like Named
+            | SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ]); argPats = SynArgPats.Pats []) ->
+                id.idText :: acc, rest
             | SynPat.LongIdent(argPats = SynArgPats.Pats ps) -> acc, ps @ rest
             | _ -> acc, rest
 

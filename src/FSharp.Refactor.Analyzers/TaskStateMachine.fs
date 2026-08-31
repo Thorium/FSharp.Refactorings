@@ -130,6 +130,19 @@ let private multiLineStringSafe (lines: string list) =
     lines
     |> List.forall (fun l -> not ((l.Contains "\"\"\"") || (l.Contains "@\"")))
 
+/// The textual probe above misses PLAIN literals spanning lines ("line1
+/// <newline> line2" is legal F#) — the AST sees them exactly.
+let private spansMultiLineLiteral (index: AstIndex.Index) (startLine: int) (endLine: int) =
+    index.Exprs
+    |> Array.exists (fun (_, e) ->
+        (match e with
+         | SynExpr.Const(SynConst.String _, _)
+         | SynExpr.InterpolatedString _ -> true
+         | _ -> false)
+        && e.Range.StartLine < e.Range.EndLine
+        && e.Range.StartLine <= endLine
+        && e.Range.EndLine >= startLine)
+
 /// Shift every non-blank line left by `n` columns; None when any line has
 /// less indentation than that.
 let private dedentBy (n: int) (lines: string list) =
@@ -139,6 +152,25 @@ let private dedentBy (n: int) (lines: string list) =
         Some(lines |> List.map (fun l -> if isBlank l then "" else l.Substring n))
     else
         None
+
+/// Extend a moved region's start upward over the comment block that
+/// documents it: contiguous `//`/`///` lines, crossing blank lines only
+/// when another comment line sits above them. Doc comments travel with
+/// the code they describe; stray blank lines above the block stay put.
+let private extendUpOverComments (source: ISourceText) (floorLine: int) (startLine: int) =
+    let line n = source.GetLineString(n - 1)
+    let isComment (l: string) = l.TrimStart().StartsWith "//"
+
+    let mutable top = startLine
+    let mutable probe = startLine - 1
+
+    while probe > floorLine && (isComment (line probe) || isBlank (line probe)) do
+        if isComment (line probe) then
+            top <- probe
+
+        probe <- probe - 1
+
+    top
 
 /// The terminal expression of a CE statement chain.
 [<TailCall>]
@@ -298,7 +330,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                   match firstLetRange with
                   | Some r when letCount > 0 ->
                       let hoistEdits =
-                          let startLine = r.StartLine
+                          // the binding's documenting comment block (blank
+                          // lines between comment runs included) moves too
+                          let startLine = extendUpOverComments source fe.Range.StartLine r.StartLine
                           let endLineExcl = rest.Range.StartLine
 
                           if
@@ -310,15 +344,24 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                               && startsOwnLine source rest.Range
                           then
                               let movedLines = linesOf source startLine (endLineExcl - 1)
-                              let firstLine = List.head movedLines
+
+                              // the region's first CODE line must be the let
+                              // itself and sets the dedent: FCS includes ///
+                              // doc comments in the binding's range, and the
+                              // extension above adds plain // blocks
+                              let letLine =
+                                  movedLines
+                                  |> List.tryFind (fun l -> not (isBlank l || l.TrimStart().StartsWith "//"))
+                                  |> Option.defaultValue ""
 
                               let movedRange =
                                   Range.mkRange fileName (Position.mkPos startLine 0) (Position.mkPos endLineExcl 0)
 
-                              match dedentBy (leadingSpaces firstLine - fe.Range.StartColumn) movedLines with
+                              match dedentBy (leadingSpaces letLine - fe.Range.StartColumn) movedLines with
                               | Some dedented when
-                                  firstLine.TrimStart().StartsWith "let "
+                                  letLine.TrimStart().StartsWith "let "
                                   && multiLineStringSafe movedLines
+                                  && not (spansMultiLineLiteral index startLine (endLineExcl - 1))
                                   && not (spansDirective source movedRange)
                                   ->
                                   [ Range.mkRange fileName fe.Range.Start fe.Range.Start,
@@ -434,15 +477,63 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       { Range = rest.Range
                         Kind = AdviceKind.SplitBranches
                         Edits = splitEdits }
-                  | SynExpr.Match(clauses = clauses) when
+                  | SynExpr.Match(clauses = clauses)
+                  | SynExpr.MatchBang(clauses = clauses) when
                       (clauses
                        |> List.filter (fun (SynMatchClause(resultExpr = result)) -> containsBang result.Range)
                        |> List.length)
                       >= 2
                       ->
+                      // the match header never moves (match! NEEDS the outer
+                      // bind), so the split happens per ARM: each awaiting
+                      // arm's body becomes `return! task { .. }` — a nested
+                      // machine that carries the arm's weight, returns still
+                      // legal inside. All-or-nothing across awaiting arms.
+                      let armEdits =
+                          let perArm =
+                              [ for SynMatchClause(resultExpr = result) as clause in clauses do
+                                    if containsBang result.Range then
+                                        let r = result.Range
+                                        let bodyLines = linesOf source r.StartLine r.EndLine
+                                        let armInd = String.replicate r.StartColumn " "
+
+                                        if
+                                            startsOwnLine source r
+                                            && r.StartLine > clause.Range.StartLine
+                                            && (source.GetLineString(r.EndLine - 1)).Substring(r.EndColumn).Trim() = ""
+                                            && multiLineStringSafe bodyLines
+                                            && not (spansMultiLineLiteral index r.StartLine r.EndLine)
+                                            && not (spansDirective source r)
+                                            && not (
+                                                mentionsForeignMutable r (String.concat "\n" bodyLines)
+                                            )
+                                        then
+                                            Some
+                                                [ // opening rides the first line's indent insert
+                                                  for l in r.StartLine .. r.EndLine do
+                                                      let text = source.GetLineString(l - 1)
+
+                                                      let opening =
+                                                          if l = r.StartLine then
+                                                              $"{armInd}return! {builder} {{\n"
+                                                          else
+                                                              ""
+
+                                                      if l = r.StartLine || not (isBlank text) then
+                                                          Range.mkRange fileName (Position.mkPos l 0) (Position.mkPos l 0),
+                                                          opening + (if isBlank text then "" else "    ")
+                                                  Range.mkRange fileName r.End r.End, $"\n{armInd}}}" ]
+                                        else
+                                            None ]
+
+                          if perArm |> List.forall Option.isSome then
+                              perArm |> List.collect Option.get
+                          else
+                              []
+
                       { Range = rest.Range
                         Kind = AdviceKind.SplitBranches
-                        Edits = [] }
+                        Edits = armEdits }
                   | _ -> ()
 
                   // c) a long non-awaiting tail after the last await — the
@@ -540,25 +631,51 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                               None
                                       | None -> Some tailLines
 
-                                  match strippedLines with
-                                  | Some lines when
-                                      returnShapeOk
-                                      && multiLineStringSafe lines
-                                      && not (mentionsForeignMutable tail.Range (String.concat "\n" lines))
-                                      ->
+                                  let closureEdits =
+                                      match strippedLines with
+                                      | Some lines when
+                                          returnShapeOk
+                                          && multiLineStringSafe lines
+                                          && not (spansMultiLineLiteral index tail.Range.StartLine tail.Range.EndLine)
+                                          && not (mentionsForeignMutable tail.Range (String.concat "\n" lines))
+                                          ->
+                                          let indented =
+                                              lines
+                                              |> List.map (fun l -> if isBlank l then "" else "    " + l)
+                                              |> String.concat "\n"
+
+                                          let call =
+                                              match terminalReturn with
+                                              | Some _ -> $"return {fnName} ()"
+                                              | None -> $"{fnName} ()"
+
+                                          [ Range.mkRange fileName (Position.mkPos tail.Range.StartLine 0) tail.Range.End,
+                                            $"{ind}let {fnName} () =\n{indented}\n{ind}{call}" ]
+                                      | _ -> []
+
+                                  if not closureEdits.IsEmpty then
+                                      closureEdits
+                                  elif
+                                      // EARLY RETURNS in the tail: a plain
+                                      // closure cannot carry them, but a
+                                      // task-returning local function can —
+                                      // the tail stays a REAL task body
+                                      // (returns and use bindings legal),
+                                      // consumed with return!, and the outer
+                                      // machine sheds the lines all the same
+                                      multiLineStringSafe tailLines
+                                      && not (spansMultiLineLiteral index tail.Range.StartLine tail.Range.EndLine)
+                                      && not (mentionsForeignMutable tail.Range (String.concat "\n" tailLines))
+                                  then
                                       let indented =
-                                          lines
+                                          tailLines
                                           |> List.map (fun l -> if isBlank l then "" else "    " + l)
                                           |> String.concat "\n"
 
-                                      let call =
-                                          match terminalReturn with
-                                          | Some _ -> $"return {fnName} ()"
-                                          | None -> $"{fnName} ()"
-
                                       [ Range.mkRange fileName (Position.mkPos tail.Range.StartLine 0) tail.Range.End,
-                                        $"{ind}let {fnName} () =\n{indented}\n{ind}{call}" ]
-                                  | _ -> []
+                                        $"{ind}let {fnName} () = {builder} {{\n{indented}\n{ind}}}\n{ind}return! {fnName} ()" ]
+                                  else
+                                      []
                               | _ -> []
 
                           tailFixOffered <- not tailEdits.IsEmpty

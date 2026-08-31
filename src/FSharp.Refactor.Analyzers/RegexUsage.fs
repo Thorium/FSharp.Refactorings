@@ -259,3 +259,63 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
         | RegexSuggestionKind.HoistFromLoop, (_, _, bindingText) :: _ when not (seenBindings.Add bindingText) ->
             { s with Edits = [] }
         | _ -> s)
+
+// ---- FR0122: the pattern must compile ----
+
+/// A literal pattern .NET's regex engine rejects is a GUARANTEED runtime
+/// ArgumentException on first use — the one class of regex bug an
+/// analyzer can prove. Construction only compiles the pattern (no input
+/// runs), so checking is cheap and exact.
+let findInvalidPatterns (parseTree: ParsedInput) : (range * string * string) list =
+    let index = AstIndex.ofTree parseTree
+
+    let check (patternExpr: SynExpr) =
+        match patternExpr with
+        | StringLiteral pattern ->
+            try
+                System.Text.RegularExpressions.Regex pattern |> ignore
+                None
+            with :? System.ArgumentException as ex ->
+                Some(patternExpr.Range, pattern, ex.Message)
+        | _ -> None
+
+    [ for _, expr in index.Exprs do
+          match expr with
+          // Regex.IsMatch(input, pattern) and friends: pattern is arg 2
+          | StaticRegexCall(methodName, arg) when
+              (methodName = "IsMatch"
+               || methodName = "Match"
+               || methodName = "Matches"
+               || methodName = "Replace"
+               || methodName = "Split")
+              ->
+              match stripParens arg with
+              | SynExpr.Tuple(exprs = _ :: patternArg :: _) ->
+                  match check patternArg with
+                  | Some bad -> bad
+                  | None -> ()
+              | _ -> ()
+          // Regex(pattern) / new Regex(pattern): pattern is arg 1
+          | SynExpr.New(targetType = SynType.LongIdent(SynLongIdent(id = tids)); expr = arg) when
+              not tids.IsEmpty && (List.last tids).idText = "Regex"
+              ->
+              let first =
+                  match stripParens arg with
+                  | SynExpr.Tuple(exprs = p :: _) -> p
+                  | single -> single
+
+              match check first with
+              | Some bad -> bad
+              | None -> ()
+          | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) when
+              not ids.IsEmpty && (List.last ids).idText = "Regex"
+              ->
+              let first =
+                  match stripParens arg with
+                  | SynExpr.Tuple(exprs = p :: _) -> p
+                  | single -> single
+
+              match check first with
+              | Some bad -> bad
+              | None -> ()
+          | _ -> () ]

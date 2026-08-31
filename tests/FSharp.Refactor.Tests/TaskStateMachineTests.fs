@@ -139,6 +139,26 @@ let ``leading plain lets hoist above the builder and the result typechecks`` () 
     Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
 
 [<Fact>]
+let ``the documenting comment block hoists with its binding`` () =
+    // both /// runs above the let travel, blank line between them intact;
+    // the blank line above the block stays inside the task
+    let source =
+        "module Test\nlet f () =\n    task {\n\n        /// HERE WE GO WITH a\n\n        /// a value\n        let a = 1\n        let b = a * 2\n"
+        + (awaits 8).Replace("    let!", "        let!")
+        + "\n        return a + b + x1\n    }"
+
+    let edits =
+        adviceIn source
+        |> editsOfKind (function
+            | TaskStateMachine.AdviceKind.HoistPlainLets _ -> true
+            | _ -> false)
+
+    Assert.NotEmpty edits
+    let patched = applyEdits source edits
+    Assert.Contains("/// HERE WE GO WITH a\n\n    /// a value\n    let a = 1\n    let b = a * 2\n    task {", patched)
+    Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
 let ``a mutable leading let stops the hoist before it`` () =
     let source =
         "module Test\nlet f () =\n    task {\n        let a = 1\n        let mutable m = a\n"
@@ -201,7 +221,9 @@ let ``an already extracted tail is not wrapped again`` () =
     Assert.Empty tails
 
 [<Fact>]
-let ``a tail with an early return keeps its hands off`` () =
+let ``a tail with branch returns extracts as a task-returning function`` () =
+    // once the old hands-off case: branch returns cannot ride a plain
+    // closure, but the task-returning wrapper carries them
     let source =
         "module Test\nlet f (c: bool) =\n    task {\n"
         + (awaits 8).Replace("    let!", "        let!")
@@ -209,7 +231,12 @@ let ``a tail with an early return keeps its hands off`` () =
 
     for s in adviceIn source do
         match s.Kind with
-        | TaskStateMachine.AdviceKind.ExtractTail _ -> Assert.Empty s.Edits
+        | TaskStateMachine.AdviceKind.ExtractTail _ ->
+            Assert.NotEmpty s.Edits
+            let patched = applyEdits source s.Edits
+            Assert.Contains("let runTail () = task {", patched)
+            Assert.Contains("return! runTail ()", patched)
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
         | _ -> ()
 
 [<Fact>]
@@ -375,3 +402,91 @@ let ``a suffix referencing a prefix let-bang binding stays advice`` () =
         match s.Kind with
         | TaskStateMachine.AdviceKind.ExtractAwaitingSuffix _ -> Assert.Empty s.Edits
         | _ -> ()
+
+[<Fact>]
+let ``an early-return tail extracts as a task-returning local function`` () =
+    // branch-shaped returns rule out the plain-closure wrap (a closure has
+    // no `return`); the task-returning variant keeps them legal and the
+    // outer machine still sheds the lines
+    let source =
+        "module Test\nlet f (flag: bool) =\n    task {\n"
+        + (awaits 8).Replace("    let!", "        let!")
+        + "\n        let s1 = x1 + 1\n        let s2 = s1 + 2\n        if flag then\n            return s1\n        else\n            return s1 + s2\n    }"
+
+    let edits =
+        adviceIn source
+        |> editsOfKind (function
+            | TaskStateMachine.AdviceKind.ExtractTail _ -> true
+            | _ -> false)
+
+    Assert.NotEmpty edits
+    let patched = applyEdits source edits
+    Assert.Contains("let runTail () = task {", patched)
+    Assert.Contains("return! runTail ()", patched)
+    Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
+let ``awaiting match arms split into nested tasks`` () =
+    let source =
+        "module Test\nlet f (cond: bool) =\n    task {\n        match cond with\n        | true ->\n"
+        + (awaits 8).Replace("    let!", "            let!")
+        + "\n            return x1\n        | false ->\n"
+        + (awaits 8).Replace("    let!", "            let!").Replace("x", "y")
+        + "\n            return y2\n    }"
+
+    let edits =
+        adviceIn source
+        |> editsOfKind (function
+            | TaskStateMachine.AdviceKind.SplitBranches -> true
+            | _ -> false)
+
+    Assert.NotEmpty edits
+    let patched = applyEdits source edits
+    Assert.Contains("return! task {", patched)
+    Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
+let ``awaiting match-bang arms split without moving the bind`` () =
+    let source =
+        "module Test\nlet g () = System.Threading.Tasks.Task.FromResult true\nlet f () =\n    task {\n        match! g () with\n        | true ->\n"
+        + (awaits 8).Replace("    let!", "            let!")
+        + "\n            return x1\n        | false ->\n"
+        + (awaits 8).Replace("    let!", "            let!").Replace("x", "y")
+        + "\n            return y2\n    }"
+
+    let edits =
+        match
+            adviceIn source
+            |> List.tryPick (fun s ->
+                match s.Kind with
+                | TaskStateMachine.AdviceKind.SplitBranches -> Some s.Edits
+                | _ -> None)
+        with
+        | Some e -> e
+        | None -> failwithf "no SplitBranches advice; got %A" (adviceIn source)
+
+    Assert.NotEmpty edits
+    let patched = applyEdits source edits
+    Assert.Contains("match! g () with", patched)
+    Assert.Contains("return! task {", patched)
+    Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
+let ``a match arm reading a foreign mutable keeps the note`` () =
+    let source =
+        "module Test\nlet f (cond: bool) =\n    task {\n        let mutable acc = 0\n        match cond with\n        | true ->\n"
+        + (awaits 8).Replace("    let!", "            let!")
+        + "\n            acc <- x1\n            return acc\n        | false ->\n"
+        + (awaits 8).Replace("    let!", "            let!").Replace("x", "y")
+        + "\n            return y2\n    }"
+
+    let edits =
+        adviceIn source
+        |> List.tryPick (fun s ->
+            match s.Kind with
+            | TaskStateMachine.AdviceKind.SplitBranches -> Some s.Edits
+            | _ -> None)
+
+    match edits with
+    | Some e -> Assert.Empty e
+    | None -> ()

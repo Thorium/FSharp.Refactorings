@@ -7,8 +7,8 @@
     <IsPackable>true</IsPackable>
     <BuildOutputTargetFolder>analyzers/dotnet/fs</BuildOutputTargetFolder>
     <PackageId>FSharp.Refactor.Analyzers</PackageId>
-    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK. Over 110 rules covering correctness, performance, idiom and redundancy; every one is Hint severity, so they never gate a build.</Description>
-    <PackageReleaseNotes>0.6.8: FR0029's FS3511 shrink advice becomes four automatic fixes — leading plain lets hoist above the builder, an if/else body splits into per-arm tasks (one awaiting arm suffices; comments travel via line-region arm cuts), a non-awaiting tail wraps into a local function inside the CE (closures capture the locals: no parameters, no annotations), and an awaiting try/finally suffix becomes its own task-returning function consumed with return!. FR0049 rewrites blocking binds across the matrix — GetAwaiter().GetResult(), .Result, and single-arg Async.RunSynchronously all become let! in task and async builders, with Async.AwaitTask applied where needed; the toward-sync sibling swap is opt-in only ({"FR0049": {"syncSwap": 1}}). New FR0117 folds adjacent same-result match arms into one or-pattern arm — contiguous runs only, order untouched — composing with FR0112's chain-to-match.</PackageReleaseNotes>
+    <Description>Functional refactoring suggestions (light bulb quick fixes) for F#, built on FSharp.Analyzers.SDK. Over 130 rules covering correctness, performance, idiom and redundancy; every one is Hint severity, so they never gate a build.</Description>
+    <PackageReleaseNotes>0.6.9: cross-file migrations arrive — under --api-changes, strictly internal declarations now migrate project-wide with every use classified against its own file (FR0069 voption, FR0093 struct tuples, FR0049 taskify), gated hard: public never, InternalsVisibleTo assemblies never, one unconvertible use vetoes everything. FR0029 grows branch-return tail extraction and per-arm match/match! splitting into nested tasks, and match! arm interiors are finally visible to every rule (an SDK walker hole). Solution runs order narrowest target first and shared directive-free files sweep once across all frameworks and projects; fully-swept compilations skip their typecheck. New rules: FR0132 trailing comments promote to XML docs; FR0133 five-word test names become double-backtick sentences (locals opt-in); FR0134 UtcNow-fed DateTime fields migrate to DateTimeOffset (opt-in); FR0135 markdown-bearing script comments become literate (** cells. FR0022 also mines field names from XAndY case names and clear trailing comments. Everything adversarially audited: keyword field names, fake-clock shadowing, cross-type comparisons, multi-line plain strings under re-indentation, TestCaseSource string references and more are all vetoed by construction. 134 rules. 0.6.8: fixes first — a run now prints its fixes and holds advisory notes to one summary line (--notes lists them, --report exports SARIF). FR0029 applies its own FS3511 advice: hoisting pre-await lets (documenting comments travel along), splitting branching tasks per arm, wrapping non-awaiting tails, extracting awaiting try/finally suffixes; the multi-pass loop chains the moves. FR0049 rewrites blocking binds (GetAwaiter().GetResult(), .Result, Async.RunSynchronously) to let!/do! in task and async alike; sync-direction swaps stay config-opt-in. Suppression policy (suppressions: all/no-correctness/none plus --honor-suppressions) and per-rule config parameters. New rules FR0117-FR0131: or-pattern arm folding; CancellationToken omission and None-propagation; awaitable-twin calls; catch blocks logging without the exception (PII-aware); DateTime.Now/UtcNow.Date pitfalls; invalid regexes; Monitor.Enter/Exit to lock; interpolated logging to message templates; invisible/bidi Unicode with escape fixes; process-execution sinks; provider-format API-key literals; obsolete crypto constructors to static factories; guard-equality clauses to literal patterns; module constants gain [&lt;Literal&gt;]; provably tail-recursive functions gain [&lt;TailCall&gt;]. match/match!/function parity for arm rules; SHA1 editor alternatives on FR0065. 130 rules.</PackageReleaseNotes>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/fsharp-refactor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/fsharp-refactor</RepositoryUrl>
@@ -34,6 +34,7 @@
     <Compile Include="Visibility.fs" />
     <Compile Include="AstIndex.fs" />
     <Compile Include="Configuration.fs" />
+    <Compile Include="ProjectSources.fs" />
     <Compile Include="CapabilityFix.fs" />
     <Compile Include="MatchToIf.fs" />
     <Compile Include="BooleanSimplify.fs" />
@@ -92,6 +93,7 @@
     <Compile Include="WeakLock.fs" />
     <Compile Include="FormatArgs.fs" />
     <Compile Include="SyncOverAsync.fs" />
+    <Compile Include="Taskify.fs" />
     <Compile Include="Accumulation.fs" />
     <Compile Include="CountIsEmpty.fs" />
     <Compile Include="HexString.fs" />
@@ -105,6 +107,25 @@
     <Compile Include="SecurityRules.fs" />
     <Compile Include="MiscRules.fs" />
     <Compile Include="StructHints.fs" />
+    <Compile Include="VOptionMigration.fs" />
+    <Compile Include="StructTupleMigration.fs" />
+    <Compile Include="DateTimeOffsetMigration.fs" />
+    <Compile Include="CancellationOverload.fs" />
+    <Compile Include="AwaitableOverload.fs" />
+    <Compile Include="CatchLogException.fs" />
+    <Compile Include="DateTimeRules.fs" />
+    <Compile Include="MonitorLock.fs" />
+    <Compile Include="LogTemplates.fs" />
+    <Compile Include="UnicodeHygiene.fs" />
+    <Compile Include="SecretLiterals.fs" />
+    <Compile Include="ObsoleteCrypto.fs" />
+    <Compile Include="MatchGuards.fs" />
+    <Compile Include="LiteralConst.fs" />
+    <Compile Include="RecTailCall.fs" />
+    <Compile Include="CommentDoc.fs" />
+    <Compile Include="NameQuoting.fs" />
+    <Compile Include="LiterateComment.fs" />
+    <Compile Include="EmptyGuid.fs" />
     <Compile Include="LoopInvariant.fs" />
     <Compile Include="ExpandWildcard.fs" />
     <Compile Include="MatchBangRule.fs" />

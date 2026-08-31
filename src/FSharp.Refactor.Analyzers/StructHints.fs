@@ -24,6 +24,7 @@
 module FSharp.Refactor.StructHints
 
 open FSharp.Compiler.Syntax
+open FSharp.Compiler.SyntaxTrivia
 open FSharp.Compiler.Text
 open FSharp.Refactor.Text
 
@@ -34,12 +35,31 @@ type VOptionFieldSuggestion =
         /// The struct payload's type text, e.g. "int".
         ElementText: string
         TypeName: string
+        /// The field's defining ident, for symbol resolution.
+        FieldIdRange: range
+        /// The `option`/`Option` type name itself — the type edit's target.
+        OptionNameRange: range
+        /// Strictly file-private (own modifier or a private enclosing
+        /// module): every use lives in this file, so the migration can be
+        /// a single-file fix.
+        IsFilePrivate: bool
+        /// Confined to the assembly (private or internal, directly or via
+        /// the enclosing module) — the widest scope a cross-file migration
+        /// may touch: a PUBLIC field's consumers can live in a sibling
+        /// project no scan sees.
+        IsConfined: bool
     }
 
 type StructTypeSuggestion =
-    { Range: range
-      TypeName: string
-      FieldCount: int }
+    {
+        Range: range
+        TypeName: string
+        FieldCount: int
+        /// Zero-width insert point and the attribute line to put there —
+        /// present when the definition heads its decl (`type`, not `and`)
+        /// and carries no other attributes to interfere with.
+        Fix: (range * string) option
+    }
 
 type StructTupleFieldSuggestion =
     {
@@ -48,6 +68,14 @@ type StructTupleFieldSuggestion =
         /// The tuple's own source text, e.g. "int * int".
         TupleText: string
         TypeName: string
+        /// The field's defining ident, for symbol resolution.
+        FieldIdRange: range
+        /// Strictly file-private (own modifier or a private enclosing
+        /// module): every use lives in this file, so the migration can be
+        /// a single-file fix.
+        IsFilePrivate: bool
+        /// Confined to the assembly — see VOptionFieldSuggestion.
+        IsConfined: bool
     }
 
 /// Well-known struct types by (last) name — the primitives plus the
@@ -89,7 +117,8 @@ let private lastIdentText (t: SynType) =
 let private isKnownStruct (t: SynType) =
     lastIdentText t |> Option.exists structNames.Contains
 
-/// `<struct> option`, in postfix or prefix form.
+/// `<struct> option`, in postfix or prefix form. Yields the payload type
+/// and the option TYPE NAME's own range (the migration's type edit).
 [<return: Struct>]
 let private (|StructOption|_|) (t: SynType) =
     match t with
@@ -97,7 +126,7 @@ let private (|StructOption|_|) (t: SynType) =
         (lastIdentText name = Some "option" || lastIdentText name = Some "Option")
         && isKnownStruct elem
         ->
-        ValueSome elem
+        ValueSome(elem, name.Range)
     | _ -> ValueNone
 
 /// A reference tuple of a handful of known structs: `int * int`.
@@ -113,13 +142,13 @@ let private (|SmallStructTuple|_|) (t: SynType) =
         segments
         |> List.forall (function
             | SynTupleTypeSegment.Slash _ -> false
-            | _ -> true)
+            | SynTupleTypeSegment.Type _ | SynTupleTypeSegment.Star _ -> true)
         ->
         let elements =
             segments
             |> List.choose (function
                 | SynTupleTypeSegment.Type element -> Some element
-                | _ -> None)
+                | SynTupleTypeSegment.Star _ | SynTupleTypeSegment.Slash _ -> None)
 
         if
             elements.Length >= 2
@@ -156,7 +185,7 @@ let find
     for path, decl in index.Decls do
         match decl with
         | SynModuleDecl.Types(typeDefns = defns) ->
-            for SynTypeDefn(typeInfo = info; typeRepr = repr) in defns do
+            for SynTypeDefn(typeInfo = info; typeRepr = repr; trivia = defnTrivia) in defns do
                 let (SynComponentInfo(attributes = attrs; longId = typeIds; accessibility = access)) =
                     info
 
@@ -166,22 +195,43 @@ let find
                 | SynTypeDefnRepr.Simple(simpleRepr = SynTypeDefnSimpleRepr.Record(recordFields = fields)) when
                     Visibility.isInScope allowApiChanges path [ access ]
                     ->
+                    // strictly file-private: its own modifier, or a private
+                    // enclosing module — then every use is in this file and
+                    // the voption migration can be a single-file fix
+                    let isFilePrivate =
+                        (match access with
+                         | Some(SynAccess.Private _) -> true
+                         | _ -> false)
+                        || path
+                           |> List.exists (fun node ->
+                               match node with
+                               | SyntaxNode.SynModule(SynModuleDecl.NestedModule(
+                                   moduleInfo = SynComponentInfo(accessibility = Some(SynAccess.Private _)))) -> true
+                               | _ -> false)
+
                     // FR0069: struct payloads boxed in option fields
                     // FR0093: struct payloads boxed in a reference tuple
                     for SynField(idOpt = idOpt; fieldType = fieldType) in fields do
                         match fieldType, idOpt with
-                        | StructOption elem, Some fieldId ->
+                        | StructOption(elem, optionNameRange), Some fieldId ->
                             voptions.Add
                                 { Range = fieldType.Range
                                   FieldName = fieldId.idText
                                   ElementText = textOfRange source elem.Range
-                                  TypeName = typeName }
+                                  TypeName = typeName
+                                  FieldIdRange = fieldId.idRange
+                                  OptionNameRange = optionNameRange
+                                  IsFilePrivate = isFilePrivate
+                                  IsConfined = Visibility.isConfined path [ access ] }
                         | SmallStructTuple _, Some fieldId ->
                             structTuples.Add
                                 { Range = fieldType.Range
                                   FieldName = fieldId.idText
                                   TupleText = textOfRange source fieldType.Range
-                                  TypeName = typeName }
+                                  TypeName = typeName
+                                  FieldIdRange = fieldId.idRange
+                                  IsFilePrivate = isFilePrivate
+                                  IsConfined = Visibility.isConfined path [ access ] }
                         | _ -> ()
 
                     // FR0070: a small all-struct record can be a struct itself
@@ -198,10 +248,31 @@ let find
                         && allStructFields
                         && not typeIds.IsEmpty
                     then
+                        // the fix: `[<Struct>]` on its own line above the
+                        // `type` keyword (below any /// doc by position).
+                        // All fields are immutable small structs, so copies
+                        // are semantically invisible; an `and`-position
+                        // definition or existing attributes (CLIMutable
+                        // would conflict outright) keep it advice
+                        let attributeFix =
+                            match defnTrivia.LeadingKeyword with
+                            | SynTypeDefnLeadingKeyword.Type kwRange when
+                                attrs.IsEmpty
+                                && (source.GetLineString(kwRange.StartLine - 1))
+                                    .Substring(0, kwRange.StartColumn)
+                                    .Trim() = ""
+                                ->
+                                let at = Position.mkPos kwRange.StartLine 0
+                                let indent = String.replicate kwRange.StartColumn " "
+
+                                Some(Range.mkRange decl.Range.FileName at at, $"{indent}[<Struct>]\n")
+                            | _ -> None
+
                         structs.Add
                             { Range = (List.last typeIds).idRange
                               TypeName = typeName
-                              FieldCount = fields.Length }
+                              FieldCount = fields.Length
+                              Fix = attributeFix }
                 | _ -> ()
         | _ -> ()
 

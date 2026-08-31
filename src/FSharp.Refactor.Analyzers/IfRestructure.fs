@@ -95,7 +95,12 @@ let private (|IdentEqualsLiteral|_|) (source: ISourceText) (e: SynExpr) =
             | SynConst.Int32 _
             | SynConst.Int64 _
             | SynConst.Char _
-            | SynConst.String(synStringKind = SynStringKind.Regular) -> ValueSome(op, id, textOfRange source lit.Range)
+            // verbatim/triple-quoted literals are valid match patterns and
+            // the rewrite splices the ORIGINAL text, prefix included
+            | SynConst.String(synStringKind = SynStringKind.Regular)
+            | SynConst.String(synStringKind = SynStringKind.Verbatim)
+            | SynConst.String(synStringKind = SynStringKind.TripleQuote) ->
+                ValueSome(op, id, textOfRange source lit.Range)
             | _ -> ValueNone
         | _ -> ValueNone
     | _ -> ValueNone
@@ -288,7 +293,13 @@ let findGuardOrderNotes (parseTree: ParsedInput) (source: ISourceText) : GuardOr
           match expr with
           | SynExpr.Match(
               clauses = [ SynMatchClause(pat = SynPat.Named(ident = SynIdent(ident = v)); whenExpr = Some guard)
-                          SynMatchClause(pat = SynPat.Wild _) ]) ->
+                          SynMatchClause(pat = SynPat.Wild _) ])
+          | SynExpr.MatchBang(
+              clauses = [ SynMatchClause(pat = SynPat.Named(ident = SynIdent(ident = v)); whenExpr = Some guard)
+                          SynMatchClause(pat = SynPat.Wild _) ])
+          | SynExpr.MatchLambda(
+              matchClauses = [ SynMatchClause(pat = SynPat.Named(ident = SynIdent(ident = v)); whenExpr = Some guard)
+                               SynMatchClause(pat = SynPat.Wild _) ]) ->
               match stripParens guard with
               | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = lhs); argExpr = rhs) when
                   op.idText = "op_BooleanAnd"

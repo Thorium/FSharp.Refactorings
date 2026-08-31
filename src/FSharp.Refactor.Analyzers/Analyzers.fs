@@ -161,6 +161,188 @@ let missingCasesCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0110" "MissingCases" (fun () ->
         missingCasesMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
+// ---- FR0118 CancellationOverload ----
+
+let private cancellationMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    CancellationOverload.find parseTree source checkResults
+    |> List.map (fun s ->
+        let message =
+            match s.Kind with
+            | CancellationOverload.TokenGap.Omitted ->
+                $"'{s.MethodName}' has an overload accepting a CancellationToken and '{s.TokenName}' sits unused in scope; without it, cancellation stops propagating exactly one call too early."
+            | CancellationOverload.TokenGap.NonePassed ->
+                $"CancellationToken.None is passed although '{s.TokenName}' is in scope; the chain is cut here instead of propagated."
+
+        hint "FR0118" message s.Range [ fix s.Range s.Original s.Replacement ])
+
+[<EditorAnalyzer("CancellationOverload", "Pass the in-scope CancellationToken to calls that take one", HelpBase)>]
+let cancellationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0118" "CancellationOverload" (fun () ->
+        whenChecked ctx (cancellationMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("CancellationOverload", "Pass the in-scope CancellationToken to calls that take one", HelpBase)>]
+let cancellationCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0118" "CancellationOverload" (fun () ->
+        cancellationMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0119 AwaitableOverload ----
+
+let private awaitableMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    AwaitableOverload.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0119"
+            $"'{s.MethodName}' blocks inside the computation although '{s.MethodName}Async' exists; binding the async twin keeps the thread free — and FR0118 hands it the CancellationToken on the next pass."
+            s.Range
+            (s.Fixes |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+
+[<EditorAnalyzer("AwaitableOverload", "Use the async twin of a blocking call inside task/async", HelpBase)>]
+let awaitableEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0119" "AwaitableOverload" (fun () ->
+        whenChecked ctx (awaitableMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("AwaitableOverload", "Use the async twin of a blocking call inside task/async", HelpBase)>]
+let awaitableCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0119" "AwaitableOverload" (fun () ->
+        awaitableMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0120 CatchLogException ----
+
+let private catchLogMessages
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (offerAlternatives: bool)
+    checkResults
+    : Message list =
+    CatchLogException.find parseTree source checkResults
+    |> List.collect (fun s ->
+        let primary =
+            hint
+                "FR0120"
+                $"This {s.LogMethod} inside the handler never mentions '{s.ExceptionName}' — the one fact the handler exists to record; passing it first lets the sink decide rendering (logging only {s.ExceptionName}.Message deliberately is a legitimate PII choice — write that instead)."
+                s.Range
+                [ fix s.Range "" $"{s.ExceptionName}, " ]
+
+        if offerAlternatives then
+            [ primary
+              hint
+                  "FR0120"
+                  $"Alternative: pass {s.ExceptionName}.GetBaseException() — the root cause of a wrapped or aggregate exception."
+                  s.Range
+                  [ fix s.Range "" $"{s.ExceptionName}.GetBaseException(), " ] ]
+        else
+            [ primary ])
+
+[<EditorAnalyzer("CatchLogException", "Pass the caught exception to catch-clause log calls", HelpBase)>]
+let catchLogEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0120" "CatchLogException" (fun () ->
+        whenChecked ctx (catchLogMessages ctx.ParseFileResults.ParseTree ctx.SourceText true))
+
+[<CliAnalyzer("CatchLogException", "Pass the caught exception to catch-clause log calls", HelpBase)>]
+let catchLogCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0120" "CatchLogException" (fun () ->
+        catchLogMessages ctx.ParseFileResults.ParseTree ctx.SourceText false ctx.CheckFileResults)
+
+// ---- FR0121 DateTimeRules ----
+
+let private dateTimeMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (offerNowFix: bool)
+    checkResults
+    : Message list =
+    DateTimeRules.find parseTree source checkResults
+    |> List.map (fun s ->
+        match s.Kind, s.FixRange with
+        | DateTimeRules.WallClockKind.UtcDateCut text, _ ->
+            hint
+                "FR0121"
+                $"'{text}' cuts a calendar date at a timezone-random instant — UTC midnight is nobody's midnight, and the server's own date is a deployment accident the end user never sees; convert to the USER'S timezone first, then take the date."
+                s.Range
+                []
+        | DateTimeRules.WallClockKind.LocalNow, Some fixRange when
+            offerNowFix
+            || Configuration.parameterInt fileName "FR0121" "DateTimeRules" "utcNow" 0 = 1
+            ->
+            hint
+                "FR0121"
+                "DateTime.Now reads the server's local clock — a deployment accident; DateTime.UtcNow records an instant. (Local time is right for Fable/desktop code: leave this off there.)"
+                s.Range
+                [ fix fixRange "Now" "UtcNow" ]
+        | DateTimeRules.WallClockKind.LocalNow, _ ->
+            hint
+                "FR0121"
+                "DateTime.Now reads the server's local clock — a deployment accident; DateTime.UtcNow records an instant. Opt the rewrite in with { \"FR0121\": { \"utcNow\": 1 } } (server code), or ignore for Fable/desktop."
+                s.Range
+                [])
+
+[<EditorAnalyzer("DateTimeRules", "Timezone-random date cuts; opt-in UtcNow rewrite", HelpBase)>]
+let dateTimeEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0121" "DateTimeRules" (fun () ->
+        whenChecked ctx (dateTimeMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText true))
+
+[<CliAnalyzer("DateTimeRules", "Timezone-random date cuts; opt-in UtcNow rewrite", HelpBase)>]
+let dateTimeCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0121" "DateTimeRules" (fun () ->
+        dateTimeMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText false ctx.CheckFileResults)
+
+// ---- FR0123 MonitorLock ----
+
+let private monitorLockMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    MonitorLock.find parseTree source checkResults
+    |> List.map (fun s ->
+        match s.Fix with
+        | Some(r, original, replacement) ->
+            hint
+                "FR0123"
+                $"Monitor.Enter/try/finally/Monitor.Exit over '{s.LockText}' is the `lock` function spelled dangerously; `lock` releases on every path by construction."
+                s.Range
+                [ fix r original replacement ]
+        | None ->
+            hint
+                "FR0123"
+                $"Monitor.Enter '{s.LockText}' without a guarding try/finally leaks the lock on the first exception; `lock {s.LockText} (fun () -> ...)` cannot."
+                s.Range
+                [])
+
+[<EditorAnalyzer("MonitorLock", "Monitor.Enter/Exit pairs become the lock function", HelpBase)>]
+let monitorLockEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0123" "MonitorLock" (fun () ->
+        whenChecked ctx (monitorLockMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("MonitorLock", "Monitor.Enter/Exit pairs become the lock function", HelpBase)>]
+let monitorLockCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0123" "MonitorLock" (fun () ->
+        monitorLockMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0124 LogTemplates ----
+
+let private logTemplateMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    LogTemplates.find parseTree source checkResults
+    |> List.map (fun s ->
+        let message =
+            match s.Problem with
+            | LogTemplates.TemplateProblem.CountMismatch(placeholders, arguments) ->
+                $"This {s.LogMethod} template names {placeholders} placeholder(s) but receives {arguments} argument(s); the sink logs holes or drops values silently."
+            | LogTemplates.TemplateProblem.DuplicateName name ->
+                $"This {s.LogMethod} template names '{{{name}}}' twice; structured sinks key properties by name, so one value overwrites the other."
+            | LogTemplates.TemplateProblem.Interpolated ->
+                $"An interpolated string as a {s.LogMethod} template destroys structured logging: every message becomes a distinct event, and the values lose their property names — use a constant template with placeholders."
+
+        hint "FR0124" message s.Range [])
+
+[<EditorAnalyzer("LogTemplates", "Structured-log templates must match their arguments", HelpBase)>]
+let logTemplatesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0124" "LogTemplates" (fun () ->
+        whenChecked ctx (logTemplateMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("LogTemplates", "Structured-log templates must match their arguments", HelpBase)>]
+let logTemplatesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0124" "LogTemplates" (fun () ->
+        logTemplateMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
 // ---- FR0117 MatchArmMerge ----
 
 let private matchArmMergeMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
@@ -476,7 +658,8 @@ let private resultModuleMessages (parseTree: ParsedInput) (source: ISourceText) 
 [<EditorAnalyzer("ResultModule", "Rewrite Ok/Error matching with Result-module functions", HelpBase)>]
 let resultModuleEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0009" "ResultModule" (fun () ->
-        whenChecked ctx (resultModuleMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (resultModuleMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("ResultModule", "Rewrite Ok/Error matching with Result-module functions", HelpBase)>]
 let resultModuleCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -776,6 +959,26 @@ let regexUsageCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0015" "RegexUsage" (fun () ->
         regexUsageMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
 
+// ---- FR0122 RegexValidity ----
+
+let private regexValidityMessages (parseTree: ParsedInput) : Message list =
+    RegexUsage.findInvalidPatterns parseTree
+    |> List.map (fun (r, pattern, error) ->
+        let firstLine =
+            match error.IndexOf '\n' with
+            | -1 -> error
+            | cut -> error.Substring(0, cut).TrimEnd()
+
+        hint "FR0122" $"This regex pattern does not compile — a guaranteed ArgumentException on first use: {firstLine}" r [])
+
+[<EditorAnalyzer("RegexValidity", "Literal regex patterns must compile", HelpBase)>]
+let regexValidityEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0122" "RegexValidity" (fun () -> regexValidityMessages ctx.ParseFileResults.ParseTree)
+
+[<CliAnalyzer("RegexValidity", "Literal regex patterns must compile", HelpBase)>]
+let regexValidityCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0122" "RegexValidity" (fun () -> regexValidityMessages ctx.ParseFileResults.ParseTree)
+
 // ---- FR0016 StructDu ----
 
 let private structDuMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
@@ -807,9 +1010,10 @@ let private duFieldNamesMessages (parseTree: ParsedInput) (source: ISourceText) 
         hint
             "FR0022"
             (sprintf
-                "Union case '%s' can name its fields (%s) after the names its match sites already use."
+                "Union case '%s' can name its fields (%s) after the names %s already spell."
                 s.CaseName
-                (String.concat ", " s.Names))
+                (String.concat ", " s.Names)
+                s.Source)
             s.Range
             (s.Edits
              |> List.map (fun (r, original, replacement) -> fix r original replacement)))
@@ -890,7 +1094,8 @@ let private dictTryAddMessages (parseTree: ParsedInput) (source: ISourceText) ch
 [<EditorAnalyzer("DictTryAdd", "Replace check-then-add with TryAdd", HelpBase)>]
 let dictTryAddEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0018" "DictTryAdd" (fun () ->
-        whenChecked ctx (dictTryAddMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (dictTryAddMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("DictTryAdd", "Replace check-then-add with TryAdd", HelpBase)>]
 let dictTryAddCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -1001,7 +1206,8 @@ let private optionOfObjMessages (parseTree: ParsedInput) (source: ISourceText) c
 [<EditorAnalyzer("OptionOfObj", "Rewrite null-test-and-wrap as Option.ofObj", HelpBase)>]
 let optionOfObjEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0025" "OptionOfObj" (fun () ->
-        whenChecked ctx (optionOfObjMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (optionOfObjMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("OptionOfObj", "Rewrite null-test-and-wrap as Option.ofObj", HelpBase)>]
 let optionOfObjCliAnalyzer (ctx: CliContext) : Async<Message list> =
@@ -1704,15 +1910,34 @@ let private syncOverAsyncMessages
 
         hint "FR0049" message s.Range fixes)
 
+// the taskify fix: a file-private sync function draining a task at its
+// boundary becomes task-returning, its callers awaiting — same rule code,
+// its own message, all edits in this file
+let private taskifyMessages (parseTree: ParsedInput) (source: ISourceText) checkResults projectCheck : Message list =
+    Taskify.find parseTree source checkResults projectCheck
+    |> List.map (fun s ->
+        hint
+            "FR0049"
+            $"'{s.Name}' drains a task synchronously at its boundary, and every caller already sits in a task/async block; it becomes a task-returning function and the callers await it."
+            s.Range
+            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+
 [<EditorAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
 let syncOverAsyncEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0049" "SyncOverAsync" (fun () ->
-        whenChecked ctx (syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.FileName true))
+        whenChecked ctx (fun check ->
+            syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.FileName true check
+            @ taskifyMessages ctx.ParseFileResults.ParseTree ctx.SourceText check None))
 
 [<CliAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
 let syncOverAsyncCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0049" "SyncOverAsync" (fun () ->
-        syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.FileName false ctx.CheckFileResults)
+        syncOverAsyncMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.FileName false ctx.CheckFileResults
+        @ taskifyMessages
+            ctx.ParseFileResults.ParseTree
+            ctx.SourceText
+            ctx.CheckFileResults
+            (Some ctx.CheckProjectResults))
 
 // ---- FR0050 / FR0051 Accumulation ----
 
@@ -2026,19 +2251,67 @@ let exceptionRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0065 / FR0066 SecurityRules ----
 
-let private securityRulesMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+let private securityRulesMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (offerAlternatives: bool)
+    : Message list =
     let cryptoEnabled = Configuration.isRuleEnabled fileName "FR0065" "WeakCrypto"
     let sqlEnabled = Configuration.isRuleEnabled fileName "FR0066" "SqlStrings"
+    let processEnabled = Configuration.isRuleEnabled fileName "FR0126" "ProcessSinks"
 
-    if not (cryptoEnabled || sqlEnabled) then
+    if not (cryptoEnabled || sqlEnabled || processEnabled) then
         []
     else
-        let crypto, sql = SecurityRules.find parseTree source
+        let crypto, sql, processSinks = SecurityRules.find parseTree source
+
+        let processMessages =
+            if processEnabled then
+                processSinks
+                |> List.map (fun s ->
+                    hint
+                        "FR0126"
+                        $"A dynamically built string reaches {s.Sink} — the command/argument-injection sink, and doubly so when the string carries LLM or agent output; pass a fixed executable with an argument LIST (ProcessStartInfo.ArgumentList) instead."
+                        s.Range
+                        [])
+            else
+                []
 
         let cryptoMessages =
             if cryptoEnabled then
                 crypto
-                |> List.map (fun s ->
+                |> List.collect (fun s ->
+                    // SHA1 only: MD5-as-checksum is a legitimate non-security
+                    // use, and swapping any persisted hash algorithm is an
+                    // API-shaped change — so this is an EDITOR action, never
+                    // CLI-applied
+                    match s.Kind, s.AlgoRange with
+                    | SecurityRules.WeakKind.Hash "SHA1", Some algo when offerAlternatives ->
+                        [ hint
+                              "FR0065"
+                              "Alternative: switch to SHA256 (mind persisted hashes and interop — the output size changes)."
+                              s.Range
+                              [ fix algo "SHA1" "SHA256" ]
+                          hint
+                              "FR0065"
+                              "Alternative: switch to SHA512 (mind persisted hashes and interop — the output size changes)."
+                              s.Range
+                              [ fix algo "SHA1" "SHA512" ] ]
+                    // flags-OR is idempotent, so the swap is safe even in a
+                    // `Tls ||| Tls12` chain — but dropping a legacy protocol
+                    // can still surprise an ancient endpoint, so it stays an
+                    // editor action
+                    | SecurityRules.WeakKind.Protocol proto, Some ident when offerAlternatives ->
+                        [ hint
+                              "FR0065"
+                              $"Alternative: replace {proto} with Tls12 (mind endpoints that only speak the legacy protocol)."
+                              s.Range
+                              [ fix ident proto "Tls12" ] ]
+                    | _ -> [])
+                |> List.append (
+                    crypto
+                    |> List.map (fun s ->
                     let message =
                         match s.Kind with
                         | SecurityRules.WeakKind.Hash name ->
@@ -2047,8 +2320,11 @@ let private securityRulesMessages (fileName: string) (parseTree: ParsedInput) (s
                             $"%s{name}'s key size is within practical attack range; use AES."
                         | SecurityRules.WeakKind.CertificateBypass ->
                             "Overriding certificate validation silently accepts any man-in-the-middle; scope trust to the specific expected certificate instead."
+                        | SecurityRules.WeakKind.Protocol name ->
+                            $"%s{name} is broken or deprecated on the wire; prefer setting nothing (the OS negotiates the strongest protocol) or Tls12+."
 
                     hint "FR0065" message s.Range [])
+                )
             else
                 []
 
@@ -2066,19 +2342,301 @@ let private securityRulesMessages (fileName: string) (parseTree: ParsedInput) (s
             else
                 []
 
-        cryptoMessages @ sqlMessages
+        cryptoMessages @ sqlMessages @ processMessages
 
 [<EditorAnalyzer("SecurityRules", "Weak crypto and string-built SQL", HelpBase)>]
 let securityRulesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
-    async { return securityRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+    async { return securityRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText true }
 
 [<CliAnalyzer("SecurityRules", "Weak crypto and string-built SQL", HelpBase)>]
 let securityRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
-    async { return securityRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+    async { return securityRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText false }
+
+// ---- FR0125 UnicodeHygiene ----
+
+let private unicodeMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    UnicodeHygiene.find parseTree source
+    |> List.map (fun s ->
+        let fixes =
+            match s.Fix with
+            | Some(r, original, replacement) -> [ fix r original replacement ]
+            | None -> []
+
+        hint
+            "FR0125"
+            $"Invisible character {s.CodePoint} ({s.FamilyName}) — it cannot be seen in review, which is exactly how Trojan Source and prompt-smuggling work; spell it as an escape or remove it."
+            s.Range
+            fixes)
+
+[<EditorAnalyzer("UnicodeHygiene", "Invisible and bidirectional Unicode in source", HelpBase)>]
+let unicodeEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0125" "UnicodeHygiene" (fun () ->
+        unicodeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("UnicodeHygiene", "Invisible and bidirectional Unicode in source", HelpBase)>]
+let unicodeCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0125" "UnicodeHygiene" (fun () ->
+        unicodeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0127 SecretLiterals ----
+
+let private secretMessages (parseTree: ParsedInput) : Message list =
+    SecretLiterals.find parseTree
+    |> List.map (fun s ->
+        hint
+            "FR0127"
+            $"This literal matches {s.Provider}'s documented credential format — a leaked key until proven otherwise; rotate it and move it to configuration or a secret store."
+            s.Range
+            [])
+
+[<EditorAnalyzer("SecretLiterals", "Provider-format API keys in string literals", HelpBase)>]
+let secretsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0127" "SecretLiterals" (fun () -> secretMessages ctx.ParseFileResults.ParseTree)
+
+[<CliAnalyzer("SecretLiterals", "Provider-format API keys in string literals", HelpBase)>]
+let secretsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0127" "SecretLiterals" (fun () -> secretMessages ctx.ParseFileResults.ParseTree)
+
+// ---- FR0128 ObsoleteCrypto ----
+
+let private obsoleteCryptoMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    ObsoleteCrypto.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0128"
+            $"'{s.ObsoleteName}' is the obsolete constructor spelling (SYSLIB0021); the static factory picks the platform implementation of the SAME algorithm."
+            s.Range
+            [ fix s.Range (Text.textOfRange source s.Range) s.Replacement ])
+
+[<EditorAnalyzer("ObsoleteCrypto", "Obsolete crypto constructors become static factories", HelpBase)>]
+let obsoleteCryptoEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0128" "ObsoleteCrypto" (fun () ->
+        obsoleteCryptoMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("ObsoleteCrypto", "Obsolete crypto constructors become static factories", HelpBase)>]
+let obsoleteCryptoCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0128" "ObsoleteCrypto" (fun () ->
+        obsoleteCryptoMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0129 MatchGuards ----
+
+let private matchGuardsMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    MatchGuards.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0129"
+            $"The guard only equality-tests '{s.BinderName}' against {s.LiteralText} — that IS the literal pattern."
+            s.Range
+            [ fix s.Range (Text.textOfRange source s.Range) s.LiteralText ])
+
+[<EditorAnalyzer("MatchGuards", "A guard that only equality-tests the binder is the literal pattern", HelpBase)>]
+let matchGuardsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0129" "MatchGuards" (fun () ->
+        matchGuardsMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("MatchGuards", "A guard that only equality-tests the binder is the literal pattern", HelpBase)>]
+let matchGuardsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0129" "MatchGuards" (fun () ->
+        matchGuardsMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0130 LiteralConst ----
+
+let private literalConstMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    LiteralConst.find (Visibility.apiChangesAllowed ()) parseTree source
+    |> List.map (fun s ->
+        let insertRange, text = s.Fix
+
+        hint
+            "FR0130"
+            $"'{s.Name}' is a compile-time constant; [<Literal>] lets it serve in patterns and attribute arguments and const-folds at use sites."
+            s.Range
+            [ fix insertRange "" text ])
+
+[<EditorAnalyzer("LiteralConst", "Module-level constants gain [<Literal>]", HelpBase)>]
+let literalConstEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0130" "LiteralConst" (fun () ->
+        literalConstMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("LiteralConst", "Module-level constants gain [<Literal>]", HelpBase)>]
+let literalConstCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0130" "LiteralConst" (fun () ->
+        literalConstMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0131 RecTailCall ----
+
+let private recTailCallMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    RecTailCall.find parseTree source checkResults
+    |> List.map (fun s ->
+        let insertRange, text = s.Fix
+
+        hint
+            "FR0131"
+            $"every recursive call in '{s.Name}' sits in tail position; [<TailCall>] makes the compiler warn (FS3569) if a later edit changes that."
+            s.Range
+            [ fix insertRange "" text ])
+
+[<EditorAnalyzer("RecTailCall", "Provably tail-recursive functions gain [<TailCall>]", HelpBase)>]
+let recTailCallEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0131" "RecTailCall" (fun () ->
+        whenChecked ctx (recTailCallMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("RecTailCall", "Provably tail-recursive functions gain [<TailCall>]", HelpBase)>]
+let recTailCallCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0131" "RecTailCall" (fun () ->
+        recTailCallMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0132 CommentDoc ----
+
+let private commentDocMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    CommentDoc.find parseTree source
+    |> List.map (fun s ->
+        hint
+            "FR0132"
+            $"this public {s.What} has no XML doc, but its trailing comment says exactly what one would; promoted to /// it reaches tooltips and generated docs."
+            s.Range
+            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+
+[<EditorAnalyzer("CommentDoc", "Trailing comments promoted to XML doc position", HelpBase)>]
+let commentDocEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0132" "CommentDoc" (fun () ->
+        commentDocMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("CommentDoc", "Trailing comments promoted to XML doc position", HelpBase)>]
+let commentDocCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0132" "CommentDoc" (fun () ->
+        commentDocMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0133 NameQuoting ----
+
+let private nameQuotingMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    projectCheck
+    : Message list =
+    // test-attributed names rewrite by default; local and file-private
+    // names are the config opt-in:  { "FR0133": { "locals": 1 } }
+    let includeLocals =
+        Configuration.parameterInt fileName "FR0133" "NameQuoting" "locals" 0 = 1
+
+    NameQuoting.find includeLocals parseTree source checkResults projectCheck
+    |> List.map (fun s ->
+        hint
+            "FR0133"
+            $"'{s.Name}' is {s.Name.Length} characters of camel case; the double-backtick name ``{s.Quoted}`` reads as the sentence it is — renamed at its definition and every use."
+            s.Range
+            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+
+[<EditorAnalyzer("NameQuoting", "Five-word names become double-backtick names", HelpBase)>]
+let nameQuotingEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0133" "NameQuoting" (fun () ->
+        whenChecked ctx (fun check ->
+            nameQuotingMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText check None))
+
+[<CliAnalyzer("NameQuoting", "Five-word names become double-backtick names", HelpBase)>]
+let nameQuotingCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0133" "NameQuoting" (fun () ->
+        nameQuotingMessages
+            ctx.FileName
+            ctx.ParseFileResults.ParseTree
+            ctx.SourceText
+            ctx.CheckFileResults
+            (Some ctx.CheckProjectResults))
+
+// ---- FR0134 DateTimeOffsetMigration ----
+
+let private dateTimeOffsetMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    DateTimeOffsetMigration.find (Visibility.apiChangesAllowed ()) parseTree source
+    |> List.choose (fun s ->
+        if s.IsFilePrivate then
+            DateTimeOffsetMigration.migrate parseTree source checkResults s
+            |> Option.map (fun edits ->
+                hint
+                    "FR0134"
+                    $"Field '{s.FieldName}: DateTime' of the file-private type '{s.TypeName}' drops the clock it was read from; every write and read fits DateTimeOffset, which keeps the instant AND its offset — migrated in one edit set."
+                    s.Range
+                    (edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+        else
+            None)
+
+[<EditorAnalyzer("DateTimeOffsetMigration", "DateTime record fields migrate to DateTimeOffset", HelpBase)>]
+let dateTimeOffsetEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0134" "DateTimeOffsetMigration" (fun () ->
+        whenChecked ctx (dateTimeOffsetMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("DateTimeOffsetMigration", "DateTime record fields migrate to DateTimeOffset", HelpBase)>]
+let dateTimeOffsetCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0134" "DateTimeOffsetMigration" (fun () ->
+        dateTimeOffsetMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0135 LiterateComment ----
+
+let private literateCommentMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    LiterateComment.find parseTree source
+    |> List.map (fun s ->
+        let r, text = s.Fix
+
+        hint
+            "FR0135"
+            $"this block comment carries {s.Evidence} — markdown FSharp.Formatting silently drops from a plain comment; one more star makes it the literate cell it reads as."
+            s.Range
+            [ fix r "" text ])
+
+[<EditorAnalyzer("LiterateComment", "Markdown-bearing script comments become literate cells", HelpBase)>]
+let literateCommentEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0135" "LiterateComment" (fun () ->
+        literateCommentMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("LiterateComment", "Markdown-bearing script comments become literate cells", HelpBase)>]
+let literateCommentCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0135" "LiterateComment" (fun () ->
+        literateCommentMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+// ---- FR0136 EmptyGuid ----
+
+let private emptyGuidMessages
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (offerAlternatives: bool)
+    checkResults
+    : Message list =
+    EmptyGuid.find parseTree source checkResults
+    |> List.collect (fun s ->
+        let original = Text.textOfRange source s.Range
+
+        [ hint
+              "FR0136"
+              $"the zero-argument Guid constructor is 00000000-…: if the empty value is intended, {s.EmptyText} says so; if a FRESH guid was meant, this is the classic .NET slip."
+              s.Range
+              [ fix s.Range original s.EmptyText ]
+          // the behavior-CHANGING repair — the likely intent, but only a
+          // human knows; never CLI-applied
+          if offerAlternatives then
+              hint
+                  "FR0136"
+                  $"Alternative: {s.NewGuidText} — if a fresh guid was the intent, this is the actual bug fix."
+                  s.Range
+                  [ fix s.Range original s.NewGuidText ] ])
+
+[<EditorAnalyzer("EmptyGuid", "Zero-argument Guid constructors state Empty or become NewGuid", HelpBase)>]
+let emptyGuidEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0136" "EmptyGuid" (fun () ->
+        whenChecked ctx (emptyGuidMessages ctx.ParseFileResults.ParseTree ctx.SourceText true))
+
+[<CliAnalyzer("EmptyGuid", "Zero-argument Guid constructors state Empty or become NewGuid", HelpBase)>]
+let emptyGuidCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0136" "EmptyGuid" (fun () ->
+        emptyGuidMessages ctx.ParseFileResults.ParseTree ctx.SourceText false ctx.CheckFileResults)
 
 // ---- FR0062 / FR0067 / FR0068 MiscRules ----
 
-let private miscRulesMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+let private miscRulesMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (offerAlternatives: bool)
+    : Message list =
     let mutableEnabled =
         Configuration.isRuleEnabled fileName "FR0062" "VisibleMutableState"
 
@@ -2106,15 +2664,44 @@ let private miscRulesMessages (fileName: string) (parseTree: ParsedInput) (sourc
 
         let parseMessages =
             if parseEnabled then
+                // wire/config data wants InvariantCulture — the clear
+                // default; spelling out CurrentCulture is the alternative
+                // when today's implicit behavior WAS the intent. The CLI
+                // auto-applies invariant only on the config opt-in:
+                //     { "FR0067": { "invariant": 1 } }
+                let autoInvariant =
+                    Configuration.parameterInt fileName "FR0067" "MiscRules" "invariant" 0 = 1
+
                 parses
-                |> List.map (fun s ->
-                    hint
-                        "FR0067"
-                        (sprintf
-                            "%s without a culture reads differently under different server cultures ('1,5' vs '1.5', day/month order); pass CultureInfo.InvariantCulture or the intended culture explicitly."
-                            s.CallName)
-                        s.Range
-                        [])
+                |> List.collect (fun s ->
+                    let note =
+                        hint
+                            "FR0067"
+                            (sprintf
+                                "%s without a culture reads differently under different server cultures ('1,5' vs '1.5', day/month order); pass CultureInfo.InvariantCulture or the intended culture explicitly."
+                                s.CallName)
+                            s.Range
+                            (match s.CultureFix with
+                             | Some mk when autoInvariant ->
+                                 let r, original, replacement =
+                                     mk "InvariantCulture"
+
+                                 [ fix r original replacement ]
+                             | _ -> [])
+
+                    match s.CultureFix with
+                    | Some mk when offerAlternatives && not autoInvariant ->
+                        let ri, oi, pi = mk "InvariantCulture"
+                        let rc, oc, pc = mk "CurrentCulture"
+
+                        [ note
+                          hint "FR0067" "Fix: parse with InvariantCulture (wire and config data)." s.Range [ fix ri oi pi ]
+                          hint
+                              "FR0067"
+                              "Alternative: spell out CurrentCulture — today's implicit behavior, made deliberate."
+                              s.Range
+                              [ fix rc oc pc ] ]
+                    | _ -> [ note ])
             else
                 []
 
@@ -2137,15 +2724,21 @@ let private miscRulesMessages (fileName: string) (parseTree: ParsedInput) (sourc
 
 [<EditorAnalyzer("MiscRules", "Visible mutable state, culture parsing, duplicate enum values", HelpBase)>]
 let miscRulesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
-    async { return miscRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+    async { return miscRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText true }
 
 [<CliAnalyzer("MiscRules", "Visible mutable state, culture parsing, duplicate enum values", HelpBase)>]
 let miscRulesCliAnalyzer (ctx: CliContext) : Async<Message list> =
-    async { return miscRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+    async { return miscRulesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText false }
 
 // ---- FR0069 / FR0070 StructHints ----
 
-let private structHintsMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+let private structHintsMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (checkOpt: FSharpCheckFileResults option)
+    (projectCheck: FSharpCheckProjectResults option)
+    : Message list =
     let voptionEnabled = Configuration.isRuleEnabled fileName "FR0069" "VOptionField"
     let structEnabled = Configuration.isRuleEnabled fileName "FR0070" "SmallStructType"
 
@@ -2162,11 +2755,50 @@ let private structHintsMessages (fileName: string) (parseTree: ParsedInput) (sou
             if voptionEnabled then
                 voptions
                 |> List.map (fun s ->
-                    hint
-                        "FR0069"
-                        $"Field '%s{s.FieldName}: %s{s.ElementText} option' of the contained type '%s{s.TypeName}' boxes the %s{s.ElementText} on every Some; '%s{s.ElementText} voption' keeps it flat — and private/internal visibility keeps the migration contained (public types risk serialization changes and unbounded call-site churn)."
-                        s.Range
-                        [])
+                    // a strictly file-private field migrates as ONE edit
+                    // set: field type plus every use, all in this file by
+                    // construction. Any use outside the provably-
+                    // rewritable shapes keeps it a note
+                    let migration =
+                        match checkOpt with
+                        | Some check when s.IsFilePrivate ->
+                            VOptionMigration.migrate parseTree source check s.FieldIdRange s.FieldName s.OptionNameRange
+                        | Some check when Visibility.apiChangesAllowed () && s.IsConfined ->
+                            // a strictly INTERNAL field under --api-changes:
+                            // every use in the project classified against its
+                            // own file, one edit set spanning files. Public
+                            // fields never take this path (consumers can sit
+                            // in a sibling project no scan sees), and neither
+                            // does an assembly that opens its internals to
+                            // friends
+                            projectCheck
+                            |> Option.filter (ProjectSources.hasInternalsVisibleTo >> not)
+                            |> Option.bind (fun pc ->
+                                VOptionMigration.migrateProject
+                                    parseTree
+                                    source
+                                    check
+                                    pc
+                                    s.FieldIdRange
+                                    s.FieldName
+                                    s.OptionNameRange)
+                        | _ -> None
+
+                    let containment = if s.IsFilePrivate then "file-private" else "internal"
+
+                    match migration with
+                    | Some edits ->
+                        hint
+                            "FR0069"
+                            $"Field '%s{s.FieldName}: %s{s.ElementText} option' of the %s{containment} type '%s{s.TypeName}' boxes the %s{s.ElementText} on every Some; the fix migrates the field and its %d{edits.Length - 1} use(s) to '%s{s.ElementText} voption'."
+                            s.Range
+                            (edits |> List.map (fun (r, original, replacement) -> fix r original replacement))
+                    | None ->
+                        hint
+                            "FR0069"
+                            $"Field '%s{s.FieldName}: %s{s.ElementText} option' of the contained type '%s{s.TypeName}' boxes the %s{s.ElementText} on every Some; '%s{s.ElementText} voption' keeps it flat — and private/internal visibility keeps the migration contained (public types risk serialization changes and unbounded call-site churn)."
+                            s.Range
+                            [])
             else
                 []
 
@@ -2174,11 +2806,16 @@ let private structHintsMessages (fileName: string) (parseTree: ParsedInput) (sou
             if structEnabled then
                 structs
                 |> List.map (fun s ->
+                    let fixes =
+                        match s.Fix with
+                        | Some(r, text) -> [ fix r "" text ]
+                        | None -> []
+
                     hint
                         "FR0070"
                         $"Contained record '%s{s.TypeName}' has only %d{s.FieldCount} small struct field(s); [<Struct>] removes a heap allocation per instance (mind copy semantics: struct records copy on assignment)."
                         s.Range
-                        [])
+                        fixes)
             else
                 []
 
@@ -2186,11 +2823,42 @@ let private structHintsMessages (fileName: string) (parseTree: ParsedInput) (sou
             if structTupleEnabled then
                 structTuples
                 |> List.map (fun s ->
-                    hint
-                        "FR0093"
-                        $"Field '%s{s.FieldName}: %s{s.TupleText}' of the contained type '%s{s.TypeName}' is a reference tuple: one heap object per value. 'struct (%s{s.TupleText})' stores it inline — but every construction and destructuring of the field needs the struct keyword too, so this is advice, not a mechanical fix."
-                        s.Range
-                        [])
+                    // a strictly file-private field migrates as ONE edit set:
+                    // field type plus every construction/destructuring, all
+                    // in this file by construction
+                    let migration =
+                        match checkOpt with
+                        | Some check when s.IsFilePrivate ->
+                            StructTupleMigration.migrate parseTree source check s.FieldIdRange s.FieldName s.Range
+                        | Some check when Visibility.apiChangesAllowed () && s.IsConfined ->
+                            projectCheck
+                            |> Option.filter (ProjectSources.hasInternalsVisibleTo >> not)
+                            |> Option.bind (fun pc ->
+                                StructTupleMigration.migrateProject
+                                    parseTree
+                                    source
+                                    check
+                                    pc
+                                    s.FieldIdRange
+                                    s.FieldName
+                                    s.Range)
+                        | _ -> None
+
+                    let containment = if s.IsFilePrivate then "file-private" else "internal"
+
+                    match migration with
+                    | Some edits ->
+                        hint
+                            "FR0093"
+                            $"Field '%s{s.FieldName}: %s{s.TupleText}' of the %s{containment} type '%s{s.TypeName}' is a reference tuple: one heap object per value; the fix migrates the field and its %d{edits.Length - 1} use(s) to 'struct (%s{s.TupleText})'."
+                            s.Range
+                            (edits |> List.map (fun (r, original, replacement) -> fix r original replacement))
+                    | None ->
+                        hint
+                            "FR0093"
+                            $"Field '%s{s.FieldName}: %s{s.TupleText}' of the contained type '%s{s.TypeName}' is a reference tuple: one heap object per value. 'struct (%s{s.TupleText})' stores it inline — but every construction and destructuring of the field needs the struct keyword too, so this is advice, not a mechanical fix."
+                            s.Range
+                            [])
             else
                 []
 
@@ -2198,11 +2866,26 @@ let private structHintsMessages (fileName: string) (parseTree: ParsedInput) (sou
 
 [<EditorAnalyzer("StructHints", "voption fields and [<Struct>] candidates in contained types", HelpBase)>]
 let structHintsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
-    async { return structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+    async {
+        // no ProjectSources host in editors: the cross-file path degrades
+        // to the note by itself
+        return
+            structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults None
+    }
 
 [<CliAnalyzer("StructHints", "voption fields and [<Struct>] candidates in contained types", HelpBase)>]
 let structHintsCliAnalyzer (ctx: CliContext) : Async<Message list> =
-    async { return structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText }
+    async {
+        // parse-only runs carry degraded check results; the migration
+        // itself refuses to run on error files, so passing them is safe
+        return
+            structHintsMessages
+                ctx.FileName
+                ctx.ParseFileResults.ParseTree
+                ctx.SourceText
+                (Some ctx.CheckFileResults)
+                (Some ctx.CheckProjectResults)
+    }
 
 // ---- FR0071 LoopInvariant ----
 
@@ -2339,6 +3022,7 @@ let nestedRecordUpdateEditorAnalyzer (ctx: EditorContext) : Async<Message list> 
     whenEnabled ctx.FileName "FR0074" "NestedRecordUpdate" (fun () ->
         if langVersionAtLeast 8.0 ctx.ProjectOptions then
             whenChecked ctx (nestedRecordUpdateMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+            |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText
         else
             [])
 
@@ -2714,7 +3398,8 @@ let private typeTestChainMessages (parseTree: ParsedInput) (source: ISourceText)
 [<EditorAnalyzer("TypeTestChain", "Type-test if-chains rewritten as match", HelpBase)>]
 let typeTestChainEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0103" "TypeTestChain" (fun () ->
-        typeTestChainMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        typeTestChainMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("TypeTestChain", "Type-test if-chains rewritten as match", HelpBase)>]
 let typeTestChainCliAnalyzer (ctx: CliContext) : Async<Message list> =
