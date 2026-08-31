@@ -201,10 +201,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                 match e with
                 | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
                     match lou.Bindings with
-                    | [ SynBinding(isMutable = false; returnInfo = None; headPat = SynPat.Named _; expr = rhs; trivia = btrivia) ] when
-                        Range.equals rhs.Range target
-                        ->
-                        Some btrivia.LeadingKeyword.Range
+                    | [ SynBinding(
+                            isMutable = false
+                            returnInfo = None
+                            headPat = SynPat.Named _
+                            expr = rhs
+                            trivia = btrivia) ] when Range.equals rhs.Range target -> Some btrivia.LeadingKeyword.Range
                     | _ -> None
                 | _ -> None)
 
@@ -265,8 +267,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                                   && (match parameterShapes ctx m with
                                                       | Some mps when mps.Length = arity -> mps = ps
                                                       | Some mps when mps.Length = arity + 1 ->
-                                                          List.truncate arity mps = ps
-                                                          && isOptionalCancellationToken m
+                                                          List.truncate arity mps = ps && isOptionalCancellationToken m
                                                       | _ -> false))
                                           | None -> None
                                        with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
@@ -282,13 +283,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
                               match twin with
                               | Some twinM ->
-                                  let renameFix =
-                                      methodId.idRange, methodId.idText, methodId.idText + "Async"
+                                  let renameFix = methodId.idRange, methodId.idText, methodId.idText + "Async"
 
                                   let bridgeFixes =
                                       if builder = "async" then
-                                          let atEnd =
-                                              Range.mkRange expr.Range.FileName expr.Range.End expr.Range.End
+                                          let atEnd = Range.mkRange expr.Range.FileName expr.Range.End expr.Range.End
 
                                           [ atEnd, "", " |> Async.AwaitTask" ]
                                       else
@@ -304,8 +303,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                       // statement position takes do! — but
                                       // only a NON-generic Task binds there
                                       if isStatement expr.Range && returnsPlainTask twinM then
-                                          let at =
-                                              Range.mkRange expr.Range.FileName expr.Range.Start expr.Range.Start
+                                          let at = Range.mkRange expr.Range.FileName expr.Range.Start expr.Range.Start
 
                                           { Range = expr.Range
                                             Fixes = [ at, "", "do! "; renameFix ] @ bridgeFixes

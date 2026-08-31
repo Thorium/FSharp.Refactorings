@@ -346,7 +346,8 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                   sites
                   |> List.choose (function
                       | Observation.Names names -> Some names
-                      | Observation.Opaque | Observation.Bad -> None)
+                      | Observation.Opaque
+                      | Observation.Bad -> None)
 
               let siteNames =
                   if
@@ -376,9 +377,8 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                           && lineText.Substring(cr.EndColumn).Trim() = ""
                           // one case per line: with `| A of .. | B of .. // names`
                           // the comment cannot say WHICH case it describes
-                          && (lineText.Substring(0, cr.StartColumn)
-                              |> Seq.filter ((=) '|')
-                              |> Seq.length) <= 1
+                          && (lineText.Substring(0, cr.StartColumn) |> Seq.filter ((=) '|') |> Seq.length)
+                             <= 1
                       then
                           namesFromComment ctext fields.Length
                       else
@@ -388,7 +388,10 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
               let named =
                   siteNames
                   |> Option.orElse commentNames
-                  |> Option.orElse (namesFromCaseName caseName fields.Length |> Option.map (fun n -> n, "its own name"))
+                  |> Option.orElse (
+                      namesFromCaseName caseName fields.Length
+                      |> Option.map (fun n -> n, "its own name")
+                  )
 
               match named with
               | Some(names, sourceName) ->
@@ -405,7 +408,11 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                               textOfRange source (Range.mkRange fr.FileName fr.Start lr.End)
                           | [] -> ""
 
-                      let colon = if fieldsText.Contains " * " || fields.Length = 1 then ": " else ":"
+                      let colon =
+                          if fieldsText.Contains " * " || fields.Length = 1 then
+                              ": "
+                          else
+                              ":"
 
                       List.zip names fields
                       |> List.map (fun (name, SynField(range = fieldRange)) ->

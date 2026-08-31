@@ -93,8 +93,7 @@ let find
         index.Decls
         |> Array.exists (fun (_, d) ->
             match d with
-            | SynModuleDecl.Open(
-                target = SynOpenDeclTarget.ModuleOrNamespace(longId = SynLongIdent(id = [ s; g ]))) ->
+            | SynModuleDecl.Open(target = SynOpenDeclTarget.ModuleOrNamespace(longId = SynLongIdent(id = [ s; g ]))) ->
                 s.idText = "System" && g.idText = "Globalization"
             | _ -> false)
 
@@ -152,7 +151,8 @@ let find
                             | _ ->
                                 let argText = textOfRange source arg.Range
 
-                                Some(fun (culture: string) -> arg.Range, argText, $"({argText}, {cultureSpelling culture})")
+                                Some(fun (culture: string) ->
+                                    arg.Range, argText, $"({argText}, {cultureSpelling culture})")
 
                     parses.Add
                         { Range = e.Range

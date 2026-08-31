@@ -211,9 +211,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   isInfix = false
                   funcExpr = SynExpr.DotGet(
                       expr = (LoweredCall lowering as loweredExpr); longDotId = SynLongIdent(id = [ methodId ]))
-                  argExpr = arg) when
-                  comparisonMethods.Contains methodId.idText
-                  ->
+                  argExpr = arg) when comparisonMethods.Contains methodId.idText ->
                   if resolvesToStringMethod check source lowering then
                       let literalArg =
                           match stripParens arg with

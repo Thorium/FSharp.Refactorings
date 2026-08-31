@@ -494,7 +494,8 @@ let private parseOnlyArgs (projectPath: string) =
                     false))
 
     if dropped.Length > 0 then
-        eprintfn $"  ({dropped.Length} <Compile Include> item(s) skipped: unexpanded MSBuild properties or files not on disk)"
+        eprintfn
+            $"  ({dropped.Length} <Compile Include> item(s) skipped: unexpanded MSBuild properties or files not on disk)"
 
     if sources.Length = 0 then
         Error "no <Compile Include> items to parse (wildcards and imported items are beyond --parse-only)"
@@ -774,13 +775,15 @@ let private kindColumn (code: string) =
 /// that landed in it — enough to undo the pass's work on the file and to
 /// suppress those fixes on later passes.
 type private AppliedFile =
-    { Path: string
-      Before: string
-      /// (suggestion group, rule code, fix) — the GROUP travels because a
-      /// multi-edit suggestion applies all-or-nothing, and any later
-      /// selective rollback must keep it that way: half a ParamOrder swap
-      /// COMPILES and computes the wrong thing
-      Fixes: (int * string * Fix) list }
+    {
+        Path: string
+        Before: string
+        /// (suggestion group, rule code, fix) — the GROUP travels because a
+        /// multi-edit suggestion applies all-or-nothing, and any later
+        /// selective rollback must keep it that way: half a ParamOrder swap
+        /// COMPILES and computes the wrong thing
+        Fixes: (int * string * Fix) list
+    }
 
 /// The suppression key of a fix: rule code, file, and the edit's CONTENT.
 /// Not coordinates — a later pass applying an unrelated fix ABOVE the
@@ -1253,8 +1256,7 @@ let private isDirectiveFree (path: string) =
         path,
         fun p ->
             try
-                File.ReadLines p
-                |> Seq.forall (fun l -> not (l.TrimStart().StartsWith "#if"))
+                File.ReadLines p |> Seq.forall (fun l -> not (l.TrimStart().StartsWith "#if"))
             with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
                 false
     )
@@ -2253,7 +2255,10 @@ let private reapplySubset (before: string) (fixes: (int * string * Fix) list) : 
     for _, _, f in ordered do
         let lines = current.Split '\n'
 
-        if f.FromRange.StartLine - 1 <= lines.Length && f.FromRange.EndLine - 1 <= lines.Length then
+        if
+            f.FromRange.StartLine - 1 <= lines.Length
+            && f.FromRange.EndLine - 1 <= lines.Length
+        then
             let startIndex =
                 (lines
                  |> Seq.take (f.FromRange.StartLine - 1)
@@ -2267,10 +2272,7 @@ let private reapplySubset (before: string) (fixes: (int * string * Fix) list) : 
             if
                 startIndex <= current.Length
                 && endIndex <= current.Length
-                && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace(
-                    "\r",
-                    ""
-                )
+                && current.Substring(startIndex, endIndex - startIndex).Replace("\r", "") = f.FromText.Replace("\r", "")
             then
                 let eol = if current.Contains "\r\n" then "\r\n" else "\n"
                 let toText = f.ToText.Replace("\r\n", "\n").Replace("\n", eol)
@@ -2288,7 +2290,8 @@ let private reapplySubset (before: string) (fixes: (int * string * Fix) list) : 
 /// WebsitePlayground's build.fsx). Sweeping in a neighbor costs one
 /// suppressed innocent; missing the culprit costs the whole file.
 let private fixesNearErrors (cf: AppliedFile) (errorLines: Set<int>) : (int * string * Fix) list =
-    let newlinesIn (s: string) = s |> Seq.filter ((=) '\n') |> Seq.length
+    let newlinesIn (s: string) =
+        s |> Seq.filter ((=) '\n') |> Seq.length
 
     let ascending =
         cf.Fixes
@@ -2301,10 +2304,7 @@ let private fixesNearErrors (cf: AppliedFile) (errorLines: Set<int>) : (int * st
               let patchedStart = f.FromRange.StartLine + delta
               let patchedEnd = patchedStart + newlinesIn f.ToText
 
-              if
-                  errorLines
-                  |> Set.exists (fun l -> l >= patchedStart - 5 && l <= patchedEnd + 5)
-              then
+              if errorLines |> Set.exists (fun l -> l >= patchedStart - 5 && l <= patchedEnd + 5) then
                   g, code, f
 
               delta <- delta + (newlinesIn f.ToText - newlinesIn f.FromText) ]
@@ -2338,8 +2338,7 @@ let private verifyPass
         let errorFiles = errors |> Array.map (fun d -> canonical d.FileName) |> Set.ofArray
 
         let named =
-            changedFiles
-            |> List.filter (fun cf -> errorFiles.Contains(canonical cf.Path))
+            changedFiles |> List.filter (fun cf -> errorFiles.Contains(canonical cf.Path))
 
         let writeBack (files: AppliedFile list) =
             for cf in files do
@@ -2359,6 +2358,7 @@ let private verifyPass
         let rolledBack =
             if not named.IsEmpty then
                 writeBack named
+
                 if (projectErrors checker options).Length <= baselineErrors then
                     // the pass IS to blame — but usually one fix is, and a
                     // whole-file rollback would take every innocent fix in
@@ -2383,8 +2383,7 @@ let private verifyPass
                             | culprits -> cf, culprits)
 
                     let salvageable =
-                        split
-                        |> List.exists (fun (cf, culprits) -> culprits.Length < cf.Fixes.Length)
+                        split |> List.exists (fun (cf, culprits) -> culprits.Length < cf.Fixes.Length)
 
                     let salvaged =
                         if not salvageable then
@@ -2418,8 +2417,7 @@ let private verifyPass
 
                         let orphanFiles =
                             [ for cf in changedFiles |> List.except named do
-                                  let orphans =
-                                      cf.Fixes |> List.filter (fun (g, _, _) -> culpritGroups.Contains g)
+                                  let orphans = cf.Fixes |> List.filter (fun (g, _, _) -> culpritGroups.Contains g)
 
                                   if not orphans.IsEmpty then
                                       writeSource cf.Path (reapplySubset cf.Before (cf.Fixes |> List.except orphans))
@@ -2453,8 +2451,7 @@ let private verifyPass
 
                         let orphanFiles =
                             [ for cf in changedFiles |> List.except named do
-                                  let orphans =
-                                      cf.Fixes |> List.filter (fun (g, _, _) -> rolledGroups.Contains g)
+                                  let orphans = cf.Fixes |> List.filter (fun (g, _, _) -> rolledGroups.Contains g)
 
                                   if not orphans.IsEmpty then
                                       writeSource cf.Path (reapplySubset cf.Before (cf.Fixes |> List.except orphans))
@@ -2482,7 +2479,12 @@ let private verifyPass
                 // apply-restore on exactly this), so the fixes go back in
                 let currentTexts =
                     changedFiles
-                    |> List.map (fun cf -> cf.Path, (try Some(File.ReadAllText cf.Path) with _ -> None)) // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                    |> List.map (fun cf ->
+                        cf.Path,
+                        (try
+                            Some(File.ReadAllText cf.Path)
+                         with _ ->
+                             None)) // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
 
                 restore changedFiles
 

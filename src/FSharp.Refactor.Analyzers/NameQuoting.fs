@@ -39,7 +39,14 @@ type Suggestion =
     }
 
 let private testAttributes =
-    set [ "Test"; "Fact"; "Theory"; "TestMethod"; "Property"; "TestCase"; "TestCaseSource" ]
+    set
+        [ "Test"
+          "Fact"
+          "Theory"
+          "TestMethod"
+          "Property"
+          "TestCase"
+          "TestCaseSource" ]
 
 /// The double-backtick spelling, when the name earns one: five or more
 /// words, plain camel/snake, no acronym runs.
@@ -86,8 +93,7 @@ let find
                          | _ -> None))
                     // ATTRIBUTE arguments are where these references live —
                     // [<TestCaseSource("...")>] — and they are not in Exprs
-                    (index.Attributes
-                     |> Array.map (fun (_, a) -> textOfRange source a.ArgExpr.Range)))
+                    (index.Attributes |> Array.map (fun (_, a) -> textOfRange source a.ArgExpr.Range)))
 
         let mentionedInString (name: string) =
             stringMentions.Value |> Array.exists (fun t -> t.Contains name)
@@ -135,8 +141,10 @@ let find
                                              true
                                          | _ -> false)
 
-                              if isTest then yield id, quoted, not filePrivate
-                              elif filePrivate && includeLocals then yield id, quoted, false
+                              if isTest then
+                                  yield id, quoted, not filePrivate
+                              elif filePrivate && includeLocals then
+                                  yield id, quoted, false
                           | None -> ()
                       | None -> ()
                   | _ -> ()
@@ -180,8 +188,7 @@ let find
                       let editable =
                           uses
                           |> Array.forall (fun u ->
-                              u.Range.StartLine = u.Range.EndLine
-                              && textOfRange source u.Range = id.idText)
+                              u.Range.StartLine = u.Range.EndLine && textOfRange source u.Range = id.idText)
 
                       if editable && uses.Length > 0 then
                           { Range = id.idRange

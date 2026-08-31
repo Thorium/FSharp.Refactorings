@@ -671,7 +671,9 @@ let ``an INDENTED group's commented member extracts without eating indentation``
         let insertAt = offsetOf s.InsertRange.StartLine s.InsertRange.StartColumn
 
         let patched =
-            afterRemove.Substring(0, insertAt) + s.InsertText + afterRemove.Substring insertAt
+            afterRemove.Substring(0, insertAt)
+            + s.InsertText
+            + afterRemove.Substring insertAt
 
         // the surviving `and f3` keeps its indentation, and the moved
         // comment sits at the group's indent, not doubled

@@ -191,9 +191,9 @@ let private alreadyWrappedTail (tail: SynExpr) =
     | SynExpr.LetOrUse lou when not lou.IsBang ->
         match lou.Bindings, lou.Body with
         | [ SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ f ]); argPats = SynArgPats.Pats [ _ ])) ],
-          (SynExpr.App(funcExpr = SynExpr.Ident g)
-          | SynExpr.YieldOrReturn(expr = SynExpr.App(funcExpr = SynExpr.Ident g))
-          | SynExpr.YieldOrReturnFrom(expr = SynExpr.App(funcExpr = SynExpr.Ident g))) -> f.idText = g.idText
+          (SynExpr.App(funcExpr = SynExpr.Ident g) | SynExpr.YieldOrReturn(
+              expr = SynExpr.App(funcExpr = SynExpr.Ident g)) | SynExpr.YieldOrReturnFrom(
+              expr = SynExpr.App(funcExpr = SynExpr.Ident g))) -> f.idText = g.idText
         | _ -> false
     | _ -> false
 
@@ -531,9 +531,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                             && multiLineStringSafe bodyLines
                                             && not (spansMultiLineLiteral index r.StartLine r.EndLine)
                                             && not (spansDirective source r)
-                                            && not (
-                                                mentionsForeignMutable r (String.concat "\n" bodyLines)
-                                            )
+                                            && not (mentionsForeignMutable r (String.concat "\n" bodyLines))
                                         then
                                             Some
                                                 [ // opening rides the first line's indent insert
@@ -547,7 +545,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                                               ""
 
                                                       if l = r.StartLine || not (isBlank text) then
-                                                          Range.mkRange fileName (Position.mkPos l 0) (Position.mkPos l 0),
+                                                          Range.mkRange
+                                                              fileName
+                                                              (Position.mkPos l 0)
+                                                              (Position.mkPos l 0),
                                                           opening + (if isBlank text then "" else "    ")
                                                   Range.mkRange fileName r.End r.End, $"\n{armInd}}}" ]
                                         else
@@ -683,7 +684,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                               | Some _ -> $"return {fnName} ()"
                                               | None -> $"{fnName} ()"
 
-                                          [ Range.mkRange fileName (Position.mkPos tail.Range.StartLine 0) tail.Range.End,
+                                          [ Range.mkRange
+                                                fileName
+                                                (Position.mkPos tail.Range.StartLine 0)
+                                                tail.Range.End,
                                             $"{ind}let {fnName} () =\n{indented}\n{ind}{call}" ]
                                       | _ -> []
 

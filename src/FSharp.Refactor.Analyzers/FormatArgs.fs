@@ -40,8 +40,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
           | SynExpr.App(
               isInfix = false
               funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
-              argExpr = SynExpr.Paren(
-                  expr = SynExpr.Tuple(exprs = SynExpr.Const(SynConst.String(fmt, _, _), _) :: args))) when
+              argExpr = SynExpr.Paren(expr = SynExpr.Tuple(exprs = SynExpr.Const(SynConst.String(fmt, _, _), _) :: args))) when
               pathEndsWith "String" "Format" ids && not args.IsEmpty
               ->
               // `{{` is an escaped brace in composite formats

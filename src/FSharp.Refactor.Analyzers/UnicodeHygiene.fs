@@ -43,11 +43,16 @@ let private bidi =
 let private invisible = set [ 0x200B; 0x2060; 0x2061; 0x2062; 0x2063; 0x2064 ]
 
 let private familyOf (cp: int) (line: int) (col: int) =
-    if bidi.Contains cp then ValueSome "bidirectional control (Trojan Source)"
-    elif invisible.Contains cp then ValueSome "zero-width/invisible"
-    elif cp = 0xFEFF && (line > 1 || col > 0) then ValueSome "mid-file byte-order mark"
-    elif cp = 0xE0001 || (cp >= 0xE0020 && cp <= 0xE007F) then ValueSome "Unicode tag block (invisible smuggling)"
-    else ValueNone
+    if bidi.Contains cp then
+        ValueSome "bidirectional control (Trojan Source)"
+    elif invisible.Contains cp then
+        ValueSome "zero-width/invisible"
+    elif cp = 0xFEFF && (line > 1 || col > 0) then
+        ValueSome "mid-file byte-order mark"
+    elif cp = 0xE0001 || (cp >= 0xE0020 && cp <= 0xE007F) then
+        ValueSome "Unicode tag block (invisible smuggling)"
+    else
+        ValueNone
 
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree

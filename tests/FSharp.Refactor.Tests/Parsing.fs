@@ -149,7 +149,8 @@ let parseAndCheckPair (sourceA: string) (sourceB: string) =
     let checkA =
         match answerA with
         | FSharpCheckFileAnswer.Succeeded c -> c
-        | FSharpCheckFileAnswer.Aborted -> failwith $"pair typecheck aborted, calling parseAndCheckPair with sourceA: {sourceA}, sourceB: {sourceB}"
+        | FSharpCheckFileAnswer.Aborted ->
+            failwith $"pair typecheck aborted, calling parseAndCheckPair with sourceA: {sourceA}, sourceB: {sourceB}"
 
     let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions options
 
@@ -165,7 +166,8 @@ let parseAndCheckPair (sourceA: string) (sourceB: string) =
         System.IO.File.WriteAllText(pathB, patchedB)
 
         let results =
-            checker.ParseAndCheckProject { options with Stamp = Some 1L } |> Async.RunSynchronously
+            checker.ParseAndCheckProject { options with Stamp = Some 1L }
+            |> Async.RunSynchronously
 
         results.Diagnostics
         |> Array.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)

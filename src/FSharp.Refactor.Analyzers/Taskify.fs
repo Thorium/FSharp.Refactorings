@@ -124,7 +124,8 @@ let private geographyOf (parseTree: ParsedInput) (source: ISourceText) =
        NoBindRanges = noBindRanges
        InsideAny =
         fun (ranges: range[]) (r: range) ->
-            ranges |> Array.exists (fun z -> Range.rangeContainsRange z r && not (Range.equals z r))
+            ranges
+            |> Array.exists (fun z -> Range.rangeContainsRange z r && not (Range.equals z r))
        LetBindingOwning =
         fun (target: range) ->
             index.Exprs
@@ -137,8 +138,7 @@ let private geographyOf (parseTree: ParsedInput) (source: ISourceText) =
                             returnInfo = None
                             headPat = SynPat.Named _
                             expr = rhs
-                            trivia = btrivia) ] when Range.equals rhs.Range target ->
-                        Some btrivia.LeadingKeyword.Range
+                            trivia = btrivia) ] when Range.equals rhs.Range target -> Some btrivia.LeadingKeyword.Range
                     | _ -> None
                 | _ -> None)
        ReturnOwning =
@@ -147,7 +147,8 @@ let private geographyOf (parseTree: ParsedInput) (source: ISourceText) =
             |> Array.tryPick (fun (_, e) ->
                 match e with
                 | SynExpr.YieldOrReturn(flags = (false, true); expr = payload) when
-                    Range.equals (stripParens payload).Range target || Range.equals payload.Range target
+                    Range.equals (stripParens payload).Range target
+                    || Range.equals payload.Range target
                     ->
                     Some e.Range
                 | _ -> None) |}
@@ -201,7 +202,10 @@ let private classifierFor (parseTree: ParsedInput) (source: ISourceText) =
             | Some kw when textOfRange source kw = "let" ->
                 Some(
                     (kw, "let", "let!")
-                    :: (if builder = "async" then [ app.Range, appText, awaited ] else [])
+                    :: (if builder = "async" then
+                            [ app.Range, appText, awaited ]
+                        else
+                            [])
                 )
             | _ ->
                 match geo.ReturnOwning app.Range with
@@ -290,8 +294,7 @@ let find
                               // caller is in this project" false — a friend
                               // assembly's call sites are invisible to the
                               // scan AND to the verification build
-                              && (projectCheck
-                                  |> Option.exists (ProjectSources.hasInternalsVisibleTo >> not))
+                              && (projectCheck |> Option.exists (ProjectSources.hasInternalsVisibleTo >> not))
                               && Visibility.scopeMatches
                                   Visibility.Scope.Assembly
                                   declPath
@@ -360,12 +363,22 @@ let find
                                           // the tail IS the blocking drain
                                           let recv = textOfRange source site.Receiver.Value
                                           coveredSites.Add(keyOf site.Range) |> ignore
-                                          bindEdits.Add(terminal.Range, textOfRange source terminal.Range, $"return! {recv}")
+
+                                          bindEdits.Add(
+                                              terminal.Range,
+                                              textOfRange source terminal.Range,
+                                              $"return! {recv}"
+                                          )
                                       | None ->
                                           // any other tail returns its value;
                                           // a try/with or lambda tail hiding a
                                           // blocking site was vetoed above
-                                          let at = Range.mkRange terminal.Range.FileName terminal.Range.Start terminal.Range.Start
+                                          let at =
+                                              Range.mkRange
+                                                  terminal.Range.FileName
+                                                  terminal.Range.Start
+                                                  terminal.Range.Start
+
                                           bindEdits.Add(at, "", "return ")
 
                               walkTails body
@@ -376,8 +389,7 @@ let find
                                   if convertible && not (coveredSites.Contains(keyOf site.Range)) then
                                       match letBindingOwning site.Range with
                                       | Some kw when
-                                          textOfRange source kw = "let"
-                                          && Range.rangeContainsRange body.Range kw
+                                          textOfRange source kw = "let" && Range.rangeContainsRange body.Range kw
                                           ->
                                           let recv = textOfRange source site.Receiver.Value
                                           bindEdits.Add(kw, "let", "let!")
@@ -417,7 +429,10 @@ let find
                               let thisFile = System.IO.Path.GetFullPath(fid.idRange.FileName).ToLowerInvariant()
 
                               let siblingClassifiers =
-                                  System.Collections.Generic.Dictionary<string, (int -> range -> (range * string * string) list option) option>()
+                                  System.Collections.Generic.Dictionary<
+                                      string,
+                                      (int -> range -> (range * string * string) list option) option
+                                   >()
 
                               let classifierForFile (path: string) =
                                   let key = System.IO.Path.GetFullPath(path).ToLowerInvariant()
@@ -487,10 +502,20 @@ let find
                                         // two edits share a position
                                         for l in body.Range.StartLine .. body.Range.EndLine do
                                             let text = source.GetLineString(l - 1)
-                                            let opening = if l = body.Range.StartLine then $"{indentText}task {{\n" else ""
+
+                                            let opening =
+                                                if l = body.Range.StartLine then
+                                                    $"{indentText}task {{\n"
+                                                else
+                                                    ""
 
                                             if l = body.Range.StartLine || not (isBlank text) then
-                                                let at = Range.mkRange body.Range.FileName (Position.mkPos l 0) (Position.mkPos l 0)
+                                                let at =
+                                                    Range.mkRange
+                                                        body.Range.FileName
+                                                        (Position.mkPos l 0)
+                                                        (Position.mkPos l 0)
+
                                                 at, "", (opening + (if isBlank text then "" else "    "))
                                         // closing brace below the body
                                         let atEnd = Range.mkRange body.Range.FileName body.Range.End body.Range.End

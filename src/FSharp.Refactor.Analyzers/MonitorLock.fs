@@ -127,8 +127,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           tryExpr = body; finallyExpr = MonitorCall(exitId, exitArg); trivia = tfTrivia) & tf) when
                       enterId.idText = "Enter" && exitId.idText = "Exit"
                       ->
-                      guarded.Add(enterExpr.Range.StartLine, enterExpr.Range.StartColumn)
-                      |> ignore
+                      guarded.Add(enterExpr.Range.StartLine, enterExpr.Range.StartColumn) |> ignore
 
                       let lockText = textOfRange source lockArg.Range
                       let tryLine = tfTrivia.TryKeyword.StartLine
@@ -155,8 +154,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                   [ for l in tryLine + 1 .. finallyLine - 1 -> source.GetLineString(l - 1) ]
                                   |> String.concat "\n"
 
-                              let replaceRange =
-                                  Range.mkRange e.Range.FileName enterExpr.Range.Start tf.Range.End
+                              let replaceRange = Range.mkRange e.Range.FileName enterExpr.Range.Start tf.Range.End
 
                               let bodyRegion =
                                   Range.mkRange

@@ -142,13 +142,15 @@ let private (|SmallStructTuple|_|) (t: SynType) =
         segments
         |> List.forall (function
             | SynTupleTypeSegment.Slash _ -> false
-            | SynTupleTypeSegment.Type _ | SynTupleTypeSegment.Star _ -> true)
+            | SynTupleTypeSegment.Type _
+            | SynTupleTypeSegment.Star _ -> true)
         ->
         let elements =
             segments
             |> List.choose (function
                 | SynTupleTypeSegment.Type element -> Some element
-                | SynTupleTypeSegment.Star _ | SynTupleTypeSegment.Slash _ -> None)
+                | SynTupleTypeSegment.Star _
+                | SynTupleTypeSegment.Slash _ -> None)
 
         if
             elements.Length >= 2

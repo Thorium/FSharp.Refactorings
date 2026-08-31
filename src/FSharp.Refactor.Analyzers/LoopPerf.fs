@@ -216,8 +216,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
         index.Exprs
         |> Array.exists (fun (_, e) ->
             match e with
-            | SynExpr.LongIdentSet(SynLongIdent(id = ids), _, _) when not ids.IsEmpty ->
-                (List.last ids).idText = name
+            | SynExpr.LongIdentSet(SynLongIdent(id = ids), _, _) when not ids.IsEmpty -> (List.last ids).idText = name
             | _ -> false)
 
     let opensCollectionsGeneric =
@@ -269,9 +268,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
                               && not (reassigned collText)
                               ->
                               let siblings =
-                                  rawProbes
-                                  |> Seq.filter (fun (c, _, _, _) -> c = collText)
-                                  |> Seq.toList
+                                  rawProbes |> Seq.filter (fun (c, _, _, _) -> c = collText) |> Seq.toList
 
                               // one companion binding for the whole group;
                               // emitted identically from every probe of the
@@ -364,7 +361,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
                                               (Position.mkPos (declRange.EndLine + 1) 0)
 
                                       let insert =
-                                          insertAt, "", $"{indent}let private {setName} = {hashSetSpelling}({collText})\n"
+                                          insertAt,
+                                          "",
+                                          $"{indent}let private {setName} = {hashSetSpelling}({collText})\n"
 
                                       let rewrites =
                                           siblings

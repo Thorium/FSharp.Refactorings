@@ -102,8 +102,7 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                              |> List.exists (fun node ->
                                  match node with
                                  | SyntaxNode.SynModule(SynModuleDecl.NestedModule(
-                                     moduleInfo = SynComponentInfo(accessibility = Some(SynAccess.Private _)))) ->
-                                     true
+                                     moduleInfo = SynComponentInfo(accessibility = Some(SynAccess.Private _)))) -> true
                                  | _ -> false)
 
                       for SynField(idOpt = idOpt; fieldType = fieldType) in fields do
@@ -177,8 +176,7 @@ let classifierFor
                     | "MaxValue" -> Some "neutral"
                     | _ -> None
 
-                src
-                |> Option.map (fun s -> [ dt.idRange, "DateTime", "DateTimeOffset" ], [ s ])
+                src |> Option.map (fun s -> [ dt.idRange, "DateTime", "DateTimeOffset" ], [ s ])
             else
                 None
         | _ -> None
@@ -258,7 +256,12 @@ let migrate
             let lineText = source.GetLineString(s.FieldIdRange.EndLine - 1)
 
             match
-                check.GetSymbolUseAtLocation(s.FieldIdRange.EndLine, s.FieldIdRange.EndColumn, lineText, [ s.FieldName ])
+                check.GetSymbolUseAtLocation(
+                    s.FieldIdRange.EndLine,
+                    s.FieldIdRange.EndColumn,
+                    lineText,
+                    [ s.FieldName ]
+                )
             with
             | Some symbolUse ->
                 match symbolUse.Symbol with
@@ -305,14 +308,14 @@ let migrate
 
             let classify =
                 classifierFor s.FieldName isFieldUseAt isSystemDateTimeIdent parseTree source
+
             let classified = uses |> Array.map classify
 
             if classified.Length > 0 && classified |> Array.forall Option.isSome then
                 let editSets = classified |> Array.toList |> List.collect (Option.get >> fst)
                 let sources = classified |> Array.toList |> List.collect (Option.get >> snd)
 
-                let clocks =
-                    sources |> List.filter (fun c -> c <> "neutral") |> List.distinct
+                let clocks = sources |> List.filter (fun c -> c <> "neutral") |> List.distinct
 
                 // at least one real write pins the clock; mixed clocks bail
                 if clocks.Length = 1 then

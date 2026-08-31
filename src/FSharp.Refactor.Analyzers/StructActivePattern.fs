@@ -122,9 +122,7 @@ let find
                     // spliced against the WRONG construct)
                     let ownLine =
                         decl.Range.StartColumn = 0
-                        || (source.GetLineString(decl.Range.StartLine - 1))
-                            .Substring(0, decl.Range.StartColumn)
-                            .Trim() = ""
+                        || (source.GetLineString(decl.Range.StartLine - 1)).Substring(0, decl.Range.StartColumn).Trim() = ""
 
                     if ownLine && collectResults results body && results.Count > 0 then
                         // below any XML doc, so the attribute sits against

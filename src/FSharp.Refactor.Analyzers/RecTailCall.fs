@@ -74,8 +74,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   | SynBinding(
                       attributes = []
                       isInline = false
-                      headPat = SynPat.LongIdent(
-                          longDotId = SynLongIdent(id = [ fid ]); argPats = SynArgPats.Pats pats)
+                      headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ fid ]); argPats = SynArgPats.Pats pats)
                       expr = body
                       trivia = trivia) when not pats.IsEmpty ->
                       let namePattern = identifierPattern fid.idText

@@ -92,9 +92,7 @@ let private constructionEdit (e: SynExpr) : (range * string * string) option =
 /// the pattern is anything else (a binder starts untracked dataflow).
 let rec private patternEdits (p: SynPat) : (range * string * string) list option =
     match p with
-    | SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ]); argPats = SynArgPats.Pats [ _ ]) when
-        id.idText = "Some"
-        ->
+    | SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ]); argPats = SynArgPats.Pats [ _ ]) when id.idText = "Some" ->
         Some [ id.idRange, "Some", "ValueSome" ]
     | SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ]); argPats = SynArgPats.Pats []) when id.idText = "None" ->
         Some [ id.idRange, "None", "ValueNone" ]
@@ -119,9 +117,11 @@ let private matchClauseEdits (clauses: SynMatchClause list) : (range * string * 
 [<return: Struct>]
 let inline private (|IsPipeOp|_|) input =
     if isPipeOp input then ValueSome input else ValueNone
+
 [<return: Struct>]
 let inline private (|IsEqualityOp|_|) input =
     if isEqualityOp input then ValueSome input else ValueNone
+
 /// A per-file classifier: given THAT file's parse tree and source, maps
 /// one symbol use to its edits — or None when the use falls outside the
 /// provably-rewritable shapes. Cross-file migrations build one classifier
@@ -252,7 +252,12 @@ let classifierFor
                 | None -> None
 
 /// The field's typed symbol at its defining ident.
-let private fieldSymbol (check: FSharpCheckFileResults) (source: ISourceText) (fieldIdRange: range) (fieldName: string) =
+let private fieldSymbol
+    (check: FSharpCheckFileResults)
+    (source: ISourceText)
+    (fieldIdRange: range)
+    (fieldName: string)
+    =
     let lineText = source.GetLineString(fieldIdRange.EndLine - 1)
 
     match check.GetSymbolUseAtLocation(fieldIdRange.EndLine, fieldIdRange.EndColumn, lineText, [ fieldName ]) with
@@ -325,7 +330,10 @@ let migrateProject
             let thisFile = System.IO.Path.GetFullPath(fieldIdRange.FileName).ToLowerInvariant()
 
             let classifiers =
-                System.Collections.Generic.Dictionary<string, (FSharpSymbolUse -> (range * string * string) list option) option>()
+                System.Collections.Generic.Dictionary<
+                    string,
+                    (FSharpSymbolUse -> (range * string * string) list option) option
+                 >()
 
             let classifierForFile (path: string) =
                 let key = System.IO.Path.GetFullPath(path).ToLowerInvariant()
@@ -351,5 +359,8 @@ let migrateProject
                     | Some classify -> classify u
                     | None -> None)
 
-            if classified.Length = 0 then None else collectEdits typeEdit classified
+            if classified.Length = 0 then
+                None
+            else
+                collectEdits typeEdit classified
         | _ -> None

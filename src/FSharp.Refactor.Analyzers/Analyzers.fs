@@ -194,7 +194,8 @@ let private awaitableMessages (parseTree: ParsedInput) (source: ISourceText) che
             "FR0119"
             $"'{s.MethodName}' blocks inside the computation although '{s.MethodName}Async' exists; binding the async twin keeps the thread free — and FR0118 hands it the CancellationToken on the next pass."
             s.Range
-            (s.Fixes |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+            (s.Fixes
+             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
 
 [<EditorAnalyzer("AwaitableOverload", "Use the async twin of a blocking call inside task/async", HelpBase)>]
 let awaitableEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -977,7 +978,11 @@ let private regexValidityMessages (parseTree: ParsedInput) : Message list =
             | -1 -> error
             | cut -> error.Substring(0, cut).TrimEnd()
 
-        hint "FR0122" $"This regex pattern does not compile — a guaranteed ArgumentException on first use: {firstLine}" r [])
+        hint
+            "FR0122"
+            $"This regex pattern does not compile — a guaranteed ArgumentException on first use: {firstLine}"
+            r
+            [])
 
 [<EditorAnalyzer("RegexValidity", "Literal regex patterns must compile", HelpBase)>]
 let regexValidityEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -1946,7 +1951,8 @@ let private taskifyMessages (parseTree: ParsedInput) (source: ISourceText) check
             "FR0049"
             $"'{s.Name}' drains a task synchronously at its boundary, and every caller already sits in a task/async block; it becomes a task-returning function and the callers await it."
             s.Range
-            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+            (s.Edits
+             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
 
 [<EditorAnalyzer("SyncOverAsync", "Blocking waits inside async/task expressions", HelpBase)>]
 let syncOverAsyncEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -2338,18 +2344,18 @@ let private securityRulesMessages
                 |> List.append (
                     crypto
                     |> List.map (fun s ->
-                    let message =
-                        match s.Kind with
-                        | SecurityRules.WeakKind.Hash name ->
-                            $"%s{name} is collision-broken for security purposes; use SHA-256 or stronger (for non-security checksums, note the intent)."
-                        | SecurityRules.WeakKind.Cipher name ->
-                            $"%s{name}'s key size is within practical attack range; use AES."
-                        | SecurityRules.WeakKind.CertificateBypass ->
-                            "Overriding certificate validation silently accepts any man-in-the-middle; scope trust to the specific expected certificate instead."
-                        | SecurityRules.WeakKind.Protocol name ->
-                            $"%s{name} is broken or deprecated on the wire; prefer setting nothing (the OS negotiates the strongest protocol) or Tls12+."
+                        let message =
+                            match s.Kind with
+                            | SecurityRules.WeakKind.Hash name ->
+                                $"%s{name} is collision-broken for security purposes; use SHA-256 or stronger (for non-security checksums, note the intent)."
+                            | SecurityRules.WeakKind.Cipher name ->
+                                $"%s{name}'s key size is within practical attack range; use AES."
+                            | SecurityRules.WeakKind.CertificateBypass ->
+                                "Overriding certificate validation silently accepts any man-in-the-middle; scope trust to the specific expected certificate instead."
+                            | SecurityRules.WeakKind.Protocol name ->
+                                $"%s{name} is broken or deprecated on the wire; prefer setting nothing (the OS negotiates the strongest protocol) or Tls12+."
 
-                    hint "FR0065" message s.Range [])
+                        hint "FR0065" message s.Range [])
                 )
             else
                 []
@@ -2520,7 +2526,8 @@ let private commentDocMessages (parseTree: ParsedInput) (source: ISourceText) : 
             "FR0132"
             $"this public {s.What} has no XML doc, but its trailing comment says exactly what one would; promoted to /// it reaches tooltips and generated docs."
             s.Range
-            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+            (s.Edits
+             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
 
 [<EditorAnalyzer("CommentDoc", "Trailing comments promoted to XML doc position", HelpBase)>]
 let commentDocEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -2552,7 +2559,8 @@ let private nameQuotingMessages
             "FR0133"
             $"'{s.Name}' is {s.Name.Length} characters of camel case; the double-backtick name ``{s.Quoted}`` reads as the sentence it is — renamed at its definition and every use."
             s.Range
-            (s.Edits |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+            (s.Edits
+             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
 
 [<EditorAnalyzer("NameQuoting", "Five-word names become double-backtick names", HelpBase)>]
 let nameQuotingEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -2777,8 +2785,7 @@ let private miscRulesMessages
                             s.Range
                             (match s.CultureFix with
                              | Some mk when autoInvariant ->
-                                 let r, original, replacement =
-                                     mk "InvariantCulture"
+                                 let r, original, replacement = mk "InvariantCulture"
 
                                  [ fix r original replacement ]
                              | _ -> [])
@@ -2789,7 +2796,11 @@ let private miscRulesMessages
                         let rc, oc, pc = mk "CurrentCulture"
 
                         [ note
-                          hint "FR0067" "Fix: parse with InvariantCulture (wire and config data)." s.Range [ fix ri oi pi ]
+                          hint
+                              "FR0067"
+                              "Fix: parse with InvariantCulture (wire and config data)."
+                              s.Range
+                              [ fix ri oi pi ]
                           hint
                               "FR0067"
                               "Alternative: spell out CurrentCulture — today's implicit behavior, made deliberate."
@@ -2856,7 +2867,13 @@ let private structHintsMessages
                     let migration =
                         match checkOpt with
                         | Some check when s.IsFilePrivate ->
-                            VOptionMigration.migrate parseTree source check s.FieldIdRange s.FieldName s.OptionNameRange
+                            VOptionMigration.migrate
+                                parseTree
+                                source
+                                check
+                                s.FieldIdRange
+                                s.FieldName
+                                s.OptionNameRange
                         | Some check when Visibility.apiChangesAllowed () && s.IsConfined ->
                             // a strictly INTERNAL field under --api-changes:
                             // every use in the project classified against its
@@ -2963,8 +2980,7 @@ let structHintsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     async {
         // no ProjectSources host in editors: the cross-file path degrades
         // to the note by itself
-        return
-            structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults None
+        return structHintsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults None
     }
 
 [<CliAnalyzer("StructHints", "voption fields and [<Struct>] candidates in contained types", HelpBase)>]

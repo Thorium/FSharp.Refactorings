@@ -224,8 +224,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 // return! task { <single return statement> } — the wrapper
                 // machine is a no-op; the inner statement IS the arm
                 | SynExpr.YieldOrReturnFrom(
-                    expr = SynExpr.App(
-                        funcExpr = SynExpr.Ident builder; argExpr = SynExpr.ComputationExpr(expr = inner))) when
+                    expr = SynExpr.App(funcExpr = SynExpr.Ident builder; argExpr = SynExpr.ComputationExpr(expr = inner))) when
                     (builder.idText = "task"
                      || builder.idText = "async"
                      || builder.idText = "backgroundTask")
@@ -298,7 +297,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                 | SynExpr.LetOrUse innerLou when not innerLou.IsBang ->
                                     match innerLou.Bindings, innerLou.Body with
                                     | [ SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ innerF ]))) ],
-                                      SynExpr.App(funcExpr = SynExpr.Ident innerG; argExpr = SynExpr.Const(SynConst.Unit, _)) ->
+                                      SynExpr.App(
+                                          funcExpr = SynExpr.Ident innerG; argExpr = SynExpr.Const(SynConst.Unit, _)) ->
                                         isRunTailName innerF.idText && innerG.idText = innerF.idText
                                     | _ -> false
                                 | _ -> false))

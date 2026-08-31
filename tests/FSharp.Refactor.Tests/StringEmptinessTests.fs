@@ -114,7 +114,8 @@ let ``inside query the rule stands down entirely`` () =
 
 [<Fact>]
 let ``a backticked subject cannot be respelled and is left alone`` () =
-    assertNoSuggestion "module Test\nlet f (``the value``: string) = if isNull ``the value`` || ``the value`` = \"\" then 0 else 1"
+    assertNoSuggestion
+        "module Test\nlet f (``the value``: string) = if isNull ``the value`` || ``the value`` = \"\" then 0 else 1"
 
 [<Fact>]
 let ``a file with open System gets the short spelling`` () =

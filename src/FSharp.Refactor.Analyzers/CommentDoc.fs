@@ -74,8 +74,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     // and real code must precede it on the line
                     && lineText.Substring(0, cr.StartColumn).Trim() <> ""
                 then
-                    let codeEnd =
-                        (lineText.Substring(0, cr.StartColumn)).TrimEnd().Length
+                    let codeEnd = (lineText.Substring(0, cr.StartColumn)).TrimEnd().Length
 
                     let indent =
                         String.replicate (headerLine.Length - headerLine.TrimStart().Length) " "
@@ -87,7 +86,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                             (Position.mkPos cr.StartLine cr.EndColumn)
 
                     let insertAt =
-                        Range.mkRange anchor.FileName (Position.mkPos anchor.StartLine 0) (Position.mkPos anchor.StartLine 0)
+                        Range.mkRange
+                            anchor.FileName
+                            (Position.mkPos anchor.StartLine 0)
+                            (Position.mkPos anchor.StartLine 0)
 
                     Some
                         { Range = cr
@@ -114,11 +116,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               // FS3520 misplaced-doc warning
               | SynModuleDecl.Let(
                   bindings = [ SynBinding(
-                                   xmlDoc = xd
-                                   attributes = []
-                                   accessibility = acc
-                                   headPat = pat
-                                   trivia = btrivia) ]) when
+                                   xmlDoc = xd; attributes = []; accessibility = acc; headPat = pat; trivia = btrivia) ]) when
                   xd.IsEmpty && not (Visibility.isConfined path [ acc; valueAccess pat ])
                   ->
                   // the comment sits at the end of the HEADER line — the

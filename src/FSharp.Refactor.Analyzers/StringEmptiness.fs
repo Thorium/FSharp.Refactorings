@@ -71,8 +71,7 @@ let private (|TrimOf|_|) (e: SynExpr) =
     | SynExpr.App(
         isInfix = false
         funcExpr = SynExpr.DotGet(expr = Subject s; longDotId = SynLongIdent(id = [ m ]))
-        argExpr = UnitConst) when m.idText = "Trim" ->
-        ValueSome s
+        argExpr = UnitConst) when m.idText = "Trim" -> ValueSome s
     | _ -> ValueNone
 
 [<return: Struct>]

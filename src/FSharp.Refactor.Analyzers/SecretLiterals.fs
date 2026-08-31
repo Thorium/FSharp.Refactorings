@@ -21,9 +21,7 @@ open System.Text.RegularExpressions
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 
-type Suggestion =
-    { Range: range
-      Provider: string }
+type Suggestion = { Range: range; Provider: string }
 
 let private patterns =
     [ "Anthropic", Regex(@"\bsk-ant-[A-Za-z0-9_-]{12,}", RegexOptions.Compiled)

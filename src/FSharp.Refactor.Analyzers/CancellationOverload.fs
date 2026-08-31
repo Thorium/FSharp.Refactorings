@@ -46,8 +46,7 @@ type Suggestion =
 
 let private isCancellationTokenType (t: SynType) =
     match t with
-    | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty ->
-        (List.last ids).idText = "CancellationToken"
+    | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty -> (List.last ids).idText = "CancellationToken"
     | _ -> false
 
 /// The last identifier of a member-call function expression.
@@ -234,9 +233,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
               // the enclosing binding receives a real token — the chain is
               // cut one call too early on purpose-by-accident
               match expr with
-              | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
-                  pathEndsWith "CancellationToken" "None" ids
-                  ->
+              | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when pathEndsWith "CancellationToken" "None" ids ->
                   match tokenFor expr.Range with
                   | Some token ->
                       // only as an argument: replacing a stored binding's

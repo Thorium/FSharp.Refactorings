@@ -34,7 +34,13 @@ type Suggestion =
       LogMethod: string }
 
 let private logMethods =
-    set [ "LogTrace"; "LogDebug"; "LogInformation"; "LogWarning"; "LogError"; "LogCritical" ]
+    set
+        [ "LogTrace"
+          "LogDebug"
+          "LogInformation"
+          "LogWarning"
+          "LogError"
+          "LogCritical" ]
 
 /// Placeholder names of a message template, `{{`-escapes skipped.
 let internal placeholdersOf (template: string) =

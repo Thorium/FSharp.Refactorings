@@ -137,10 +137,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                           while scanning && first > 1 do
                               let above = source.GetLineString(first - 2).Trim()
 
-                              if
-                                  above.StartsWith "///"
-                                  || (above.StartsWith "//" && mentions above name)
-                              then
+                              if above.StartsWith "///" || (above.StartsWith "//" && mentions above name) then
                                   first <- first - 1
                               else
                                   scanning <- false
@@ -178,8 +175,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       // membership judged on the BINDING text: a companion
                       // comment naming a sibling should not keep it in
                       let referencesGroup =
-                          names
-                          |> List.exists (fun other -> other <> name && mentions bindingText other)
+                          names |> List.exists (fun other -> other <> name && mentions bindingText other)
 
                       // its own name beyond the header means self-recursion:
                       // the member still leaves, but as its own `let rec` —

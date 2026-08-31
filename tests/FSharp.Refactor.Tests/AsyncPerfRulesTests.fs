@@ -849,8 +849,7 @@ let ``CancellationToken None is replaced by the in-scope token`` () =
 [<Fact>]
 let ``no token in scope means no suggestion`` () =
     Assert.Empty(
-        cancellationIn
-            "open System.Threading.Tasks\nlet pause () = task {\n    do! Task.Delay(100)\n    return 1\n}"
+        cancellationIn "open System.Threading.Tasks\nlet pause () = task {\n    do! Task.Delay(100)\n    return 1\n}"
     )
 
 [<Fact>]
@@ -888,8 +887,7 @@ let ``a NAMED argument defeats arity counting and vetoes the append`` () =
 [<Fact>]
 let ``a method with no token overload is left alone`` () =
     Assert.Empty(
-        cancellationIn
-            "open System.Threading\nlet check (ct: CancellationToken) (s: string) = s.Contains(\"x\")"
+        cancellationIn "open System.Threading\nlet check (ct: CancellationToken) (s: string) = s.Contains(\"x\")"
     )
 
 [<Fact>]
@@ -962,9 +960,7 @@ let ``inside a lambda within the task nothing fires`` () =
 
 [<Fact>]
 let ``a method with no async twin is left alone`` () =
-    Assert.Empty(
-        awaitableIn "let f (s: string) = task {\n    let u = s.ToUpperInvariant()\n    return u\n}"
-    )
+    Assert.Empty(awaitableIn "let f (s: string) = task {\n    let u = s.ToUpperInvariant()\n    return u\n}")
 
 [<Fact>]
 let ``FR0119 a local function inside the task is a plain function`` () =
@@ -1079,9 +1075,12 @@ let ``an internal boundary drain taskifies across files under api-changes`` () =
     let sourceA =
         "module A\nlet internal fetch (x: int) =\n    let t = System.Threading.Tasks.Task.FromResult x\n    t.GetAwaiter().GetResult()"
 
-    let sourceB = "module B\nlet consume () = task {\n    let s = A.fetch 1\n    return s\n}"
+    let sourceB =
+        "module B\nlet consume () = task {\n    let s = A.fetch 1\n    return s\n}"
 
-    let treeA, sourceTextA, checkA, projectResults, _, _, recheck = parseAndCheckPair sourceA sourceB
+    let treeA, sourceTextA, checkA, projectResults, _, _, recheck =
+        parseAndCheckPair sourceA sourceB
+
     System.Environment.SetEnvironmentVariable("FSREF_API_CHANGES", "1")
 
     try
@@ -1113,7 +1112,10 @@ let ``an internal drain without api-changes stays a note`` () =
     let sourceA =
         "module A\nlet internal fetch2 (x: int) =\n    let t = System.Threading.Tasks.Task.FromResult x\n    t.GetAwaiter().GetResult()"
 
-    let sourceB = "module B\nlet consume () = task {\n    let s = A.fetch2 1\n    return s\n}"
+    let sourceB =
+        "module B\nlet consume () = task {\n    let s = A.fetch2 1\n    return s\n}"
 
-    let treeA, sourceTextA, checkA, projectResults, _, _, _ = parseAndCheckPair sourceA sourceB
+    let treeA, sourceTextA, checkA, projectResults, _, _, _ =
+        parseAndCheckPair sourceA sourceB
+
     Assert.Empty(Taskify.find treeA sourceTextA checkA (Some projectResults))

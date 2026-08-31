@@ -86,10 +86,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       let todayAt = names |> List.tryFindIndex ((=) "Today")
 
                       match todayAt with
-                      | Some i when
-                          i > 0
-                          && entityOf check source (List.item i ids) = "System.DateTime"
-                          ->
+                      | Some i when i > 0 && entityOf check source (List.item i ids) = "System.DateTime" ->
                           { Range = expr.Range
                             Kind = WallClockKind.UtcDateCut(String.concat "." names)
                             FixRange = None }

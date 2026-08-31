@@ -107,61 +107,65 @@ let classifierFor
         |> Array.tryHead
 
     fun (u: FSharpSymbolUse) ->
-                let key = u.Range.StartLine, u.Range.StartColumn
+        let key = u.Range.StartLine, u.Range.StartColumn
 
-                match constructionRhs.TryGetValue key with
-                | true, Some rhs -> tupleExprEdits source rhs
-                | true, None -> None
-                | _ ->
-                    match patternInner.TryGetValue key with
-                    | true, inner -> tuplePatEdits source inner
+        match constructionRhs.TryGetValue key with
+        | true, Some rhs -> tupleExprEdits source rhs
+        | true, None -> None
+        | _ ->
+            match patternInner.TryGetValue key with
+            | true, inner -> tuplePatEdits source inner
+            | _ ->
+                match nodeAt u.Range with
+                | None -> None
+                | Some(path, access) ->
+                    match path with
+                    // match p.A with | (x, y) -> ..
+                    | SyntaxNode.SynExpr(SynExpr.Match(expr = scrutinee; clauses = clauses)) :: _
+                    | SyntaxNode.SynExpr(SynExpr.Paren _) :: SyntaxNode.SynExpr(SynExpr.Match(
+                        expr = scrutinee; clauses = clauses)) :: _ when
+                        Range.rangeContainsRange scrutinee.Range access.Range
+                        ->
+                        matchClauseEdits source clauses
+                    // p.A = (3, 4) / (3, 4) <> p.A — the literal side
+                    // migrates with the field
+                    | SyntaxNode.SynExpr(SynExpr.App(funcExpr = opE; argExpr = lhs) as partial) :: rest when
+                        isEqualityOp opE && Range.equals lhs.Range access.Range
+                        ->
+                        // our side is the LHS; the full comparison is
+                        // one level up, carrying the RHS
+                        (match rest with
+                         | SyntaxNode.SynExpr(SynExpr.App(funcExpr = f; argExpr = rhs)) :: _ when
+                             Range.equals f.Range partial.Range
+                             ->
+                             tupleExprEdits source rhs
+                         | _ -> None)
+                    | SyntaxNode.SynExpr(SynExpr.App(funcExpr = SynExpr.App(funcExpr = opE; argExpr = lhs))) :: _ when
+                        isEqualityOp opE && Range.rangeContainsRange lhs.Range access.Range |> not
+                        ->
+                        // our side is the RHS; the literal is the LHS
+                        tupleExprEdits source lhs
                     | _ ->
-                        match nodeAt u.Range with
-                        | None -> None
-                        | Some(path, access) ->
-                            match path with
-                            // match p.A with | (x, y) -> ..
-                            | SyntaxNode.SynExpr(SynExpr.Match(expr = scrutinee; clauses = clauses)) :: _
-                            | SyntaxNode.SynExpr(SynExpr.Paren _) :: SyntaxNode.SynExpr(SynExpr.Match(
-                                expr = scrutinee; clauses = clauses)) :: _ when
-                                Range.rangeContainsRange scrutinee.Range access.Range
+                        // `let (x, y) = p.A` — the enclosing binding
+                        // destructures the read directly
+                        path
+                        |> List.tryPick (fun node ->
+                            match node with
+                            | SyntaxNode.SynBinding(SynBinding(headPat = hp; expr = rhs)) when
+                                Range.rangeContainsRange rhs.Range access.Range
+                                && Range.equals (stripParens rhs).Range (stripParens access).Range
                                 ->
-                                matchClauseEdits source clauses
-                            // p.A = (3, 4) / (3, 4) <> p.A — the literal side
-                            // migrates with the field
-                            | SyntaxNode.SynExpr(SynExpr.App(funcExpr = opE; argExpr = lhs) as partial) :: rest when
-                                isEqualityOp opE && Range.equals lhs.Range access.Range
-                                ->
-                                // our side is the LHS; the full comparison is
-                                // one level up, carrying the RHS
-                                (match rest with
-                                 | SyntaxNode.SynExpr(SynExpr.App(funcExpr = f; argExpr = rhs)) :: _ when
-                                     Range.equals f.Range partial.Range
-                                     ->
-                                     tupleExprEdits source rhs
-                                 | _ -> None)
-                            | SyntaxNode.SynExpr(SynExpr.App(
-                                funcExpr = SynExpr.App(funcExpr = opE; argExpr = lhs))) :: _ when
-                                isEqualityOp opE && Range.rangeContainsRange lhs.Range access.Range |> not
-                                ->
-                                // our side is the RHS; the literal is the LHS
-                                tupleExprEdits source lhs
-                            | _ ->
-                                // `let (x, y) = p.A` — the enclosing binding
-                                // destructures the read directly
-                                path
-                                |> List.tryPick (fun node ->
-                                    match node with
-                                    | SyntaxNode.SynBinding(SynBinding(headPat = hp; expr = rhs)) when
-                                        Range.rangeContainsRange rhs.Range access.Range
-                                        && Range.equals (stripParens rhs).Range (stripParens access).Range
-                                        ->
-                                        Some hp
-                                    | _ -> None)
-                                |> Option.bind (tuplePatEdits source)
+                                Some hp
+                            | _ -> None)
+                        |> Option.bind (tuplePatEdits source)
 
 /// The field's typed symbol at its defining ident.
-let private fieldSymbol (check: FSharpCheckFileResults) (source: ISourceText) (fieldIdRange: range) (fieldName: string) =
+let private fieldSymbol
+    (check: FSharpCheckFileResults)
+    (source: ISourceText)
+    (fieldIdRange: range)
+    (fieldName: string)
+    =
     let lineText = source.GetLineString(fieldIdRange.EndLine - 1)
 
     match check.GetSymbolUseAtLocation(fieldIdRange.EndLine, fieldIdRange.EndColumn, lineText, [ fieldName ]) with
@@ -233,7 +237,10 @@ let migrateProject
             let thisFile = System.IO.Path.GetFullPath(fieldIdRange.FileName).ToLowerInvariant()
 
             let classifiers =
-                System.Collections.Generic.Dictionary<string, (FSharpSymbolUse -> (range * string * string) list option) option>()
+                System.Collections.Generic.Dictionary<
+                    string,
+                    (FSharpSymbolUse -> (range * string * string) list option) option
+                 >()
 
             let classifierForFile (path: string) =
                 let key = System.IO.Path.GetFullPath(path).ToLowerInvariant()

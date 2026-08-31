@@ -548,9 +548,7 @@ let private isProvablyNotFloat (check: FSharpCheckFileResults) (source: ISourceT
         | SynConst.Double _
         | SynConst.Single _ -> false
         | _ -> true
-    | _ ->
-        (resolvedOperandType check source e)
-        |> ValueOption.exists notFloatType
+    | _ -> (resolvedOperandType check source e) |> ValueOption.exists notFloatType
 
 /// Find all expressions matched by a rule. `extraRules` come from the
 /// repository configuration; results are cached per distinct rule list.

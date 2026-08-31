@@ -41,9 +41,7 @@ let ``snd fuses on List`` () =
 
 [<Fact>]
 let ``a leading map id disappears entirely`` () =
-    assertPatched
-        "module Test\nlet f g xs = xs |> Seq.map id |> Seq.map g"
-        "module Test\nlet f g xs = xs |> Seq.map g"
+    assertPatched "module Test\nlet f g xs = xs |> Seq.map id |> Seq.map g" "module Test\nlet f g xs = xs |> Seq.map g"
 
 [<Fact>]
 let ``multi-line pipeline stages fuse onto one line`` () =

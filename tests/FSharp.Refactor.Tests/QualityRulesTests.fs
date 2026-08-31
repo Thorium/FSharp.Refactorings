@@ -862,9 +862,7 @@ let ``Now under a calendar read gets no rewrite: it would create the date-cut bu
 
 [<Fact>]
 let ``a user type named DateTime is not the BCL clock`` () =
-    Assert.Empty(
-        wallClocksIn "module M\ntype DateTime = { Now: int }\nlet fake (d: DateTime) = d.Now"
-    )
+    Assert.Empty(wallClocksIn "module M\ntype DateTime = { Now: int }\nlet fake (d: DateTime) = d.Now")
 
 // ---- FR0122 RegexValidity ----
 
@@ -874,13 +872,17 @@ let private invalidPatternsIn (source: string) =
 
 [<Fact>]
 let ``an unclosed group is a guaranteed runtime exception`` () =
-    match invalidPatternsIn "module M\nlet f (s: string) = System.Text.RegularExpressions.Regex.IsMatch(s, \"(unclosed\")" with
+    match
+        invalidPatternsIn "module M\nlet f (s: string) = System.Text.RegularExpressions.Regex.IsMatch(s, \"(unclosed\")"
+    with
     | [ (_, pattern, _) ] -> Assert.Equal("(unclosed", pattern)
     | other -> failwithf "Expected one invalid pattern, got %A" other
 
 [<Fact>]
 let ``a valid pattern stays quiet`` () =
-    Assert.Empty(invalidPatternsIn "module M\nlet f (s: string) = System.Text.RegularExpressions.Regex.IsMatch(s, @\"\d+\")")
+    Assert.Empty(
+        invalidPatternsIn "module M\nlet f (s: string) = System.Text.RegularExpressions.Regex.IsMatch(s, @\"\d+\")"
+    )
 
 [<Fact>]
 let ``an invalid ctor pattern is caught too`` () =
@@ -891,8 +893,7 @@ let ``an invalid ctor pattern is caught too`` () =
 [<Fact>]
 let ``a dynamic pattern is out of reach and stays quiet`` () =
     Assert.Empty(
-        invalidPatternsIn
-            "module M\nlet f (s: string) (p: string) = System.Text.RegularExpressions.Regex.IsMatch(s, p)"
+        invalidPatternsIn "module M\nlet f (s: string) (p: string) = System.Text.RegularExpressions.Regex.IsMatch(s, p)"
     )
 
 // ---- FR0123 MonitorLock ----
@@ -1147,8 +1148,7 @@ let ``plain unicode text is not flagged`` () =
 [<Fact>]
 let ``an interpolated Process Start command is the injection sink`` () =
     let _, _, sinks =
-        securityIn
-            "module Test\nlet run (userInput: string) = System.Diagnostics.Process.Start($\"tool {userInput}\")"
+        securityIn "module Test\nlet run (userInput: string) = System.Diagnostics.Process.Start($\"tool {userInput}\")"
 
     match sinks with
     | [ s ] -> Assert.Equal("Process.Start", s.Sink)
@@ -1157,8 +1157,7 @@ let ``an interpolated Process Start command is the injection sink`` () =
 [<Fact>]
 let ``a fixed command with dynamic arguments still flags the ctor`` () =
     let _, _, sinks =
-        securityIn
-            "module Test\nlet run (v: string) = new System.Diagnostics.ProcessStartInfo(\"git\", \"clone \" + v)"
+        securityIn "module Test\nlet run (v: string) = new System.Diagnostics.ProcessStartInfo(\"git\", \"clone \" + v)"
 
     match sinks with
     | [ s ] -> Assert.Equal("ProcessStartInfo", s.Sink)
@@ -1228,7 +1227,8 @@ let private obsoleteCryptoIn (source: string) =
 
 [<Fact>]
 let ``an obsolete Managed constructor becomes the static factory`` () =
-    let source = "module M\nlet hash () = new System.Security.Cryptography.SHA256Managed()"
+    let source =
+        "module M\nlet hash () = new System.Security.Cryptography.SHA256Managed()"
 
     match obsoleteCryptoIn source with
     | [ s ] ->
@@ -1239,7 +1239,8 @@ let ``an obsolete Managed constructor becomes the static factory`` () =
 
 [<Fact>]
 let ``RNGCryptoServiceProvider maps to RandomNumberGenerator`` () =
-    let source = "module M\nopen System.Security.Cryptography\nlet rng () = new RNGCryptoServiceProvider()"
+    let source =
+        "module M\nopen System.Security.Cryptography\nlet rng () = new RNGCryptoServiceProvider()"
 
     match obsoleteCryptoIn source with
     | [ s ] ->
@@ -1260,8 +1261,7 @@ let ``an obsolete name mentioned in a type position vetoes the rewrite`` () =
     // SHA256.Create() returns the BASE type — an explicit SHA256Managed
     // annotation (or `:?` test / typeof<>) would break or change meaning
     Assert.Empty(
-        obsoleteCryptoIn
-            "module M\nopen System.Security.Cryptography\nlet h: SHA256Managed = new SHA256Managed()"
+        obsoleteCryptoIn "module M\nopen System.Security.Cryptography\nlet h: SHA256Managed = new SHA256Managed()"
     )
 
 [<Fact>]
@@ -1287,7 +1287,10 @@ let ``a guard that only tests the binder becomes the literal pattern`` () =
     match guardEqualsIn source with
     | [ s1; s2 ] ->
         Assert.Equal("\"A\"", s1.LiteralText)
-        let patched = applyEdit (applyEdit source s2.Range s2.LiteralText) s1.Range s1.LiteralText
+
+        let patched =
+            applyEdit (applyEdit source s2.Range s2.LiteralText) s1.Range s1.LiteralText
+
         Assert.Contains("| \"A\" -> 1", patched)
         Assert.Contains("| \"B\" -> 2", patched)
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
@@ -1295,7 +1298,8 @@ let ``a guard that only tests the binder becomes the literal pattern`` () =
 
 [<Fact>]
 let ``function-style matching gets the same rewrite`` () =
-    let source = "module M\nlet f = function\n    | x when x = 42 -> \"yes\"\n    | _ -> \"no\""
+    let source =
+        "module M\nlet f = function\n    | x when x = 42 -> \"yes\"\n    | _ -> \"no\""
 
     match guardEqualsIn source with
     | [ s ] ->
@@ -1321,7 +1325,9 @@ let ``a compound guard is more than the literal`` () =
 
 [<Fact>]
 let ``a decimal literal is not spellable in the pattern language`` () =
-    Assert.Empty(guardEqualsIn "module M\nlet f (a: decimal) =\n    match a with\n    | x when x = 1.5m -> 1\n    | _ -> 3")
+    Assert.Empty(
+        guardEqualsIn "module M\nlet f (a: decimal) =\n    match a with\n    | x when x = 1.5m -> 1\n    | _ -> 3"
+    )
 
 [<Fact>]
 let ``a guard against a VARIABLE cannot become a pattern`` () =
@@ -1338,7 +1344,8 @@ let private literalsIn (source: string) =
 
 [<Fact>]
 let ``a private constant string gains the Literal attribute`` () =
-    let source = "module M\nlet private Greeting = \"hello world\"\nlet show () = Greeting"
+    let source =
+        "module M\nlet private Greeting = \"hello world\"\nlet show () = Greeting"
 
     match literalsIn source with
     | [ s ] ->
@@ -1368,7 +1375,9 @@ let ``a name also used as a match binder must not become a constant pattern`` ()
 
 [<Fact>]
 let ``a name also bound by a local let must not become a partial match`` () =
-    Assert.Empty(literalsIn "module M\nlet private greeting = \"hello\"\nlet f (s: string) =\n    let greeting = s\n    greeting")
+    Assert.Empty(
+        literalsIn "module M\nlet private greeting = \"hello\"\nlet f (s: string) =\n    let greeting = s\n    greeting"
+    )
 
 // ---- FR0110 / FR0117 over function-style matching ----
 
@@ -1453,7 +1462,8 @@ let ``a piped self-call is a tail call`` () =
 [<Fact>]
 let ``a cons around the self-call is not a tail call`` () =
     Assert.Empty(
-        tailCallsIn "module M\nlet rec twice (xs: int list) =\n    match xs with\n    | [] -> []\n    | h :: t -> h :: h :: twice t"
+        tailCallsIn
+            "module M\nlet rec twice (xs: int list) =\n    match xs with\n    | [] -> []\n    | h :: t -> h :: h :: twice t"
     )
 
 [<Fact>]
@@ -1481,9 +1491,7 @@ let ``mutual and-groups stay untouched`` () =
 let ``an unverifiable call shape is left alone`` () =
     // `(k (n - 1)) x` — the parenthesised head hides the spine, so the
     // conservative catch-all vetoes rather than guesses
-    Assert.Empty(
-        tailCallsIn "module M\nlet rec k (n: int) (x: int) : int =\n    if n <= 0 then x else (k (n - 1)) x"
-    )
+    Assert.Empty(tailCallsIn "module M\nlet rec k (n: int) (x: int) : int =\n    if n <= 0 then x else (k (n - 1)) x")
 
 // ---- cross-file migrations (internal visibility, --api-changes class) ----
 
@@ -1495,14 +1503,22 @@ let ``an internal option field migrates across files`` () =
     let sourceB =
         "module B\nlet internal clear (r: A.Row) = { r with Seen = None }\nlet internal describe (r: A.Row) =\n    match r.Seen with\n    | Some d -> string d\n    | None -> \"never\""
 
-    let treeA, sourceTextA, checkA, projectResults, pathA, _, recheck = parseAndCheckPair sourceA sourceB
+    let treeA, sourceTextA, checkA, projectResults, pathA, _, recheck =
+        parseAndCheckPair sourceA sourceB
 
     let voptions, _, _ = StructHints.find true treeA sourceTextA
 
     match voptions with
     | [ s ] ->
         match
-            VOptionMigration.migrateProject treeA sourceTextA checkA projectResults s.FieldIdRange s.FieldName s.OptionNameRange
+            VOptionMigration.migrateProject
+                treeA
+                sourceTextA
+                checkA
+                projectResults
+                s.FieldIdRange
+                s.FieldName
+                s.OptionNameRange
         with
         | Some edits ->
             // edits span both files
@@ -1539,7 +1555,8 @@ let ``a sibling use outside the shapes vetoes the cross-file migration`` () =
     // `let s = r.Seen` in the OTHER file starts dataflow the scan cannot follow
     let sourceB = "module B\nlet internal stash (r: A.Row) =\n    let s = r.Seen\n    s"
 
-    let treeA, sourceTextA, checkA, projectResults, _, _, _ = parseAndCheckPair sourceA sourceB
+    let treeA, sourceTextA, checkA, projectResults, _, _, _ =
+        parseAndCheckPair sourceA sourceB
 
     let voptions, _, _ = StructHints.find true treeA sourceTextA
 
@@ -1547,7 +1564,14 @@ let ``a sibling use outside the shapes vetoes the cross-file migration`` () =
     | [ s ] ->
         Assert.Equal(
             None,
-            VOptionMigration.migrateProject treeA sourceTextA checkA projectResults s.FieldIdRange s.FieldName s.OptionNameRange
+            VOptionMigration.migrateProject
+                treeA
+                sourceTextA
+                checkA
+                projectResults
+                s.FieldIdRange
+                s.FieldName
+                s.OptionNameRange
         )
     | other -> failwithf "Expected one voption suggestion, got %A" other
 
@@ -1571,7 +1595,8 @@ let ``a trailing comment on a public binding becomes its XML doc`` () =
 
 [<Fact>]
 let ``a union case's trailing comment docs the case`` () =
-    let source = "module M\ntype Money =\n    | Rate of float // interest and rate\n    | Amount of int"
+    let source =
+        "module M\ntype Money =\n    | Rate of float // interest and rate\n    | Amount of int"
 
     match commentDocIn source with
     | [ s ] ->
@@ -1643,18 +1668,19 @@ let ``a test-attributed public name renames when the project proves it local`` (
 
     let sourceB = "module B\nlet unrelated = 1"
 
-    let treeA, sourceTextA, checkA, projectResults, _, _, _ = parseAndCheckPair sourceA sourceB
+    let treeA, sourceTextA, checkA, projectResults, _, _, _ =
+        parseAndCheckPair sourceA sourceB
 
     match NameQuoting.find false treeA sourceTextA checkA (Some projectResults) with
-    | [ s ] ->
-        Assert.Equal("check that rates round correctly", s.Quoted)
+    | [ s ] -> Assert.Equal("check that rates round correctly", s.Quoted)
     | other -> failwithf "Expected one test-name quoting, got %A" other
 
 [<Fact>]
 let ``without the locals opt-in only test names rewrite`` () =
     // default configuration: private five-word names stay put
     let tree, sourceText, checkResults =
-        parseAndCheck "module M\nlet private thisIsMyVeryComplexHelper (x: int) = x\nlet go () = thisIsMyVeryComplexHelper 2"
+        parseAndCheck
+            "module M\nlet private thisIsMyVeryComplexHelper (x: int) = x\nlet go () = thisIsMyVeryComplexHelper 2"
 
     Assert.Empty(NameQuoting.find false tree sourceText checkResults None)
 
@@ -1666,7 +1692,8 @@ let private duNamesIn (source: string) =
 
 [<Fact>]
 let ``an XAndY case name names its own fields`` () =
-    let source = "module M\ntype private Pricing =\n    | InterestAndRate of float * float\n    | Empty"
+    let source =
+        "module M\ntype private Pricing =\n    | InterestAndRate of float * float\n    | Empty"
 
     match duNamesIn source with
     | [ s ] ->
@@ -1678,7 +1705,8 @@ let ``an XAndY case name names its own fields`` () =
 
 [<Fact>]
 let ``a clear trailing comment names the fields`` () =
-    let source = "module M\ntype private Pricing =\n    | Pair of float * float // interest and rate\n    | Empty"
+    let source =
+        "module M\ntype private Pricing =\n    | Pair of float * float // interest and rate\n    | Empty"
 
     match duNamesIn source with
     | [ s ] ->
@@ -1690,7 +1718,8 @@ let ``a clear trailing comment names the fields`` () =
 
 [<Fact>]
 let ``a star-separated comment works too`` () =
-    let source = "module M\ntype private Pricing =\n    | Pair of float * float // interest * rate\n    | Empty"
+    let source =
+        "module M\ntype private Pricing =\n    | Pair of float * float // interest * rate\n    | Empty"
 
     match duNamesIn source with
     | [ s ] -> Assert.Equal<string list>([ "interest"; "rate" ], s.Names)
@@ -1818,7 +1847,9 @@ let ``a public field is never confined, even under api-changes`` () =
 
 [<Fact>]
 let ``an internal field is confined but not file-private`` () =
-    let tree, sourceText = parse "module M\ntype internal Row = { Seen: System.DateTime option }"
+    let tree, sourceText =
+        parse "module M\ntype internal Row = { Seen: System.DateTime option }"
+
     let voptions, _, _ = StructHints.find true tree sourceText
 
     match voptions with
@@ -1962,7 +1993,8 @@ let ``a repeatedly assigned public mutable keeps the note`` () =
 
 [<Fact>]
 let ``the culture fix grows the parenthesised argument list`` () =
-    let _, parses, _ = miscIn "module Test\nlet f (s: string) = System.DateTime.Parse(s)"
+    let _, parses, _ =
+        miscIn "module Test\nlet f (s: string) = System.DateTime.Parse(s)"
 
     match parses with
     | [ p ] ->
@@ -1994,14 +2026,19 @@ let ``the culture fix wraps a juxtaposed argument`` () =
 
 [<Fact>]
 let ``the weak protocol constant swaps to Tls12`` () =
-    let tree, sourceText = parse "module Test\nopen System.Net\nlet setup () =\n    ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls11"
+    let tree, sourceText =
+        parse
+            "module Test\nopen System.Net\nlet setup () =\n    ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls11"
+
     let crypto, _, _ = SecurityRules.find tree sourceText
 
     match crypto with
     | [ s ] ->
         match s.AlgoRange with
         | Some r ->
-            let source = "module Test\nopen System.Net\nlet setup () =\n    ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls11"
+            let source =
+                "module Test\nopen System.Net\nlet setup () =\n    ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls11"
+
             let patched = applyEdit source r "Tls12"
             Assert.Contains("SecurityProtocolType.Tls12", patched)
             Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
@@ -2010,7 +2047,9 @@ let ``the weak protocol constant swaps to Tls12`` () =
 
 [<Fact>]
 let ``an existing Globalization open keeps the culture spelling short`` () =
-    let source = "module Test\nopen System.Globalization\nlet f (s: string) = System.DateTime.Parse(s)"
+    let source =
+        "module Test\nopen System.Globalization\nlet f (s: string) = System.DateTime.Parse(s)"
+
     let _, parses, _ = miscIn source
 
     match parses with
@@ -2180,7 +2219,10 @@ let ``a return-bang around a single-return task is a no-op machine`` () =
     let source =
         "module M\nlet f (t: System.Threading.Tasks.Task<int>) =\n    task {\n        return! task {\n            return! t\n        }\n    }"
 
-    match ceStripIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ReturnBangIdentity) with
+    match
+        ceStripIn source
+        |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ReturnBangIdentity)
+    with
     | [ s ] ->
         let patched = applyEdit source s.Range s.ReplacementText
         Assert.Contains("return! t", patched)
@@ -2195,7 +2237,8 @@ let ``nested no-op machines unwind layer by layer`` () =
         "module M\nlet f (t: System.Threading.Tasks.Task<int>) =\n    task {\n        return! task {\n            return! task {\n                return! t\n            }\n        }\n    }"
 
     let strips =
-        ceStripIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ReturnBangIdentity)
+        ceStripIn source
+        |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ReturnBangIdentity)
 
     Assert.True(strips.Length >= 1)
 

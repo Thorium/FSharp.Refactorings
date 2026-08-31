@@ -27,10 +27,12 @@ type WeakKind =
     | Protocol of name: string
 
 type WeakCryptoSuggestion =
-    { Range: range
-      Kind: WeakKind
-      /// The algorithm identifier itself, when a swap fix can target it.
-      AlgoRange: range option }
+    {
+        Range: range
+        Kind: WeakKind
+        /// The algorithm identifier itself, when a swap fix can target it.
+        AlgoRange: range option
+    }
 
 /// A dynamically built string reaching a process-execution sink — the
 /// command-injection shape SonarQube's agentic-workflow rules target,
@@ -196,10 +198,7 @@ let find
                       AlgoRange = None }
             // psi.Arguments <- dynamic: the argument-injection sink;
             // FileName is any DTO's field and stays out
-            | "Arguments" when isDynamicString rhs ->
-                processSinks.Add
-                    { Range = e.Range
-                      Sink = "Arguments" }
+            | "Arguments" when isDynamicString rhs -> processSinks.Add { Range = e.Range; Sink = "Arguments" }
             | _ -> ()
         | SynExpr.DotSet(_, SynLongIdent(id = ids), rhs, _) when not ids.IsEmpty ->
             match (List.last ids).idText with
@@ -213,10 +212,7 @@ let find
                     { Range = e.Range
                       Kind = WeakKind.CertificateBypass
                       AlgoRange = None }
-            | "Arguments" when isDynamicString rhs ->
-                processSinks.Add
-                    { Range = e.Range
-                      Sink = "Arguments" }
+            | "Arguments" when isDynamicString rhs -> processSinks.Add { Range = e.Range; Sink = "Arguments" }
             | _ -> ()
         // Process.Start with a dynamically built command — the
         // command-injection sink; distinctive by name, so no typed gate

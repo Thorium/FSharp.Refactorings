@@ -42,10 +42,10 @@ let private collectionModules = set [ "Array"; "List"; "Seq" ]
 [<return: Struct>]
 let private (|MapStage|_|) (e: SynExpr) =
     match e with
-    | SynExpr.App(
-        isInfix = false
-        funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))
-        argExpr = arg) when f.idText = "map" && collectionModules.Contains m.idText -> ValueSome(m.idText, arg)
+    | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ])); argExpr = arg) when
+        f.idText = "map" && collectionModules.Contains m.idText
+        ->
+        ValueSome(m.idText, arg)
     | _ -> ValueNone
 
 /// A bare `fst`/`snd`/`id`, with or without parentheses — pure and total,
