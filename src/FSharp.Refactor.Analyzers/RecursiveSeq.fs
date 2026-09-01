@@ -117,7 +117,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 |> Array.toList
                 |> List.collect (fun (_, e) ->
                     match e with
-                    | SynExpr.LetOrUse lou when lou.IsRecursive && not lou.IsBang -> fromBindings true lou.Bindings
+                    | LetOrUseE lou when lou.IsRecursive && not lou.IsBang -> fromBindings true lou.Bindings
                     | _ -> [])
 
             // members are implicitly recursive — there is no `rec` keyword to

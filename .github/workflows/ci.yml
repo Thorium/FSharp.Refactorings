@@ -15,7 +15,11 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          # exact pin: dotnet-fsharplint crashed (exit 255, its unhandled-
+          # exception path) on a runner-picked newer SDK that no local
+          # environment could reproduce; 10.0.302 is validated on Windows,
+          # WSL and an isolated Linux install
+          dotnet-version: 10.0.302
 
       - name: Restore tools
         run: dotnet tool restore
@@ -63,7 +67,11 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          # exact pin: dotnet-fsharplint crashed (exit 255, its unhandled-
+          # exception path) on a runner-picked newer SDK that no local
+          # environment could reproduce; 10.0.302 is validated on Windows,
+          # WSL and an isolated Linux install
+          dotnet-version: 10.0.302
 
       - name: Pack
         run: |
@@ -76,3 +84,89 @@ jobs:
           --api-key ${{ secrets.NUGET_API_KEY }}
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
+
+  # the classic Visual Studio extension: net48/WPF, so Windows-only —
+  # deliberately outside FSharp.Refactor.slnx (the build job is Linux)
+  vsix:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Build VSIX
+        run: powershell -NoProfile -File src/FSharp.Refactor.Vsix/CreateVsix.ps1
+
+      - name: Validate package opens as OPC
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName WindowsBase
+          $p = [System.IO.Packaging.Package]::Open('src/FSharp.Refactor.Vsix/artifacts/FSharp.Refactor.vsix', 'Open', 'Read')
+          $p.GetParts() | ForEach-Object { $_.Uri.ToString() }
+          $p.Close()
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: src/FSharp.Refactor.Vsix/artifacts/FSharp.Refactor.vsix
+
+      # Marketplace publish on version tags, once the VS_MARKETPLACE_PAT
+      # secret exists (an Azure DevOps PAT with Marketplace -> Manage
+      # scope for the publisher in publishManifest.json)
+      - name: Publish to VS Marketplace
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          PAT: ${{ secrets.VS_MARKETPLACE_PAT }}
+        run: |
+          if (-not $env:PAT) { Write-Host 'VS_MARKETPLACE_PAT not set; skipping marketplace publish'; exit 0 }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -property installationPath
+          $vsixPublisher = Join-Path $vsPath 'VSSDK\VisualStudioIntegration\Tools\Bin\VsixPublisher.exe'
+          & $vsixPublisher publish -payload src/FSharp.Refactor.Vsix/artifacts/FSharp.Refactor.vsix -publishManifest src/FSharp.Refactor.Vsix/publishManifest.json -personalAccessToken $env:PAT
+
+  # the VS Code companion extension: bundles both analyzer SDK builds and
+  # wires Ionide's FSharp.analyzersPath (with consent) on activation
+  vscode-ext:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build VS Code extension
+        shell: pwsh
+        run: pwsh -File src/FSharp.Refactor.VsCode/CreateVsCodeVsix.ps1
+
+      - name: Upload VS Code extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: src/FSharp.Refactor.VsCode/artifacts/*.vsix
+
+      # Marketplace publish on version tags, once the VSCE_PAT secret
+      # exists (an Azure DevOps PAT with Marketplace -> Manage scope for
+      # the VS Code publisher in package.json)
+      - name: Publish to VS Code Marketplace
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        working-directory: src/FSharp.Refactor.VsCode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if (-not $env:VSCE_PAT) { Write-Host 'VSCE_PAT not set; skipping marketplace publish'; exit 0 }
+          npx vsce publish --packagePath (Get-ChildItem artifacts/*.vsix | Select-Object -First 1 -ExpandProperty FullName)

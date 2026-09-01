@@ -90,10 +90,10 @@ let findWhileBang (parseTree: ParsedInput) (source: ISourceText) : Suggestion li
 
     [ for _, expr in index.Exprs do
           match expr with
-          | SynExpr.LetOrUse louBang when louBang.IsBang && not louBang.IsUse ->
+          | LetOrUseE louBang when louBang.IsBang && not louBang.IsUse ->
               match louBang.Bindings, louBang.Body with
               | [ SynBinding(headPat = SynPat.Named(ident = SynIdent(ident = first)); expr = comp0) as bang0 ],
-                SynExpr.LetOrUse louMut when not (louMut.IsBang || louMut.IsUse) && isSingleLine comp0.Range ->
+                LetOrUseE louMut when not (louMut.IsBang || louMut.IsUse) && isSingleLine comp0.Range ->
                   match louMut.Bindings, louMut.Body with
                   | [ SynBinding(
                           isMutable = true
@@ -105,7 +105,7 @@ let findWhileBang (parseTree: ParsedInput) (source: ISourceText) : Suggestion li
                       // the loop body's LAST statement must re-bind the same
                       // computation into the condition
                       match List.rev (sequentialChainLoop [] loopBody) with
-                      | SynExpr.LetOrUse rebind :: keptRev when rebind.IsBang && not rebind.IsUse ->
+                      | LetOrUseE rebind :: keptRev when rebind.IsBang && not rebind.IsUse ->
                           match rebind.Bindings, rebind.Body with
                           | [ SynBinding(headPat = SynPat.Named(ident = SynIdent(ident = next)); expr = compN) as bangN ],
                             SynExpr.LongIdentSet(SynLongIdent(id = [ setTarget ]), SynExpr.Ident setValue, setRange) when
@@ -183,7 +183,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
     [ for _, expr in index.Exprs do
           match expr with
-          | SynExpr.LetOrUse lou when lou.IsBang && not lou.IsUse ->
+          | LetOrUseE lou when lou.IsBang && not lou.IsUse ->
               match lou.Bindings, lou.Body with
               | [ SynBinding(headPat = SynPat.Named(ident = SynIdent(ident = binder)); expr = comp) as binding ],
                 SynExpr.Match(expr = SynExpr.Ident scrutinee; trivia = { MatchKeyword = matchKeyword }) when

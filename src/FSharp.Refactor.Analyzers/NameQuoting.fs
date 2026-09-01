@@ -152,7 +152,7 @@ let find
               // local bindings: scope is the enclosing function
               for _, e in index.Exprs do
                   match e with
-                  | SynExpr.LetOrUse lou when includeLocals && not (lou.IsBang || lou.IsUse) ->
+                  | LetOrUseE lou when includeLocals && not (lou.IsBang || lou.IsUse) ->
                       for SynBinding(headPat = pat) in lou.Bindings do
                           match binderOf pat with
                           | Some(id, _) ->

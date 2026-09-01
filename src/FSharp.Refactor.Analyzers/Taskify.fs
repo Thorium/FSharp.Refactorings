@@ -131,7 +131,7 @@ let private geographyOf (parseTree: ParsedInput) (source: ISourceText) =
             index.Exprs
             |> Array.tryPick (fun (_, e) ->
                 match e with
-                | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
+                | LetOrUseE lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
                     match lou.Bindings with
                     | [ SynBinding(
                             isMutable = false
@@ -342,7 +342,7 @@ let find
                                   | SynExpr.IfThenElse(elseExpr = None) ->
                                       // one-armed if: no expression tail to return
                                       convertible <- false
-                                  | SynExpr.LetOrUse lou when not lou.IsBang -> walkTails lou.Body
+                                  | LetOrUseE lou when not lou.IsBang -> walkTails lou.Body
                                   | SynExpr.Sequential(expr2 = e2) -> walkTails e2
                                   // statement-shaped tails cannot take a
                                   // `return ` prefix — `return while ...` and

@@ -137,7 +137,7 @@ let rec private selfRefsLoop
             | SynExpr.IfThenElse(ifExpr = c; thenExpr = t; elseExpr = els) -> c :: t :: (Option.toList els) @ rest
             | SynExpr.Match(expr = scr; clauses = clauses) ->
                 scr :: (clauses |> List.map (fun (SynMatchClause(resultExpr = r)) -> r)) @ rest
-            | SynExpr.LetOrUse lou -> (lou.Bindings |> List.map (fun (SynBinding(expr = b)) -> b)) @ lou.Body :: rest
+            | LetOrUseE lou -> (lou.Bindings |> List.map (fun (SynBinding(expr = b)) -> b)) @ lou.Body :: rest
             | _ -> rest
 
         selfRefsLoop self names acc next

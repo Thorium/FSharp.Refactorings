@@ -71,7 +71,14 @@ NOTE: EVEN WHEN ADDING A NUGET REFERENCE, THIS ANALYSER WILL NOT COME TO OUTPUT 
 
 ### VS Code / Ionide
 
-Reference the package from the project you want analyzed:
+**Easiest**: install the
+[FSharp.Refactor VS Code extension](src/FSharp.Refactor.VsCode/README.md)
+— it bundles the analyzers and (with your consent) wires them into
+Ionide's settings globally, so every F# project gets the hints with no
+per-project setup.
+
+Or wire a single project by hand: reference the package from the project
+you want analyzed:
 
 ```xml
 <PackageReference Include="FSharp.Refactor.Analyzers" Version="*" PrivateAssets="all" />
@@ -93,6 +100,28 @@ cache always keys folders by version, so this one path cannot float; check
 with `ls ~/.nuget/packages/fsharp.refactor.analyzers/`). On Windows the
 cache lives under `%USERPROFILE%\.nuget\packages`. Suggestions
 appear as `Hint`-severity diagnostics with a light-bulb one-click fix.
+
+The package ships the analyzers built against TWO FSharp.Analyzers.SDK
+versions side by side — `FSharp.Refactor.Analyzers.Ionide.dll` for SDK
+0.35.0 (what stock Ionide's FsAutoComplete bundles, 7.31.x and earlier)
+and `FSharp.Refactor.Analyzers.dll` for SDK 0.37.2 (the CLI, and
+FsAutoComplete 0.84+). The SDK loads only the assembly matching its own
+version and logs a skip line for the other, so every host picks the one
+it can use and no configuration choice is needed.
+
+**If no suggestions appear**, open Output → "F# Language Service": it
+names the analyzer dlls it scanned and how many analyzers loaded, and a
+version-pairing skip is spelled out there rather than surfacing in the
+editor.
+
+### Visual Studio 2022–2026
+
+Install the
+[FSharp.Refactor Visual Studio extension](src/FSharp.Refactor.Vsix/README.md)
+([user-facing overview](src/FSharp.Refactor.Vsix/MarketplaceOverview.md)):
+squiggles and `Ctrl+.` quick fixes in full Visual Studio, analyzed
+through an FsAutoComplete sidecar. One prerequisite:
+`dotnet tool install -g fsautocomplete`.
 
 ### CLI / CI
 

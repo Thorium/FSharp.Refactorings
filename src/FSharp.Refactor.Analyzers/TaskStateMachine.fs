@@ -79,7 +79,7 @@ let private LineThreshold = 60
 
 let private isBangExpr (e: SynExpr) =
     match e with
-    | SynExpr.LetOrUse lou -> lou.IsBang
+    | LetOrUseE lou -> lou.IsBang
     | SynExpr.DoBang _
     | SynExpr.YieldOrReturnFrom _
     | SynExpr.MatchBang _ -> true
@@ -98,7 +98,7 @@ let private hoistable (binding: SynBinding) =
 [<TailCall>]
 let rec private peelPlainLets (count: int) (firstRange: range option) (e: SynExpr) =
     match e with
-    | SynExpr.LetOrUse lou when
+    | LetOrUseE lou when
         not (lou.IsBang || lou.IsUse || lou.IsRecursive)
         && lou.Bindings |> List.forall hoistable
         ->
@@ -176,7 +176,7 @@ let private extendUpOverComments (source: ISourceText) (floorLine: int) (startLi
 [<TailCall>]
 let rec private terminalOf (e: SynExpr) =
     match e with
-    | SynExpr.LetOrUse lou when not lou.IsBang -> terminalOf lou.Body
+    | LetOrUseE lou when not lou.IsBang -> terminalOf lou.Body
     | SynExpr.Sequential(expr2 = b) -> terminalOf b
     | t -> t
 
@@ -188,7 +188,7 @@ let rec private terminalOf (e: SynExpr) =
 /// never converges; seen live three layers deep on management-portal.
 let private alreadyWrappedTail (tail: SynExpr) =
     match tail with
-    | SynExpr.LetOrUse lou when not lou.IsBang ->
+    | LetOrUseE lou when not lou.IsBang ->
         match lou.Bindings, lou.Body with
         | [ SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ f ]); argPats = SynArgPats.Pats [ _ ])) ],
           (SynExpr.App(funcExpr = SynExpr.Ident g) | SynExpr.YieldOrReturn(
@@ -216,7 +216,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     // awaiting step; None when no step awaits
     let rec tailAfterLastBang (e: SynExpr) : SynExpr option =
         match e with
-        | SynExpr.LetOrUse lou when not lou.IsBang ->
+        | LetOrUseE lou when not lou.IsBang ->
             match tailAfterLastBang lou.Body with
             | Some t -> Some t
             | None ->
@@ -224,7 +224,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                     Some lou.Body
                 else
                     None
-        | SynExpr.LetOrUse lou -> // a let!/use! step: what follows is its body
+        | LetOrUseE lou -> // a let!/use! step: what follows is its body
             match tailAfterLastBang lou.Body with
             | Some t -> Some t
             | None -> Some lou.Body
@@ -250,7 +250,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
         index.Exprs
         |> Array.collect (fun (_, e) ->
             match e with
-            | SynExpr.LetOrUse lou when not lou.IsBang ->
+            | LetOrUseE lou when not lou.IsBang ->
                 lou.Bindings
                 |> List.choose (fun b ->
                     match b with
@@ -310,7 +310,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                   index.Exprs
                   |> Array.filter (fun (_, e) ->
                       match e with
-                      | SynExpr.LetOrUse lou -> lou.IsRecursive && not lou.IsBang && inResumableBody e.Range
+                      | LetOrUseE lou -> lou.IsRecursive && not lou.IsBang && inResumableBody e.Range
                       | _ -> false)
 
               let bangCount =
@@ -322,7 +322,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
               for _, letRec in recursiveLets do
                   match letRec with
-                  | SynExpr.LetOrUse lou ->
+                  | LetOrUseE lou ->
                       match lou.Bindings with
                       | binding :: _ ->
                           { Range = binding.RangeOfBindingWithRhs
@@ -590,7 +590,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                           index.Exprs
                           |> Array.sumBy (fun (_, e) ->
                               match e with
-                              | SynExpr.LetOrUse lou when not lou.IsBang && Range.rangeContainsRange r e.Range ->
+                              | LetOrUseE lou when not lou.IsBang && Range.rangeContainsRange r e.Range ->
                                   lou.Bindings
                                   |> List.sumBy (fun b ->
                                       match b with
@@ -736,7 +736,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       // later bang reset, included) still count as prefix
                       let rec suffixWalk (e: SynExpr) (runStart: range option) (pats: (SynPat * range) list) =
                           match e with
-                          | SynExpr.LetOrUse lou ->
+                          | LetOrUseE lou ->
                               let pats =
                                   pats @ (lou.Bindings |> List.map (fun (SynBinding(headPat = p)) -> p, e.Range))
 

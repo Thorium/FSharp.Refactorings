@@ -96,7 +96,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               |> Array.toList
               |> List.collect (fun (_, e) ->
                   match e with
-                  | SynExpr.LetOrUse lou when lou.IsRecursive && not lou.IsBang -> ofBindings true lou.Bindings
+                  | LetOrUseE lou when lou.IsRecursive && not lou.IsBang -> ofBindings true lou.Bindings
                   | _ -> []) ]
 
     for name, parameters, bodyRange in recBindings do

@@ -1,0 +1,6 @@
+node_modules/
+out/
+analyzers/
+artifacts/
+icon.png
+LICENSE

@@ -154,7 +154,7 @@ let loopBinders (path: SyntaxNode list) =
         | SyntaxNode.SynExpr(SynExpr.While _) -> insideLoop <- true
         // a let between the loop and the probe may rebind the collection
         // per iteration — its bindings are loop-local, not loop-invariant
-        | SyntaxNode.SynExpr(SynExpr.LetOrUse lou) ->
+        | SyntaxNode.SynExpr(LetOrUseE lou) ->
             for SynBinding(headPat = p) in lou.Bindings do
                 binders.AddRange(patBoundNames p)
         | SyntaxNode.SynExpr(SynExpr.Lambda(parsedData = parsedData)) ->

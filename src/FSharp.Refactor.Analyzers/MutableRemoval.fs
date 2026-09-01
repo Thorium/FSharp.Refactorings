@@ -135,7 +135,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         { new SyntaxCollectorBase() with
             override _.WalkExpr(_path, expr) =
                 match expr with
-                | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
+                | LetOrUseE lou when not (lou.IsBang || lou.IsUse) ->
                     match lou.Bindings with
                     | [ SynBinding(
                             isMutable = true

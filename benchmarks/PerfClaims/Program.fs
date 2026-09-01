@@ -96,26 +96,32 @@ let private gate cat (relaxedTime: bool) (timeTrade: bool) (bNs: float, bB: floa
             Error $"the traded time win is not decisive: {bNs:F0} -> {aNs:F0} ns/op"
     else
 
-    match cat with
-    | Perf ->
-        let timeOk =
-            if relaxedTime then
-                aNs <= bNs * 3.0 + 10.0
+        match cat with
+        | Perf ->
+            let timeOk =
+                if relaxedTime then
+                    aNs <= bNs * 3.0 + 10.0
+                else
+                    aNs <= bNs * 1.25 + 2.0
+
+            let allocOk = aB <= bB * 1.15 + 16.0
+
+            if timeOk && allocOk then
+                Ok()
+            elif not allocOk then
+                Error $"allocation regressed: {bB:F0} -> {aB:F0} B/op"
             else
-                aNs <= bNs * 1.25 + 2.0
+                Error $"time regressed: {bNs:F0} -> {aNs:F0} ns/op"
+        | Idiom ->
+            let timeOk = aNs <= bNs * 3.0 + 10.0
+            let allocOk = aB <= bB * 3.0 + 64.0
 
-        let allocOk = aB <= bB * 1.15 + 16.0
-
-        if timeOk && allocOk then Ok()
-        elif not allocOk then Error $"allocation regressed: {bB:F0} -> {aB:F0} B/op"
-        else Error $"time regressed: {bNs:F0} -> {aNs:F0} ns/op"
-    | Idiom ->
-        let timeOk = aNs <= bNs * 3.0 + 10.0
-        let allocOk = aB <= bB * 3.0 + 64.0
-
-        if timeOk && allocOk then Ok()
-        elif not allocOk then Error $"allocation order-of-magnitude worse: {bB:F0} -> {aB:F0} B/op"
-        else Error $"time order-of-magnitude worse: {bNs:F0} -> {aNs:F0} ns/op"
+            if timeOk && allocOk then
+                Ok()
+            elif not allocOk then
+                Error $"allocation order-of-magnitude worse: {bB:F0} -> {aB:F0} B/op"
+            else
+                Error $"time order-of-magnitude worse: {bNs:F0} -> {aNs:F0} ns/op"
 
 // ---- fixture types --------------------------------------------------------
 
@@ -168,6 +174,7 @@ let private tupled8 (a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: 
 
 let private curried8 (a: int) (b: int) (c: int) (d: int) (e: int) (f: int) (g: int) (h: int) =
     a + b + c + d + e + f + g + h
+
 let xsArr = Array.init 1000 id
 let bigArr = Array.init 100_000 (fun i -> i % 100)
 let sq = Seq.init 1000 id
@@ -188,7 +195,13 @@ let mutable maybeNull: string = "present"
 let bytes64 = Array.init 64 byte
 let cachedRegex = Regex @"\d+-\d+"
 let shapeObj: obj = box (RefCircle 2.0)
-let guardDict = System.Collections.Generic.Dictionary<int, int>(Seq.init 100 id |> Seq.map (fun i -> System.Collections.Generic.KeyValuePair(i, i)))
+
+let guardDict =
+    System.Collections.Generic.Dictionary<int, int>(
+        Seq.init 100 id
+        |> Seq.map (fun i -> System.Collections.Generic.KeyValuePair(i, i))
+    )
+
 let calc = Calc()
 let oneItem = [ 42 ]
 let pieces200 = List.init 200 (fun i -> string (i % 10))
@@ -203,6 +216,7 @@ let halfDict =
                     System.Collections.Generic.KeyValuePair(k, k)
         }
     )
+
 let compAsync = async { return 1 }
 
 // ---- the cases -------------------------------------------------------------
@@ -379,7 +393,9 @@ let cases =
 
               for _ in 0..9 do
                   let re = Regex @"\d+-\d+"
-                  if re.IsMatch sHello then n <- n + 1
+
+                  if re.IsMatch sHello then
+                      n <- n + 1
 
               n
         After =
@@ -388,7 +404,8 @@ let cases =
               let mutable n = 0
 
               for _ in 0..9 do
-                  if re.IsMatch sHello then n <- n + 1
+                  if re.IsMatch sHello then
+                      n <- n + 1
 
               n }
 
@@ -403,7 +420,12 @@ let cases =
         Name = "ToLower() = ToLower() -> Equals OrdinalIgnoreCase"
         Cat = Perf
         Iters = 500_000
-        Before = fun () -> if sMixed.ToLowerInvariant() = sMixed2.ToLowerInvariant() then 1 else 0
+        Before =
+          fun () ->
+              if sMixed.ToLowerInvariant() = sMixed2.ToLowerInvariant() then
+                  1
+              else
+                  0
         After =
           fun () ->
               if String.Equals(sMixed, sMixed2, StringComparison.OrdinalIgnoreCase) then
@@ -506,7 +528,7 @@ let cases =
         Cat = Perf
         Iters = 5_000
         Before = fun () -> descendRefSeq 100 |> Seq.sum
-        After = fun () -> seq { for d in 100 .. -1 .. 0 -> d } |> Seq.sum }
+        After = fun () -> seq { for d in 100..-1..0 -> d } |> Seq.sum }
 
       { Code = "FR0059"
         Name = "Option-returning try-function -> ValueOption"
@@ -682,9 +704,7 @@ let cases =
         Name = "isNull x || x = \"\" -> String.IsNullOrEmpty"
         Cat = Idiom
         Iters = 5_000_000
-        Before =
-          fun () ->
-              if isNull sHello || sHello = "" then 1 else 0
+        Before = fun () -> if isNull sHello || sHello = "" then 1 else 0
         After = fun () -> if System.String.IsNullOrEmpty sHello then 1 else 0 }
 
       { Code = "FR0138"
@@ -751,7 +771,12 @@ let cases =
         Name = "if b then true else false -> b"
         Cat = Idiom
         Iters = 5_000_000
-        Before = fun () -> if (if sHello.Length > 10 then true else false) then 1 else 0
+        Before =
+          fun () ->
+              if (if sHello.Length > 10 then true else false) then
+                  1
+              else
+                  0
         After = fun () -> if sHello.Length > 10 then 1 else 0 }
 
       { Code = "FR0012"
@@ -989,9 +1014,11 @@ let cases =
               if (shapeObj :? StructShape) then
                   1
               elif (shapeObj :? RefShape) then
-                  int (match shapeObj :?> RefShape with
-                       | RefCircle r -> r
-                       | RefUnit -> 0.0)
+                  int (
+                      match shapeObj :?> RefShape with
+                      | RefCircle r -> r
+                      | RefUnit -> 0.0
+                  )
               else
                   0
         After =
@@ -999,9 +1026,11 @@ let cases =
               match shapeObj with
               | :? StructShape -> 1
               | :? RefShape as s ->
-                  int (match s with
-                       | RefCircle r -> r
-                       | RefUnit -> 0.0)
+                  int (
+                      match s with
+                      | RefCircle r -> r
+                      | RefUnit -> 0.0
+                  )
               | _ -> 0 }
 
       { Code = "FR0005"
@@ -1181,7 +1210,9 @@ let main argv =
         let aNs, aB, s2 = measure case.Iters case.After
         sink <- sink + s1 + s2
 
-        match gate case.Cat (allocIsTheClaim.Contains case.Code) (timeIsTheClaim.Contains case.Code) (bNs, bB) (aNs, aB) with
+        match
+            gate case.Cat (allocIsTheClaim.Contains case.Code) (timeIsTheClaim.Contains case.Code) (bNs, bB) (aNs, aB)
+        with
         | Ok() -> printfn "%-8s %-50s %11.1f %11.1f %10.1f %10.1f  PASS" case.Code case.Name bNs aNs bB aB
         | Error why ->
             failures <- failures + 1
@@ -1199,9 +1230,7 @@ let main argv =
         // list for one revision while the doc claimed omissions would be
         // "visible" — visible requires checked.
         let covered =
-            Set.union
-                (cases |> List.map (fun c -> c.Code) |> Set.ofList)
-                (notApplicable |> List.map fst |> Set.ofList)
+            Set.union (cases |> List.map (fun c -> c.Code) |> Set.ofList) (notApplicable |> List.map fst |> Set.ofList)
 
         let expected =
             FSharp.Refactor.RuleCatalog.codesIn (

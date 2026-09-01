@@ -7,21 +7,21 @@
       "commands": [
         "fantomas"
       ],
-      "rollForward": false
+      "rollForward": true
     },
     "dotnet-fsharplint": {
       "version": "0.27.0",
       "commands": [
         "dotnet-fsharplint"
       ],
-      "rollForward": false
+      "rollForward": true
     },
     "fsharp-analyzers": {
       "version": "0.37.2",
       "commands": [
         "fsharp-analyzers"
       ],
-      "rollForward": false
+      "rollForward": true
     }
   }
 }

@@ -1,0 +1,13 @@
+{
+    "$schema": "http://json.schemastore.org/vsix-publish",
+    "categories": [ "coding", "other" ],
+    "identity": {
+        "internalName": "FSharpRefactor"
+    },
+    "overview": "MarketplaceOverview.md",
+    "priceCategory": "free",
+    "publisher": "TuomasHietanen",
+    "private": false,
+    "qna": true,
+    "repo": "https://github.com/Thorium/fsharp-refactor"
+}

@@ -441,7 +441,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                   index.Exprs
                                   |> Array.tryPick (fun (_, e) ->
                                       match e with
-                                      | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
+                                      | LetOrUseE lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
                                           match lou.Bindings with
                                           // simple named pattern, no type
                                           // annotation: `let! x : T = ..` is

@@ -77,7 +77,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             index.Exprs
             |> Array.choose (fun (_, e) ->
                 match e with
-                | SynExpr.LetOrUse lou when lou.IsBang -> Some e.Range
+                | LetOrUseE lou when lou.IsBang -> Some e.Range
                 | SynExpr.DoBang _
                 | SynExpr.YieldOrReturn _
                 | SynExpr.YieldOrReturnFrom _
@@ -91,7 +91,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             index.Exprs
             |> Array.collect (fun (_, e) ->
                 match e with
-                | SynExpr.LetOrUse lou when not lou.IsBang ->
+                | LetOrUseE lou when not lou.IsBang ->
                     lou.Bindings
                     |> List.choose (fun b ->
                         match b with

@@ -324,7 +324,7 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                 for SynMatchClause(pat = p) in clauses do
                     walkPat record p
             | SynExpr.Lambda(parsedData = Some(pats, _)) -> pats |> List.iter (walkPat record)
-            | SynExpr.LetOrUse lou ->
+            | LetOrUseE lou ->
                 for SynBinding(headPat = p) in lou.Bindings do
                     walkPat record p
             | SynExpr.ForEach(pat = p) -> walkPat record p

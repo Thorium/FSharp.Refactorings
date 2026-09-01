@@ -104,7 +104,7 @@ let private insertionAnchor (source: ISourceText) (path: SyntaxNode list) (loopE
 [<TailCall>]
 let rec private leadingLets (acc: (SynBinding * SynExpr) list) (body: SynExpr) =
     match body with
-    | SynExpr.LetOrUse lou when not (lou.IsUse || lou.IsBang || lou.IsRecursive) ->
+    | LetOrUseE lou when not (lou.IsUse || lou.IsBang || lou.IsRecursive) ->
         match lou.Bindings with
         | [ binding ] -> leadingLets ((binding, lou.Body) :: acc) lou.Body
         | _ -> List.rev acc

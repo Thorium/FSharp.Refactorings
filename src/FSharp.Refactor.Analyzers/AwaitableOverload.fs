@@ -140,7 +140,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                 // a LOCAL FUNCTION's body is a closure too, but its AST is
                 // a binding with argument patterns, not a Lambda node — a
                 // do!/let! injected there would land in a plain function
-                | SynExpr.LetOrUse lou when not lou.IsBang ->
+                | LetOrUseE lou when not lou.IsBang ->
                     lou.Bindings
                     |> List.choose (fun b ->
                         match b with
@@ -199,7 +199,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             index.Exprs
             |> Array.tryPick (fun (_, e) ->
                 match e with
-                | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
+                | LetOrUseE lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
                     match lou.Bindings with
                     | [ SynBinding(
                             isMutable = false

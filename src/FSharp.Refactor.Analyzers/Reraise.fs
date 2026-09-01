@@ -60,7 +60,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             |> Array.exists (fun (_, e) ->
                 Range.rangeContainsRange r e.Range
                 && (match e with
-                    | SynExpr.LetOrUse lou ->
+                    | LetOrUseE lou ->
                         lou.Bindings
                         |> List.exists (fun (SynBinding(headPat = p)) -> patBoundNames p |> List.contains name)
                     | SynExpr.Lambda(parsedData = Some(pats, _)) ->

@@ -132,7 +132,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               && (match els with
                                   | Some e2 -> ok isTail e2
                                   | None -> true)
-                          | SynExpr.LetOrUse lou when not (lou.IsUse || lou.IsBang) ->
+                          | LetOrUseE lou when not (lou.IsUse || lou.IsBang) ->
                               lou.Bindings
                               |> List.forall (fun (SynBinding _ as inner) -> mentionFree inner.RangeOfBindingWithRhs)
                               && ok isTail lou.Body

@@ -79,7 +79,7 @@ let rec private collectResultsLoop (acc: ResizeArray<range * string>) (pending: 
                 clauses |> List.map (fun (SynMatchClause(resultExpr = result)) -> result)
 
             collectResultsLoop acc (results @ rest)
-        | SynExpr.LetOrUse lou when not lou.IsBang -> collectResultsLoop acc (lou.Body :: rest)
+        | LetOrUseE lou when not lou.IsBang -> collectResultsLoop acc (lou.Body :: rest)
         | SynExpr.Sequential(expr2 = expr2) -> collectResultsLoop acc (expr2 :: rest)
         | _ -> false
 

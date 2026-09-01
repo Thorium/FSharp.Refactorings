@@ -87,7 +87,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
         for _, expr in index.Exprs do
             match expr with
-            | SynExpr.LetOrUse lou ->
+            | LetOrUseE lou ->
                 for binding in lou.Bindings do
                     describeBinding binding |> Option.iter functions.Add
             | _ -> ()

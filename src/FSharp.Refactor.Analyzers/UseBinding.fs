@@ -108,7 +108,7 @@ let rec private resultsLoop (acc: SynExpr list) (pending: SynExpr list) =
     | e :: rest ->
         match e with
         | SynExpr.Sequential(expr2 = e2) -> resultsLoop acc (e2 :: rest)
-        | SynExpr.LetOrUse lou -> resultsLoop acc (lou.Body :: rest)
+        | LetOrUseE lou -> resultsLoop acc (lou.Body :: rest)
         | SynExpr.IfThenElse(thenExpr = t; elseExpr = els) ->
             let next =
                 els
@@ -139,7 +139,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
         [ for _, expr in index.Exprs do
               match expr with
-              | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
+              | LetOrUseE lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
                   match lou.Bindings with
                   | [ SynBinding(
                           isMutable = false

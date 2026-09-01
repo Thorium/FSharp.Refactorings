@@ -116,7 +116,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                 && (let boundPats =
                         match e with
                         | SynExpr.Lambda(parsedData = Some(pats, _)) -> pats
-                        | SynExpr.LetOrUse lou -> lou.Bindings |> List.map (fun (SynBinding(headPat = p)) -> p)
+                        | LetOrUseE lou -> lou.Bindings |> List.map (fun (SynBinding(headPat = p)) -> p)
                         | SynExpr.Match(clauses = clauses)
                         | SynExpr.MatchBang(clauses = clauses)
                         | SynExpr.MatchLambda(matchClauses = clauses) ->

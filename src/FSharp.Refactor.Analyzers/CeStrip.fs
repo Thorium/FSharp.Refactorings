@@ -132,7 +132,7 @@ let private isUnitPat (p: SynPat) =
 let rec private terminalExpr (e: SynExpr) =
     match e with
     | SynExpr.Sequential(expr2 = e2) -> terminalExpr e2
-    | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) -> terminalExpr lou.Body
+    | LetOrUseE lou when not (lou.IsBang || lou.IsUse) -> terminalExpr lou.Body
     | e -> e
 
 /// `Async.RunSynchronously`
@@ -150,7 +150,7 @@ let private (|RunSynchronously|_|) (e: SynExpr) =
 let private forwardedComputation (body: SynExpr) : SynExpr option =
     match body with
     | SynExpr.YieldOrReturnFrom(expr = BareIdent comp) -> Some comp
-    | SynExpr.LetOrUse lou when lou.IsBang && not lou.IsUse ->
+    | LetOrUseE lou when lou.IsBang && not lou.IsUse ->
         match lou.Bindings, lou.Body with
         | [ SynBinding(headPat = SynPat.Named(ident = SynIdent(ident = v)); expr = BareIdent comp) ],
           SynExpr.YieldOrReturn(expr = SynExpr.Ident returned) when returned.idText = v.idText -> Some comp
@@ -269,7 +269,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 // let runTailN () = B in runTailN () — the tail thunk wraps
                 // nothing worth a thunk; the binding IS its body. One layer
                 // per pass, so runTail3(runTail2(runTail)) unwinds fully.
-                | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
+                | LetOrUseE lou when not (lou.IsBang || lou.IsUse) ->
                     match lou.Bindings, lou.Body with
                     | [ SynBinding(
                             headPat = SynPat.LongIdent(
@@ -294,7 +294,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                 // carries more statements is a justified
                                 // wrap — collapsing it would reopen the
                                 // wrap/unwrap oscillation from the other side
-                                | SynExpr.LetOrUse innerLou when not innerLou.IsBang ->
+                                | LetOrUseE innerLou when not innerLou.IsBang ->
                                     match innerLou.Bindings, innerLou.Body with
                                     | [ SynBinding(headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ innerF ]))) ],
                                       SynExpr.App(

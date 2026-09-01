@@ -158,6 +158,38 @@ let isPureAtom (e: SynExpr) =
     | SynExpr.ArrayOrList(exprs = []) -> true
     | _ -> false
 
+/// FCS-version-independent view of a let/use/let!/use! expression. FCS
+/// 43.12 packs the payload into the SynLetOrUse record (`SynExpr.LetOrUse
+/// lou` + properties); 43.10 — the FCS stock Ionide's analyzer SDK 0.35
+/// pairs with — spells the same fields tupled on the case. The anonymous
+/// record keeps the 43.12 property spellings, so rule code written
+/// against it compiles under both.
+[<return: Struct>]
+let (|LetOrUseE|_|) (e: SynExpr) =
+#if ANALYZERS_SDK_0_35
+    match e with
+    | SynExpr.LetOrUse(isRecursive = isRecursive; isUse = isUse; isBang = isBang; bindings = bindings; body = body) ->
+        ValueSome
+            {| IsRecursive = isRecursive
+               IsUse = isUse
+               IsBang = isBang
+               Bindings = bindings
+               Body = body
+               Range = e.Range |}
+    | _ -> ValueNone
+#else
+    match e with
+    | SynExpr.LetOrUse lou ->
+        ValueSome
+            {| IsRecursive = lou.IsRecursive
+               IsUse = lou.IsUse
+               IsBang = lou.IsBang
+               Bindings = lou.Bindings
+               Body = lou.Body
+               Range = lou.Range |}
+    | _ -> ValueNone
+#endif
+
 /// True when the expression is ordinary expression syntax that can be moved
 /// into a lambda body. Computation-expression-only forms (`return e`,
 /// `yield e`, `do! e`, `let! ...`) cannot.
@@ -166,7 +198,7 @@ let isPlainBody (e: SynExpr) =
     | SynExpr.YieldOrReturn _
     | SynExpr.YieldOrReturnFrom _
     | SynExpr.DoBang _ -> false
-    | SynExpr.LetOrUse lou -> not lou.IsBang
+    | LetOrUseE lou -> not lou.IsBang
     | _ -> true
 
 /// An identifier expression, whether parsed as Ident or a single-segment

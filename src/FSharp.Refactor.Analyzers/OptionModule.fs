@@ -218,7 +218,7 @@ let capturesMutableLocal (index: AstIndex.Index) (bodyRange: range) : bool =
         index.Exprs
         |> Array.collect (fun (_, e) ->
             match e with
-            | SynExpr.LetOrUse lou when not (Range.rangeContainsRange bodyRange lou.Range) ->
+            | LetOrUseE lou when not (Range.rangeContainsRange bodyRange lou.Range) ->
                 lou.Bindings
                 |> List.choose (fun (SynBinding(isMutable = isMut; headPat = p)) ->
                     if isMut then

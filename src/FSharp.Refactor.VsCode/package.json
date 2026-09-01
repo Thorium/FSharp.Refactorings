@@ -1,0 +1,57 @@
+{
+    "name": "fsharp-refactor",
+    "displayName": "FSharp.Refactor",
+    "description": "137 functional refactoring hints with one-click fixes for F# — wires the FSharp.Refactor analyzers into Ionide.",
+    "version": "0.7.1",
+    "publisher": "TuomasHietanen",
+    "license": "Unlicense",
+    "icon": "icon.png",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Thorium/fsharp-refactor"
+    },
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Linters",
+        "Programming Languages",
+        "Other"
+    ],
+    "keywords": [
+        "fsharp",
+        "F#",
+        "refactoring",
+        "analyzers",
+        "quickfix"
+    ],
+    "extensionDependencies": [
+        "Ionide.Ionide-fsharp"
+    ],
+    "activationEvents": [
+        "onLanguage:fsharp",
+        "workspaceContains:**/*.fsproj",
+        "workspaceContains:**/*.fsx"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "fsharpRefactor.enable",
+                "title": "FSharp.Refactor: Wire analyzers into Ionide"
+            },
+            {
+                "command": "fsharpRefactor.disable",
+                "title": "FSharp.Refactor: Remove analyzers from Ionide settings"
+            }
+        ]
+    },
+    "scripts": {
+        "compile": "tsc -p ."
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.75.0",
+        "@vscode/vsce": "^3.1.0",
+        "typescript": "^5.4.0"
+    }
+}

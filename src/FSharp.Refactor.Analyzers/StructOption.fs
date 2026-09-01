@@ -86,7 +86,7 @@ let rec private resultsLoop (acc: SynExpr list) (pending: SynExpr list) =
         match e with
         | SynExpr.Paren(expr = inner)
         | SynExpr.Typed(expr = inner) -> resultsLoop acc (inner :: rest)
-        | SynExpr.LetOrUse lou when not lou.IsBang -> resultsLoop acc (lou.Body :: rest)
+        | LetOrUseE lou when not lou.IsBang -> resultsLoop acc (lou.Body :: rest)
         | SynExpr.Sequential(expr2 = e2) -> resultsLoop acc (e2 :: rest)
         | SynExpr.IfThenElse(thenExpr = t; elseExpr = els) -> resultsLoop acc (t :: (Option.toList els) @ rest)
         | SynExpr.Match(clauses = clauses) ->

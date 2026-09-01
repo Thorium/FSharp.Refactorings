@@ -197,7 +197,7 @@ let find
         for path, expr in index.Exprs do
             match expr with
             // FR0050: let mutable acc = init; for pat in src do acc <- rhs; rest
-            | SynExpr.LetOrUse lou when
+            | LetOrUseE lou when
                 not (lou.IsBang || lou.IsUse)
                 && (match lou.Bindings with
                     | [ SynBinding(isMutable = true) ] -> true
@@ -449,7 +449,7 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
 
         [ for _, expr in index.Exprs do
               match expr with
-              | SynExpr.LetOrUse lou when not (lou.IsBang || lou.IsUse) ->
+              | LetOrUseE lou when not (lou.IsBang || lou.IsUse) ->
                   match lou.Bindings, lou.Body with
                   | [ SynBinding(isMutable = true; headPat = SynPat.Named(ident = SynIdent(ident = flag)); expr = init) ],
                     SynExpr.Sequential(
@@ -469,7 +469,7 @@ let findFlagLoops (parseTree: ParsedInput) (source: ISourceText) (check: FSharpC
                       // about the flag
                       let rec unwrapLets acc body =
                           match body with
-                          | SynExpr.LetOrUse innerLet when
+                          | LetOrUseE innerLet when
                               not (innerLet.IsBang || innerLet.IsUse)
                               && (match innerLet.Bindings with
                                   | [ SynBinding(isMutable = false; headPat = letPat; expr = rhs) ] ->
