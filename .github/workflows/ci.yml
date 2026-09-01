@@ -34,6 +34,14 @@ jobs:
         run: dotnet test -c Release --no-build
 
       - name: Lint
+        env:
+          # fsharplint evaluates projects via Ionide.ProjInfo, which loads
+          # MSBuild assemblies FROM THE .NET 10 SDK — they need
+          # System.Runtime 10.0.0.0, but with a net8 runtime preinstalled
+          # on the runner the tool host binds to 8 (exact match wins) and
+          # dies with FileNotFound on the listener: the exit-255 mystery.
+          # Force the host onto the same major as the SDK.
+          DOTNET_ROLL_FORWARD: LatestMajor
         run: |
           dotnet dotnet-fsharplint lint src/FSharp.Refactor.Analyzers/FSharp.Refactor.Analyzers.fsproj
           dotnet dotnet-fsharplint lint src/FSharp.Refactor.Tool/FSharp.Refactor.Tool.fsproj
