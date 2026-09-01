@@ -1,5 +1,8 @@
 # FSharp.Refactor for Visual Studio (classic VSIX)
 
+[Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.fSharp-refactor)
+
+
 Squiggles and light-bulb quick fixes from the FSharp.Refactor analyzers
 inside full Visual Studio, using the classic in-proc MEF editor surfaces:
 
