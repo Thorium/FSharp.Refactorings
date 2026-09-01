@@ -39,11 +39,15 @@ try {
     npm run compile
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    # the file is named after the extension's own id, so the package name
+    # and the marketplace identity can never drift apart
+    $extensionName = [regex]::Match($packageJson, '"name":\s*"([^"]+)"').Groups[1].Value
     $artifacts = Join-Path $here "artifacts"
     New-Item -ItemType Directory -Force $artifacts | Out-Null
-    npx vsce package --out (Join-Path $artifacts "fsharp-refactor-$repoVersion.vsix")
+    $output = Join-Path $artifacts "$extensionName-$repoVersion.vsix"
+    npx vsce package --out $output
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Host "Created $(Join-Path $artifacts "fsharp-refactor-$repoVersion.vsix")"
+    Write-Host "Created $output"
 }
 finally {
     Pop-Location

@@ -4,3 +4,4 @@ node_modules/**
 CreateVsCodeVsix.ps1
 artifacts/**
 *.vsix
+.gitignore
