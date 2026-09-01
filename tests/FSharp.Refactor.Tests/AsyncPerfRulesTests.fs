@@ -253,7 +253,23 @@ let ``dash-stripped BitConverter chain becomes ToHexString`` () =
     | [ s ] -> Assert.Equal("System.Convert.ToHexString bytes", s.ReplacementText)
     | other -> failwithf "Expected exactly one hex suggestion, got %A" other
 
+
 [<Fact>]
+let ``a trailing member access keeps the call parenthesised`` () =
+    // prismatic: the space form left `ToHexString hash.Substring(0, 16)`,
+    // handing the substring OF THE BYTES to ToHexString
+    let source =
+        "module Test\nlet f (bytes: byte[]) = System.BitConverter.ToString(bytes).Replace(\"-\", \"\").Substring(0, 16)"
+
+    match hexIn source with
+    | [ s ] ->
+        Assert.Equal("(System.Convert.ToHexString bytes)", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one hex suggestion, got %A" other
+
+[<Fact>]
+
 let ``other Replace arguments are left alone`` () =
     Assert.Empty(hexIn "module Test\nlet f (bytes: byte[]) = System.BitConverter.ToString(bytes).Replace(\"-\", \":\")")
 
@@ -922,6 +938,24 @@ let ``a blocking read inside task becomes its async twin`` () =
         Assert.Contains("let! line = reader.ReadLineAsync()", patched)
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected one awaitable suggestion, got %A" other
+
+
+[<Fact>]
+let ``a call nested in another binding's RHS is not a let-bang site`` () =
+    // the prismatic shape: the call sits inside the CE's RANGE but not on
+    // its statement spine, so `let!` there cannot compile — 21 rollbacks in
+    // one sweep repo were all this
+    let source =
+        "open System.IO\nlet f (reader: TextReader) = task {\n    let pair =\n        let line = reader.ReadLine()\n        line, line.Length\n    return snd pair\n}"
+
+    Assert.Empty(awaitableIn source)
+
+[<Fact>]
+let ``a statement nested in another binding's RHS is not a do-bang site`` () =
+    let source =
+        "open System.IO\nlet f (writer: TextWriter) (s: string) = task {\n    let n =\n        writer.Write(s)\n        1\n    return n\n}"
+
+    Assert.Empty(awaitableIn source)
 
 [<Fact>]
 let ``a blocking statement inside task becomes do-bang`` () =

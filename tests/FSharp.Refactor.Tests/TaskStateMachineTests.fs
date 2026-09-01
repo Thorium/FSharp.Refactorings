@@ -254,6 +254,29 @@ let ``a tail that is already one wrapped thunk is never re-wrapped`` () =
 
     Assert.Empty tailEdits
 
+
+[<Fact>]
+let ``a tail holding a use never becomes a plain closure`` () =
+    // `use` inside a CE binds to the builder's Using (DisposeAsync where the
+    // type offers it); a plain closure would silently make it synchronous
+    let source =
+        "module Test\nlet f () = task {\n"
+        + awaits 8
+        + "\n    use r = new System.IO.MemoryStream()\n    let s1 = x1 + 1\n    let s2 = s1 + 2\n    let s3 = s2 + 3\n    return s1 + s2 + s3 + int r.Length\n}"
+
+    let edits =
+        adviceIn source
+        |> editsOfKind (function
+            | TaskStateMachine.AdviceKind.ExtractTail _ -> true
+            | _ -> false)
+
+    // either it stands down, or it uses the task-returning variant where the
+    // `use` stays real CE syntax — never the plain closure form
+    if not edits.IsEmpty then
+        let patched = applyEdits source edits
+        Assert.Contains("let runTail () = task {", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
 [<Fact>]
 let ``a tail with branch returns extracts as a task-returning function`` () =
     // once the old hands-off case: branch returns cannot ride a plain
@@ -524,3 +547,76 @@ let ``a match arm reading a foreign mutable keeps the note`` () =
     match edits with
     | Some e -> Assert.Empty e
     | None -> ()
+
+// ---- the `use` guard on tail extraction ----
+//
+// A plain `use` inside a CE binds to the builder's Using (DisposeAsync
+// where the type offers it, disposal ordered with the workflow). The
+// closure variant of the tail wrap would re-bind it to a synchronous
+// `using`, so a tail holding one must take the task-returning variant.
+
+/// The tail-extraction edits for a body, or [] when the rule stands down.
+let private tailEditsFor (source: string) =
+    adviceIn source
+    |> List.tryPick (fun s ->
+        match s.Kind with
+        | TaskStateMachine.AdviceKind.ExtractTail _ -> Some s.Edits
+        | _ -> None)
+    |> Option.defaultValue []
+
+/// The same body shape with and without a `use`, so the guard is the only
+/// difference between the two outcomes.
+let private tailBody (useLine: string) =
+    "module Test\nlet f () = task {\n"
+    + awaits 8
+    + "\n"
+    + useLine
+    + "    let s1 = x1 + 1\n    let s2 = s1 + 2\n    let s3 = s2 + 3\n    return s1 + s2 + s3\n}"
+
+[<Fact>]
+let ``the control without a use takes the plain closure`` () =
+    // proves the shape IS extractable, so the guard is what changes the
+    // outcome in the tests below rather than some unrelated gate
+    let patched = applyEdits (tailBody "") (tailEditsFor (tailBody ""))
+    Assert.Contains("let runTail () =", patched)
+    Assert.DoesNotContain("let runTail () = task {", patched)
+    Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
+let ``a leading use forces the task-returning variant`` () =
+    let source = tailBody "    use r = new System.IO.MemoryStream()\n"
+    let edits = tailEditsFor source
+    Assert.NotEmpty edits
+    let patched = applyEdits source edits
+    Assert.Contains("let runTail () = task {", patched)
+    Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
+let ``a use in the middle of the tail is caught too`` () =
+    // the guard scans the whole tail range, not just its first binding
+    let source =
+        "module Test\nlet f () = task {\n"
+        + awaits 8
+        + "\n    let s1 = x1 + 1\n    use r = new System.IO.MemoryStream()\n    let s2 = s1 + 2\n    let s3 = s2 + 3\n    return s1 + s2 + s3 + int r.Length\n}"
+
+    let edits = tailEditsFor source
+
+    if not edits.IsEmpty then
+        let patched = applyEdits source edits
+        Assert.Contains("let runTail () = task {", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+
+[<Fact>]
+let ``an async tail with a use keeps CE syntax as well`` () =
+    let source =
+        "module Test\nlet f () = async {\n"
+        + ([ for i in 1..8 -> $"    let! x%d{i} = async {{ return %d{i} }}" ]
+           |> String.concat "\n")
+        + "\n    use r = new System.IO.MemoryStream()\n    let s1 = x1 + 1\n    let s2 = s1 + 2\n    let s3 = s2 + 3\n    return s1 + s2 + s3 + int r.Length\n}"
+
+    let edits = tailEditsFor source
+
+    if not edits.IsEmpty then
+        let patched = applyEdits source edits
+        Assert.Contains("let runTail () = async {", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")

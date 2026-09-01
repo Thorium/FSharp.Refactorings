@@ -448,6 +448,12 @@ let opensSystemNamespace (source: ISourceText) =
     seq { 0 .. source.GetLineCount() - 1 }
     |> Seq.exists (fun l -> source.GetLineString(l).Trim() = "open System")
 
+/// Does the file `open` this exact namespace at any top-level line? The
+/// same textual, deliberately exact test as opensSystemNamespace.
+let opensNamespace (source: ISourceText) (ns: string) =
+    seq { 0 .. source.GetLineCount() - 1 }
+    |> Seq.exists (fun l -> source.GetLineString(l).Trim() = "open " + ns)
+
 /// A regex matching `name` as a WHOLE F# identifier. `\b<name>\b` is wrong
 /// for this language: identifiers may end in primes (`visit'`), and after
 /// a `'` the \b anchor finds no boundary — `\bvisit'\b` never matches

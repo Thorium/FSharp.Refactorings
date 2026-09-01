@@ -38,19 +38,24 @@ jobs:
       - name: Test
         run: dotnet test -c Release --no-build
 
+      # fsharplint evaluates projects through Ionide.ProjInfo, which loads
+      # MSBuild assemblies FROM THE SDK — those want System.Runtime
+      # 10.0.0.0, while the tool itself targets net8 and binds to a net8
+      # runtime when one is present (exact match beats roll-forward). The
+      # mismatch is the exit-255 crash. DOTNET_ROLL_FORWARD does NOT fix
+      # it — verified locally against the same failure in
+      # fsharp-analyzers, where only the host flag worked — so the tool is
+      # launched through `dotnet exec --roll-forward LatestMajor`.
       - name: Lint
-        env:
-          # fsharplint evaluates projects via Ionide.ProjInfo, which loads
-          # MSBuild assemblies FROM THE .NET 10 SDK — they need
-          # System.Runtime 10.0.0.0, but with a net8 runtime preinstalled
-          # on the runner the tool host binds to 8 (exact match wins) and
-          # dies with FileNotFound on the listener: the exit-255 mystery.
-          # Force the host onto the same major as the SDK.
-          DOTNET_ROLL_FORWARD: LatestMajor
+        shell: bash
         run: |
-          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Analyzers/FSharp.Refactor.Analyzers.fsproj
-          dotnet dotnet-fsharplint lint src/FSharp.Refactor.Tool/FSharp.Refactor.Tool.fsproj
-          dotnet dotnet-fsharplint lint tests/FSharp.Refactor.Tests/FSharp.Refactor.Tests.fsproj
+          LINT=$(find ~/.nuget/packages/dotnet-fsharplint -name dotnet-fsharplint.dll | sort | tail -1)
+          echo "linting with $LINT"
+          for p in src/FSharp.Refactor.Analyzers/FSharp.Refactor.Analyzers.fsproj \
+                   src/FSharp.Refactor.Tool/FSharp.Refactor.Tool.fsproj \
+                   tests/FSharp.Refactor.Tests/FSharp.Refactor.Tests.fsproj; do
+            dotnet exec --roll-forward LatestMajor "$LINT" lint "$p"
+          done
 
       # both shipped projects, not just the analyzers: the apply tool is F#
       # we ship too, and it went a long time unchecked

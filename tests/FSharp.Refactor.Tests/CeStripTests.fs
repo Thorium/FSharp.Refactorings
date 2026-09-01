@@ -181,3 +181,28 @@ let ``task wrapping without the open is not rewritten`` () =
 let ``task wrapping an expression that could throw is not rewritten`` () =
     // task { return e } yields a faulted task on throw; Task.FromResult e throws synchronously
     assertNoSuggestion "module Test\nopen System.Threading.Tasks\nlet f (x: int) = task { return x + 1 }"
+
+[<Fact>]
+let ``a plain closure owning a use collapses back — the CURE for older damage`` () =
+    // FR0029 refuses to build this shape now, but prevention cannot reach a
+    // change an older version already committed: this rule undoes it
+    let source =
+        "module Test\nlet f (v: int) =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail () =\n            use r = new System.IO.MemoryStream()\n            let a = v + 1\n            let b = a + 1\n            a + b + int r.Length\n        return runTail ()\n    }"
+
+    match findIn source |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ThunkIdentity) with
+    | [ s ] ->
+        Assert.Contains("use r = new System.IO.MemoryStream()", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.DoesNotContain("let runTail ()", patched)
+        Assert.True(parsesCleanly patched, $"Patched source does not parse:\n%s{patched}")
+    | other -> failwithf "Expected one thunk collapse, got %A" other
+
+[<Fact>]
+let ``the cure does not fight the prevention`` () =
+    // the task-RETURNING variant is the shape FR0029 builds for a tail with
+    // a `use`; collapsing that would oscillate, so it must be left alone
+    Assert.Empty(
+        findIn
+            "module Test\nlet f (v: int) =\n    task {\n        do! System.Threading.Tasks.Task.Delay 1\n        let runTail () = task {\n            use r = new System.IO.MemoryStream()\n            let a = v + 1\n            let b = a + 1\n            return a + b + int r.Length\n        }\n        return! runTail ()\n    }"
+        |> List.filter (fun s -> s.Kind = CeStrip.StripKind.ThunkIdentity)
+    )

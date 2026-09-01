@@ -107,7 +107,17 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         let receiverTextOf (loweredCall: SynExpr) =
             match loweredCall with
             | SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))) when ids.Length >= 2 ->
-                Some(ids.[.. ids.Length - 2] |> List.map (fun i -> i.idText) |> String.concat ".")
+                // the receiver's own SOURCE text, not its idText: idText
+                // strips the backticks off a ``quoted name``, and the
+                // rebuilt receiver would not compile
+                let first = List.head ids
+                let lastOfReceiver = ids.[ids.Length - 2]
+
+                Some(
+                    textOfRange
+                        source
+                        (Range.mkRange first.idRange.FileName first.idRange.Start lastOfReceiver.idRange.End)
+                )
             | SynExpr.App(funcExpr = SynExpr.DotGet(expr = receiver)) -> Some(textOfRange source receiver.Range)
             | _ -> None
 

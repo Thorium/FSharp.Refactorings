@@ -137,6 +137,23 @@ let ``a file without open System gets the qualified spelling`` () =
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected one suggestion, got %A" other
 
+
+[<Fact>]
+let ``a backticked receiver keeps its quoting in the rewrite`` () =
+    // idText drops the backticks; the rebuilt call would not compile
+    let source =
+        "module Test\nopen System\nlet f (``the role``: string) = ``the role``.ToLowerInvariant() = \"user\""
+
+    match caseIn source with
+    | [ s ] ->
+        match s.Replacement with
+        | Some r ->
+            Assert.Contains("``the role``", r)
+            let patched = applyEdit source s.Range r
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | None -> () // standing down is also acceptable
+    | other -> failwithf "Expected one suggestion, got %A" other
+
 [<Fact>]
 let ``a non-ASCII literal stays advice`` () =
     // outside ASCII the invariant mapping and ordinal folding genuinely

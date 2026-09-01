@@ -176,6 +176,7 @@ let private categories =
       "FR0136", Category.Correctness // zero-argument Guid constructor: Guid.Empty stated, NewGuid offered
       "FR0137", Category.Performance // consecutive same-module map passes fuse via composition
       "FR0138", Category.Idiom // hand-rolled emptiness tests become String.IsNullOrEmpty/IsNullOrWhiteSpace
+      "FR0139", Category.Performance // Seq.* on a proven array goes through IEnumerable
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

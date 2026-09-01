@@ -55,6 +55,17 @@ let private toHexStringAvailable (check: FSharpCheckFileResults) =
         with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
             false)
 
+/// Does a member access continue off the END of the replaced range?
+/// `BitConverter.ToString(h).Replace("-", "").Substring(0, 16)` replaces
+/// only as far as the `Replace`, so the space-applied form would leave
+/// `Convert.ToHexString h.Substring(0, 16)` — handing the substring OF
+/// THE BYTES to ToHexString instead of taking it from the hex. Found live
+/// on prismatic, where it cost a whole rollback pass. Parenthesise there,
+/// and only there.
+let private continuesIntoMemberAccess (source: ISourceText) (r: range) =
+    let line = source.GetLineString(r.EndLine - 1)
+    r.EndColumn < line.Length && line.[r.EndColumn] = '.'
+
 /// Find dash-stripped BitConverter hex chains. Requires typed check results
 /// for the target-framework gate.
 let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
@@ -74,7 +85,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         OriginalText = textOfRange source expr.Range
                         ReplacementText =
                           (let prefix = if opensSystemNamespace source then "" else "System."
-                           $"{prefix}Convert.ToHexString {argumentText source bytes}") }
+                           let call = $"{prefix}Convert.ToHexString {argumentText source bytes}"
+
+                           if continuesIntoMemberAccess source expr.Range then
+                               $"({call})"
+                           else
+                               call) }
                   | _ -> ()
               | _ -> () ]
 

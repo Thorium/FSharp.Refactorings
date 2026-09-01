@@ -127,12 +127,22 @@ let private isUnitPat (p: SynPat) =
     | SynPat.Const(SynConst.Unit, _) -> true
     | _ -> false
 
+/// Does this expression hold a plain `use` (not `use!`) anywhere in its
+/// statement chain? Nested lambdas and CEs are not descended into: a `use`
+/// inside one of those already owns its own scope.
+let rec private containsPlainUse (e: SynExpr) =
+    match e with
+    | LetOrUseE lou when lou.IsUse && not lou.IsBang -> true
+    | LetOrUseE lou -> containsPlainUse lou.Body
+    | SynExpr.Sequential(expr1 = e1; expr2 = e2) -> containsPlainUse e1 || containsPlainUse e2
+    | _ -> false
+
 /// The expression a statement chain ends in.
 [<TailCall>]
 let rec private terminalExpr (e: SynExpr) =
     match e with
     | SynExpr.Sequential(expr2 = e2) -> terminalExpr e2
-    | LetOrUseE lou when not (lou.IsBang || lou.IsUse) -> terminalExpr lou.Body
+    | LetOrUseE lou when not lou.IsBang -> terminalExpr lou.Body // a plain `use` is walked THROUGH: the terminal sits past it
     | e -> e
 
 /// `Async.RunSynchronously`
@@ -175,8 +185,7 @@ let private multiLineLiteralLines (parseTree: ParsedInput) : Set<int> =
                 match e with
                 | SynExpr.Const(SynConst.String _, r)
                 | SynExpr.InterpolatedString(range = r) when r.EndLine > r.StartLine ->
-                    for l in r.StartLine + 1 .. r.EndLine do
-                        lines.Add l
+                    lines.AddRange(seq { r.StartLine + 1 .. r.EndLine })
                 | _ -> () }
 
     AstIndex.replay collector parseTree
@@ -287,6 +296,18 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         // live on management-portal Domain.fs before this
                         // gate)
                         && (thunkBody.Range.EndLine - thunkBody.Range.StartLine + 1 < 4
+                            // ... or the body holds a `use`, which a plain
+                            // closure must never own: inside the CE it binds
+                            // to the builder's Using (DisposeAsync where the
+                            // type offers it), and a closure silently makes
+                            // it synchronous. FR0029 refuses to build this
+                            // shape now, so collapsing it CURES code that an
+                            // older version already wrote — prevention alone
+                            // cannot reach a change that is committed. No
+                            // oscillation: re-extraction takes the
+                            // task-returning variant, which this rule does
+                            // not collapse.
+                            || containsPlainUse thunkBody
                             || (match thunkBody with
                                 // ... or the body is NOTHING BUT another
                                 // immediately-invoked thunk (nested damage).

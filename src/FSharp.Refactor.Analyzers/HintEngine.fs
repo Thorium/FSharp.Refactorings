@@ -554,6 +554,45 @@ let private isProvablyNotFloat (check: FSharpCheckFileResults) (source: ISourceT
 /// repository configuration; results are cached per distinct rule list.
 /// Rules whose firing needs type information (BoolTypedVars) stay silent
 /// when `check` is None or the file has type errors.
+/// An overloaded .NET method used as a FIRST-CLASS VALUE resolves only
+/// because something nearby pins its argument type first:
+///
+///     logFiles |> Array.sortByDescending File.GetLastWriteTime |> Array.head
+///
+/// works because the pipe fixes the element type before the method group
+/// is checked. Collapsing that to `Array.maxBy File.GetLastWriteTime
+/// logFiles` checks the projection while the element type is still
+/// unknown, and F# answers "a unique overload for method
+/// 'GetLastWriteTime' could not be determined". Found live on prismatic.
+///
+/// No hint may move such a binding. Adding the annotation that would
+/// rescue it is a different, much larger fix, and a rule that is not sure
+/// is better left unsaid.
+let private isOverloadedMethodGroup (check: FSharpCheckFileResults) (source: ISourceText) (e: SynExpr) =
+    match e with
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when ids.Length > 1 ->
+        let last = List.last ids
+        let r = last.idRange
+        let lineText = source.GetLineString(r.EndLine - 1)
+
+        match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ last.idText ]) with
+        | Some symbolUse ->
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as m ->
+                match m.DeclaringEntity with
+                | Some entity ->
+                    try
+                        entity.MembersFunctionsAndValues
+                        |> Seq.filter (fun sibling -> sibling.LogicalName = m.LogicalName)
+                        |> Seq.truncate 2
+                        |> Seq.length > 1
+                    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                        false
+                | None -> false
+            | _ -> false
+        | None -> false
+    | _ -> false
+
 let find
     (extraRules: string list)
     (parseTree: ParsedInput)
@@ -618,11 +657,23 @@ let find
                     typedVarsOk hint.BoolTypedVars isProvablyBool
                     && typedVarsOk hint.NotFloatVars isProvablyNotFloat
 
+                // only the bindings the RHS actually re-places can be moved
+                let movesOverloadedMethodGroup =
+                    match typedCheck with
+                    | Some c ->
+                        hint.RhsVarSpans
+                        |> List.exists (fun (v, _, _) ->
+                            match bindings.TryGetValue v with
+                            | true, bound -> isOverloadedMethodGroup c source (stripParens bound)
+                            | false, _ -> false)
+                    | None -> false
+
                 let rangeKey = expr.Range.ToString()
 
                 if
                     pureOk
                     && boolTypedOk
+                    && not movesOverloadedMethodGroup
                     && not namedArgumentPosition
                     && not (inAttributeArg expr.Range)
                     && matchedRanges.Add rangeKey

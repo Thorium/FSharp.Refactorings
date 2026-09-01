@@ -2486,9 +2486,14 @@ let private verifyPass
                          with _ ->
                              None)) // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
 
-                restore changedFiles
+                // writeBack, not restore: suppression must happen only if the
+                // rollback STICKS. Suppressing here and then writing the
+                // fixes back left KEPT fixes marked suppressed, so a later
+                // identical-content fix in the same file was silently dropped
+                writeBack changedFiles
 
                 if (projectErrors checker options).Length <= baselineErrors then
+                    suppressAll changedFiles
                     changedFiles
                 else
                     for path, text in currentTexts do

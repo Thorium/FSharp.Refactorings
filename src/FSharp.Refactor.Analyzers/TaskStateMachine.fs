@@ -212,6 +212,18 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
         index.Exprs
         |> Array.exists (fun (_, e) -> isBangExpr e && Range.rangeContainsRange r e.Range)
 
+    /// A plain `use` inside a CE binds to the BUILDER's Using — in task and
+    /// async that means DisposeAsync where the type offers it, and disposal
+    /// ordered with the workflow. Lifting such a span into a plain closure
+    /// silently re-binds it to a synchronous `using`, so movement stops at
+    /// one (G-Research's GRA-DISPBEFOREASYNC names the same hazard).
+    let containsUse (r: range) =
+        index.Exprs
+        |> Array.exists (fun (_, e) ->
+            match e with
+            | LetOrUseE lou -> lou.IsUse && Range.rangeContainsRange r e.Range
+            | _ -> false)
+
     // the suffix of a CE's top-level statement chain that follows its last
     // awaiting step; None when no step awaits
     let rec tailAfterLastBang (e: SynExpr) : SynExpr option =
@@ -673,6 +685,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                                           && multiLineStringSafe lines
                                           && not (spansMultiLineLiteral index tail.Range.StartLine tail.Range.EndLine)
                                           && not (mentionsForeignMutable tail.Range (String.concat "\n" lines))
+                                          // a `use` may not become a plain
+                                          // closure `using`: fall through to
+                                          // the task-returning variant below,
+                                          // where it stays real CE syntax
+                                          && not (containsUse tail.Range)
                                           ->
                                           let indented =
                                               lines

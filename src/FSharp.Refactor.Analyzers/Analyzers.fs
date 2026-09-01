@@ -2687,6 +2687,63 @@ let mapFusionCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0137" "MapFusion" (fun () ->
         mapFusionMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
 
+// ---- FR0139 SeqOnArray ----
+
+let private seqOnArrayMessages
+    (offerAlternatives: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
+    SeqOnArray.find parseTree source checkResults
+    |> List.collect (fun s ->
+        let primary =
+            match s.LinqSpelling with
+            | None ->
+                hint
+                    "FR0139"
+                    (sprintf
+                        "Seq.%s on '%s' walks an array through IEnumerable — an interface call per element; Array.%s reads the block directly. Arrays only: a Seq call on a list or a lazy source can be deliberate."
+                        s.FunctionName
+                        s.CollectionText
+                        s.FunctionName)
+                    s.Range
+                    [ fix s.Range "Seq" "Array" ]
+            | Some(callRange, linqText) ->
+                // the DEFAULT for a vectorisable element type is the LINQ
+                // spelling: 5.4x against the Array module's 1.27x, and a
+                // performance rule should apply the faster answer
+                hint
+                    "FR0139"
+                    (sprintf
+                        "Seq.contains on '%s' walks the array element by element; Enumerable.Contains vectorises over its span — measured 587ns to 109ns over 1000 ints. Equivalent for int and int64, whose structural equality agrees with EqualityComparer.Default."
+                        s.CollectionText)
+                    callRange
+                    [ fix callRange (Text.textOfRange source callRange) linqText ]
+
+        // the SECOND answer rides as its own message so an editor offers
+        // it as a separate code action; the CLI never sees it and applies
+        // only the default above
+        match s.LinqSpelling with
+        | Some _ when offerAlternatives ->
+            [ primary
+              hint
+                  "FR0139"
+                  "…or keep the F# module: Array.contains is the idiomatic step and still beats Seq (measured 587ns to 464ns), without bringing System.Linq into the file."
+                  s.Range
+                  [ fix s.Range "Seq" "Array" ] ]
+        | _ -> [ primary ])
+
+[<EditorAnalyzer("SeqOnArray", "Seq functions on a proven array use the Array module", HelpBase)>]
+let seqOnArrayEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0139" "SeqOnArray" (fun () ->
+        whenChecked ctx (seqOnArrayMessages true ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("SeqOnArray", "Seq functions on a proven array use the Array module", HelpBase)>]
+let seqOnArrayCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0139" "SeqOnArray" (fun () ->
+        seqOnArrayMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
 // ---- FR0138 StringEmptiness ----
 
 let private stringEmptinessMessages

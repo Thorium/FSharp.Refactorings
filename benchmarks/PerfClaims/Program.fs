@@ -310,6 +310,77 @@ let cases =
         Before = fun () -> ($"{42}").Length
         After = fun () -> (string 42).Length }
 
+      { Code = "FR0139"
+        Name = "Seq.length on an array -> Array.length"
+        Cat = Perf
+        Iters = 200_000
+        Before = fun () -> Seq.length xsArr
+        After = fun () -> Array.length xsArr }
+
+      { Code = "FR0139"
+        Name = "Seq.head on an array -> Array.head"
+        Cat = Perf
+        Iters = 200_000
+        Before = fun () -> Seq.head xsArr
+        After = fun () -> Array.head xsArr }
+
+      { Code = "FR0139"
+        Name = "Seq.tryFind on an array -> Array.tryFind"
+        Cat = Perf
+        Iters = 50_000
+        Before =
+          fun () ->
+              match Seq.tryFind (fun x -> x = 999) xsArr with
+              | Some v -> v
+              | None -> 0
+        After =
+          fun () ->
+              match Array.tryFind (fun x -> x = 999) xsArr with
+              | Some v -> v
+              | None -> 0 }
+
+      // contains has TWO better answers: the CLI applies the idiomatic
+      // one, an editor also offers the vectorised one. Both are gated, so
+      // neither claim can drift
+      { Code = "FR0139"
+        Name = "Seq.contains on int[] -> Array.contains (editor alternative)"
+        Cat = Perf
+        Iters = 50_000
+        Before = fun () -> if Seq.contains 999 xsArr then 1 else 0
+        After = fun () -> if Array.contains 999 xsArr then 1 else 0 }
+
+      { Code = "FR0139"
+        Name = "Seq.contains on int[] -> vectorised LINQ (CLI default)"
+        Cat = Perf
+        Iters = 50_000
+        Before = fun () -> if Seq.contains 999 xsArr then 1 else 0
+        After = fun () -> if System.Linq.Enumerable.Contains(xsArr, 999) then 1 else 0 }
+
+      { Code = "FR0139"
+        Name = "Seq.exists on an array -> Array.exists"
+        Cat = Perf
+        Iters = 50_000
+        Before = fun () -> if Seq.exists (fun x -> x = 999) xsArr then 1 else 0
+        After = fun () -> if Array.exists (fun x -> x = 999) xsArr then 1 else 0 }
+
+      { Code = "FR0030"
+        Name = "Add loop over a RANGE -> AddRange [| a .. b |]"
+        Cat = Perf
+        Iters = 20_000
+        Before =
+          fun () ->
+              let r = ResizeArray<int>()
+
+              for x in 1..1000 do
+                  r.Add x
+
+              r.Count
+        After =
+          fun () ->
+              let r = ResizeArray<int>()
+              r.AddRange [| 1..1000 |]
+              r.Count }
+
       { Code = "FR0030"
         Name = "Add loop -> AddRange"
         Cat = Perf

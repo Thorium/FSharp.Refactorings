@@ -68,3 +68,39 @@ let ``an element reading a mutable local keeps its loop`` () =
         addRangeIn
             "let f (xs: int list) =\n    let acc = ResizeArray<int>()\n    let mutable offset = 1\n    for x in xs do\n        acc.Add(x + offset)\n    acc"
     )
+
+[<Fact>]
+let ``a range source becomes an array literal`` () =
+    // `acc.AddRange (a .. b)` does not parse (FS0751 indexer syntax), and
+    // `seq { a .. b }` parses but measures 4-6x SLOWER than the loop. An
+    // array literal is ICollection, so AddRange sizes once and copies:
+    // measured 1.7x faster than the loop, allocating less.
+    assertAddRange
+        "let f (acc: ResizeArray<int>) (a: int) (b: int) =\n    for x in a + 1 .. b do\n        acc.Add x"
+        "acc.AddRange [| a + 1 .. b |]"
+
+[<Fact>]
+let ``a PROJECTED range source is left alone`` () =
+    // measured: the Seq.map form is 3-8x slower than the loop, and the
+    // Array.map form only matches it while allocating 44% more
+    Assert.Empty(
+        addRangeIn "let f (acc: ResizeArray<int>) (a: int) (b: int) =\n    for x in a .. b do\n        acc.Add(x * 2)"
+    )
+
+[<Fact>]
+let ``a STEPPED range source is handled or left alone, never mis-emitted`` () =
+    // `for x in a .. 2 .. b` — whatever the rule decides, the result must
+    // parse and typecheck
+    match
+        addRangeIn "let f (acc: ResizeArray<int>) (a: int) (b: int) =\n    for x in a .. 2 .. b do\n        acc.Add x"
+    with
+    | [] -> ()
+    | [ s ] ->
+        let patched =
+            applyEdit
+                "let f (acc: ResizeArray<int>) (a: int) (b: int) =\n    for x in a .. 2 .. b do\n        acc.Add x"
+                s.Range
+                s.ReplacementText
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected at most one suggestion, got %A" other

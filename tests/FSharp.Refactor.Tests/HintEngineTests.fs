@@ -246,3 +246,25 @@ let ``an attribute argument is not an expression to simplify`` () =
     // attribute arguments are constant territory and no hint may fire there
     assertNoSuggestion
         "module Test\n[<System.AttributeUsage(System.AttributeTargets.All, AllowMultiple = true)>]\ntype MyAttr() =\n    inherit System.Attribute()"
+
+[<Fact>]
+let ``an OVERLOADED method group is never moved by a hint`` () =
+    // prismatic: `Array.head (Array.sortByDescending File.GetLastWriteTime x)`
+    // collapses to maxBy, but the collapsed form checks the projection
+    // before the element type is known and no overload can be picked
+    Assert.Empty(
+        findIn
+            "module Test\nopen System.IO\nlet f (logFiles: string[]) =\n    logFiles |> Array.sortByDescending File.GetLastWriteTime |> Array.head"
+    )
+
+[<Fact>]
+let ``a single-overload projection still collapses`` () =
+    // the guard must cost nothing where there is no ambiguity to fear.
+    // (Path.GetFileName is NOT such a case — string and ReadOnlySpan
+    // overloads both exist, and the collapsed form really does not
+    // compile; the guard standing down there is the point.)
+    match
+        findIn "module Test\nlet f (paths: string[]) =\n    paths |> Array.sortByDescending String.length |> Array.head"
+    with
+    | [ s ] -> Assert.Equal("Array.maxBy String.length paths", s.ReplacementText)
+    | other -> failwithf "Expected the maxBy collapse, got %A" other

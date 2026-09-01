@@ -131,6 +131,43 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                     Some(builder, body.Range)
                 | _ -> None)
 
+        // Every CE's own STATEMENT SPINE: the chain of let/use/sequential
+        // nodes hanging directly off its body. `let!` and `do!` are legal
+        // only there — a call nested inside ANOTHER binding's right-hand
+        // side sits inside the CE's range but not on its spine, and
+        // rewriting its `let` to `let!` cannot compile. That was 21 of the
+        // rollbacks in one sweep repo, all of this shape:
+        //     async {
+        //         let pair =
+        //             ...
+        //             let json = File.ReadAllText p   // NOT on the spine
+        let spineRanges =
+            let acc = ResizeArray<range>()
+
+            let rec walk (e: SynExpr) =
+                acc.Add e.Range
+
+                match e with
+                | LetOrUseE lou -> walk lou.Body
+                | SynExpr.Sequential(expr1 = a; expr2 = b) ->
+                    acc.Add a.Range
+                    walk b
+                | _ -> ()
+
+            for _, e in index.Exprs do
+                match e with
+                | SynExpr.App(
+                    isInfix = false; funcExpr = IdentName builder; argExpr = SynExpr.ComputationExpr(expr = body)) when
+                    ceBuilders.Contains builder
+                    ->
+                    walk body
+                | _ -> ()
+
+            acc.ToArray()
+
+        let onSpine (r: range) =
+            spineRanges |> Array.exists (fun s -> Range.equals s r)
+
         let lambdaRanges =
             index.Exprs
             |> Array.collect (fun (_, e) ->
@@ -206,7 +243,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                             returnInfo = None
                             headPat = SynPat.Named _
                             expr = rhs
-                            trivia = btrivia) ] when Range.equals rhs.Range target -> Some btrivia.LeadingKeyword.Range
+                            trivia = btrivia) ] when Range.equals rhs.Range target ->
+                        // the let node's own range travels too: only a
+                        // binding ON THE CE SPINE may become `let!`
+                        Some(btrivia.LeadingKeyword.Range, e.Range)
                     | _ -> None
                 | _ -> None)
 
@@ -294,15 +334,16 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                           []
 
                                   match bindingKeywordFor expr.Range with
-                                  | Some kw when textOfRange source kw = "let" ->
+                                  | Some(kw, letRange) when textOfRange source kw = "let" && onSpine letRange ->
                                       { Range = expr.Range
                                         Fixes = [ kw, "let", "let!"; renameFix ] @ bridgeFixes
                                         MethodName = methodId.idText }
                                   | Some _ -> ()
                                   | None ->
                                       // statement position takes do! — but
-                                      // only a NON-generic Task binds there
-                                      if isStatement expr.Range && returnsPlainTask twinM then
+                                      // only a NON-generic Task binds there,
+                                      // and only ON the CE's own spine
+                                      if isStatement expr.Range && onSpine expr.Range && returnsPlainTask twinM then
                                           let at = Range.mkRange expr.Range.FileName expr.Range.Start expr.Range.Start
 
                                           { Range = expr.Range
