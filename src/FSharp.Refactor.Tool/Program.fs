@@ -176,10 +176,17 @@ OPTIONS
   --report <file>       write every finding as SARIF 2.1.0 — the format CI
                         turns into inline annotations. Pairs with --dry-run
   --parse-only          no MSBuild, no reference resolution: sources come
-                        straight from the fsproj and only the syntactic
-                        analyzers run. For codebases that cannot compile on
-                        this machine (a type provider needing its database);
-                        typed rules and #if branches are out of reach
+                        straight from the fsproj and only the 56 of 113
+                        analyzers that never consult the typechecker run.
+                        NOT a substitute for a real run: what survives is
+                        skewed the wrong way — roughly a quarter of the
+                        correctness rules and a quarter of the performance
+                        ones, against three quarters of the cosmetic. A
+                        clean --parse-only says little about a codebase.
+                        For projects that cannot compile here at all (a
+                        type provider whose database is down, references
+                        that will not restore); #if branches are also out
+                        of reach
   --baseline <sarif>    findings whose fingerprints appear in this earlier
                         report are neither reported nor fixed: the ratchet.
                         Triage once, then only NEW findings surface
@@ -660,7 +667,7 @@ let private cliAnalyzers () =
 /// self-silence: their conservative gates assume a compilation that at
 /// least TRIED to resolve. Curated against the wrapper bodies in
 /// Analyzers.fs; a new syntactic analyzer earns its entry here.
-let private parseOnlySafeAnalyzers =
+let parseOnlySafeAnalyzers =
     set
         [ "AbbreviatedType"
           "CommentDoc"
@@ -673,6 +680,9 @@ let private parseOnlySafeAnalyzers =
           "CheckedArithmetic"
           "Composition"
           "ConversionMove"
+          // reads the parse tree only, so it belongs in the mode meant for
+          // codebases that cannot compile
+          "GenerativeLoop"
           "MapFusion"
           "StringEmptiness"
           "DuFieldNames"
@@ -1237,6 +1247,18 @@ let private sweptFiles = System.Collections.Generic.HashSet<string * string>()
 /// is only sound while the tree is untouched (or the run is a dry run).
 let mutable internal runTotalApplied = 0
 
+/// Compilations this run attempted — a multi-targeted project contributes
+/// one per framework, which is what the coverage warning counts against.
+let mutable internal runCompilations = 0
+
+/// Compilations this run could not analyse because they would not build.
+/// The exit code already reflects them, but a HUMAN reads the tail of the
+/// output, and the per-project errors scroll past long before it: a
+/// SwaggerProvider clone missing its paket restore failed 7 of 10
+/// compilations and still signed off with a cheerful finding count. A
+/// silent gap in coverage reads exactly like clean code.
+let mutable internal runBuildFailures = 0
+
 /// A source file with no `#if` in it parses identically under EVERY
 /// define set, so one sweep covers all frameworks and all projects — the
 /// key degrades to "". Files carrying directives keep the exact-defines
@@ -1383,23 +1405,51 @@ let private writeSarifReport (path: string) (findings: ReportedFinding seq) =
             // working directory gets the absolute scheme instead
             Uri(Path.GetFullPath file).AbsoluteUri
 
-    let levelOf severity =
+    // Every analyzer speaks at Hint severity — that is the SDK's editor
+    // channel, not a statement about how much the finding matters — so
+    // mapping severity alone stamped `note` on all of them and a
+    // swallowed exception rendered exactly like a redundant paren. The
+    // CATEGORY is the judgement the rules actually make, so it is what
+    // the report carries: correctness earns a warning, the rest stay
+    // notes. Nothing becomes an error — every finding here is advice
+    // about code that compiles.
+    let levelOf (code: string) severity =
         match severity with
         | Severity.Error -> "error"
         | Severity.Warning -> "warning"
         | Severity.Info
-        | Severity.Hint -> "note"
+        | Severity.Hint ->
+            match RuleCatalog.categoryOf code with
+            | RuleCatalog.Category.Correctness -> "warning"
+            | _ -> "note"
+
+    let categoryOf (code: string) =
+        RuleCatalog.name (RuleCatalog.categoryOf code)
+
+    // one entry per rule the run surfaced: code scanning groups and
+    // filters by these, and without them every finding is an opaque id
+    let rulesMetadata =
+        findings
+        |> Seq.map (fun f -> f.Code)
+        |> Seq.distinct
+        |> Seq.sort
+        |> Seq.map (fun code ->
+            dict
+                [ "id", box code
+                  "defaultConfiguration", box (dict [ "level", box (levelOf code Severity.Hint) ])
+                  "properties", box (dict [ "category", box (categoryOf code); "tags", box [ categoryOf code ] ]) ])
+        |> List.ofSeq
 
     let results =
         [ for f in findings ->
               dict
                   [ "ruleId", box f.Code
-                    "level", box (levelOf f.Severity)
+                    "level", box (levelOf f.Code f.Severity)
                     "message", box (dict [ "text", box f.Message ])
                     // stable across line shifts and sessions; the baseline
                     // mechanism keys on this
                     "partialFingerprints", box (dict [ FingerprintKey, box f.Fingerprint ])
-                    "properties", box (dict [ "fixable", box f.Fixable ])
+                    "properties", box (dict [ "fixable", box f.Fixable; "category", box (categoryOf f.Code) ])
                     "locations",
                     box
                         [ dict
@@ -1435,7 +1485,11 @@ let private writeSarifReport (path: string) (findings: ReportedFinding seq) =
                                     box (
                                         dict
                                             [ "name", box "fsharp-refactor"
-                                              "informationUri", box "https://github.com/Thorium/FSharp.Refactorings" ]
+                                              // the URL the package and --help both publish; this
+                                              // one said FSharp.Refactorings, and it is the link
+                                              // GitHub code scanning puts in front of users
+                                              "informationUri", box "https://github.com/Thorium/fsharp-refactor"
+                                              "rules", box rulesMetadata ]
                                     ) ]
                           )
                           "results", box results ] ] ]
@@ -2529,6 +2583,11 @@ let private verifyPass
 
 /// Analyze and fix one compilation; returns its exit code.
 let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool) (target: Target) =
+    // counted here, not from the target list: a multi-targeted project is
+    // ONE target but several compilations, so the target count would make
+    // the coverage warning read "2 of 1"
+    System.Threading.Interlocked.Increment(&runCompilations) |> ignore
+
     let onlyFile =
         match target with
         | Target.Project(_, only) -> only
@@ -2556,6 +2615,9 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
         if message.Contains "— skipped" || message.Contains "beyond --parse-only" then
             0
         else
+            if message.Contains "dotnet build failed" then
+                System.Threading.Interlocked.Increment(&runBuildFailures) |> ignore
+
             1
     | Ok options ->
         let analyzers =
@@ -2719,7 +2781,10 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     apiApplied <- applied
                     totalApplied <- totalApplied + applied
                     runTotalApplied <- runTotalApplied + applied
-                    printfn $"  {apiApplied} api-changing fix(es) applied"
+                    // --dry-run writes nothing; saying "applied" there reads
+                    // as though the project had just been rewritten
+                    printfn
+                        $"""  {apiApplied} api-changing fix(es) {if opts.DryRun then "would be applied" else "applied"}"""
 
                     if opts.DryRun then
                         // nothing was written, so a second round would
@@ -3015,6 +3080,8 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
         sweptFiles.Clear()
         directiveFreeCache.Clear()
         runTotalApplied <- 0
+        runBuildFailures <- 0
+        runCompilations <- 0
         honorAllSuppressions <- opts.HonorSuppressions
         parseOnlyRun <- opts.ParseOnly
         showNotes <- opts.Notes
@@ -3150,6 +3217,19 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
             if suppressionOverridden > 0 then
                 printfn
                     $"  ({suppressionOverridden} suppression comment(s) not honored by the \"suppressions\" policy — reported above, never auto-fixed)"
+
+            // LAST, after every count, because a coverage gap changes what
+            // all of them mean: a clean-looking tally over the projects that
+            // happened to build reads exactly like clean code
+            if runBuildFailures > 0 then
+                let scope =
+                    if runBuildFailures >= runCompilations then
+                        "NOTHING was analysed"
+                    else
+                        $"the findings above cover only the {runCompilations - runBuildFailures} that built"
+
+                eprintfn
+                    $"  WARNING: {runBuildFailures} of {runCompilations} compilation(s) could not be analysed — they do not build, so {scope}. Fix the build (a missing `dotnet tool restore`/`paket restore` is the usual cause), or use --parse-only for the syntactic rules."
 
             if exitCode = 0 && opts.FailOnFindings && reportedFindings.Count > 0 then
                 3

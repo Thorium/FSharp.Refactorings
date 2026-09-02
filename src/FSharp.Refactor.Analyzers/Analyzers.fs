@@ -1356,6 +1356,86 @@ let addRangeCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0030" "AddRange" (fun () ->
         addRangeMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
+/// Does the project's --langversion allow at least this F# major version?
+/// An absent flag means the SDK default, which is the latest.
+let private langVersionAtLeast (major: float) (options: AnalyzerProjectOptions) =
+    let explicitVersion =
+        options.OtherOptions
+        |> List.tryPick (fun (arg: string) ->
+            if arg.StartsWith "--langversion:" then
+                Some(arg.Substring "--langversion:".Length)
+            else
+                None)
+
+    match explicitVersion with
+    | None
+    | Some("latest" | "preview" | "latestmajor") -> true
+    | Some v ->
+        match
+            System.Double.TryParse(
+                v,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture
+            )
+        with
+        | true, n -> n >= major
+        | false, _ -> false
+
+/// FSharp.Core versions already read, keyed by the reference path: the
+/// probe is file IO and every analyzer would otherwise repeat it per file.
+let private fsharpCoreVersions =
+    System.Collections.Concurrent.ConcurrentDictionary<string, int>()
+
+/// Does the project reference an FSharp.Core new enough for this major?
+///
+/// String interpolation is a LIBRARY feature, and the compiler says so:
+/// "Feature 'string interpolation' requires the F# library for language
+/// version 5.0 or greater". `--langversion` cannot answer that, and a
+/// legacy project usually sets no langversion at all — so the flag gate
+/// waves it through and every interpolation fix then fails to compile.
+/// PethostBackup pins FSharp.Core 4.7 out of a net45 packages folder: 28
+/// FR0031 fixes applied, failed, and took a pass of unrelated fixes down
+/// with them when the whole pass rolled back.
+///
+/// An absent or unreadable reference answers TRUE — the same
+/// assume-the-latest stance the langversion gate takes, so a probe
+/// failure never silences a rule that works today.
+let private fsharpCoreAtLeast (major: int) (options: AnalyzerProjectOptions) =
+    let referencePath =
+        options.OtherOptions
+        |> List.tryPick (fun (arg: string) ->
+            if arg.StartsWith "-r:" then
+                // a path with spaces arrives quoted; matching the raw arg
+                // would miss it and silently wave the project through
+                let path = (arg.Substring 3).Trim('"')
+
+                if path.EndsWith("FSharp.Core.dll", System.StringComparison.OrdinalIgnoreCase) then
+                    Some path
+                else
+                    None
+            else
+                None)
+
+    match referencePath with
+    | None -> true
+    | Some path ->
+        let found =
+            fsharpCoreVersions.GetOrAdd(
+                path,
+                fun p ->
+                    try
+                        System.Reflection.AssemblyName.GetAssemblyName(p).Version.Major
+                    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                        System.Int32.MaxValue
+            )
+
+        found >= major
+
+/// Interpolation needs BOTH halves: the F# 5 syntax and the FSharp.Core
+/// that backs it.
+let private canInterpolate (options: AnalyzerProjectOptions) =
+    langVersionAtLeast 5.0 options && fsharpCoreAtLeast 5 options
+
 // ---- FR0031 StringConcat ----
 
 let private stringConcatMessages
@@ -1386,12 +1466,18 @@ let private stringConcatMessages
 [<EditorAnalyzer("StringConcat", "Rewrite string + chains as interpolated strings", HelpBase)>]
 let stringConcatEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0031" "StringConcat" (fun () ->
-        whenChecked ctx (stringConcatMessages true ctx.ParseFileResults.ParseTree ctx.SourceText))
+        if canInterpolate ctx.ProjectOptions then
+            whenChecked ctx (stringConcatMessages true ctx.ParseFileResults.ParseTree ctx.SourceText)
+        else
+            [])
 
 [<CliAnalyzer("StringConcat", "Rewrite string + chains as interpolated strings", HelpBase)>]
 let stringConcatCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0031" "StringConcat" (fun () ->
-        stringConcatMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        if canInterpolate ctx.ProjectOptions then
+            stringConcatMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+        else
+            [])
 
 // ---- FR0032 / FR0033 ObjectDesign ----
 
@@ -1761,12 +1847,18 @@ let private sprintfInterpolationMessages (parseTree: ParsedInput) (source: ISour
 [<EditorAnalyzer("SprintfInterpolation", "Rewrite fully applied sprintf as typed interpolation", HelpBase)>]
 let sprintfInterpolationEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0042" "SprintfInterpolation" (fun () ->
-        whenChecked ctx (sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        if canInterpolate ctx.ProjectOptions then
+            whenChecked ctx (sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        else
+            [])
 
 [<CliAnalyzer("SprintfInterpolation", "Rewrite fully applied sprintf as typed interpolation", HelpBase)>]
 let sprintfInterpolationCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0042" "SprintfInterpolation" (fun () ->
-        sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        if canInterpolate ctx.ProjectOptions then
+            sprintfInterpolationMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+        else
+            [])
 
 // ---- FR0043 TypedHoles ----
 
@@ -2744,6 +2836,68 @@ let seqOnArrayCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0139" "SeqOnArray" (fun () ->
         seqOnArrayMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
+// ---- FR0140 ObjectInitializer ----
+
+let private objectInitializerMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    ObjectInitializer.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0140"
+            (sprintf
+                "This constructor and the %d property assignment(s) after it are F#'s named-property construction spelled out. Setting them in the call reads as one constructed value instead of an assembled one, and the half-built object stops being nameable in between — the same calls, in the same order."
+                s.Count)
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("ObjectInitializer", "Fold property assignments into the construction", HelpBase)>]
+let objectInitializerEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0140" "ObjectInitializer" (fun () ->
+        whenChecked ctx (objectInitializerMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("ObjectInitializer", "Fold property assignments into the construction", HelpBase)>]
+let objectInitializerCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0140" "ObjectInitializer" (fun () ->
+        objectInitializerMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
+// ---- FR0141 GenerativeLoop ----
+
+let private generativeLoopMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    GenerativeLoop.find parseTree source
+    |> List.map (fun s ->
+        let carried = s.Carried |> List.map (sprintf "'%s'") |> String.concat ", "
+
+        // the tail is the point when there IS one: raising the flag reads
+        // as a break, but the iteration finishes first
+        let exit =
+            if s.TailAfterFlag > 0 then
+                sprintf
+                    "raising '%s' does not leave the loop — the %d statement(s) after it still run in that same iteration, and the loop exits only at the next condition check"
+                    s.Flag
+                    s.TailAfterFlag
+            else
+                sprintf
+                    "the loop leaves through '%s' at the next condition check rather than where the decision is made"
+                    s.Flag
+
+        hint
+            "FR0141"
+            (sprintf
+                "Consider a tail-recursive function here: this loop carries %s forward by mutation, and %s. Recursion would take that state as parameters and return at the point the decision is made, leaving no flag, no mutables, and no tail to run. Note only — naming the function and its parameters is yours."
+                carried
+                exit)
+            s.Range
+            [])
+
+[<EditorAnalyzer("GenerativeLoop", "State-carrying while loops read as tail recursion", HelpBase)>]
+let generativeLoopEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0141" "GenerativeLoop" (fun () ->
+        generativeLoopMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
+[<CliAnalyzer("GenerativeLoop", "State-carrying while loops read as tail recursion", HelpBase)>]
+let generativeLoopCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0141" "GenerativeLoop" (fun () ->
+        generativeLoopMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+
 // ---- FR0138 StringEmptiness ----
 
 let private stringEmptinessMessages
@@ -3121,31 +3275,6 @@ let matchBangCliAnalyzer (ctx: CliContext) : Async<Message list> =
         matchBangMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 // ---- FR0078 WhileBang ----
-
-/// Does the project's --langversion allow at least this F# major version?
-/// An absent flag means the SDK default, which is the latest.
-let private langVersionAtLeast (major: float) (options: AnalyzerProjectOptions) =
-    let explicitVersion =
-        options.OtherOptions
-        |> List.tryPick (fun (arg: string) ->
-            if arg.StartsWith "--langversion:" then
-                Some(arg.Substring "--langversion:".Length)
-            else
-                None)
-
-    match explicitVersion with
-    | None
-    | Some("latest" | "preview" | "latestmajor") -> true
-    | Some v ->
-        match
-            System.Double.TryParse(
-                v,
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture
-            )
-        with
-        | true, n -> n >= major
-        | false, _ -> false
 
 let private whileBangMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
     MatchBangRule.findWhileBang parseTree source

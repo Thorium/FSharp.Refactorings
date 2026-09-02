@@ -76,6 +76,13 @@ let parse (json: string) : Map<string, bool> =
 ///   FR0114 (pyramid flip) reorders branches for a style — short exit
 ///   first — that plenty of teams hold exactly the other way around
 ///   (happy path first). An opt-in, not a default.
+///   FR0141 (generative loop) names a rewrite it cannot carry out. The
+///   loops it finds drive a model, a stream, a channel or a graph
+///   frontier, and their state is mostly mutable OBJECTS — a
+///   StringBuilder, a Dictionary, a torch cache — which recursion carries
+///   along unchanged rather than removing. The observation is worth
+///   having on demand; volunteered on every run it is noise about a
+///   rewrite that often will not pay. An opt-in, not a default.
 let private defaultOff =
     set
         [ "fr0002"
@@ -85,7 +92,9 @@ let private defaultOff =
           "fr0099"
           "trailingsemicolon"
           "fr0114"
-          "pyramidflip" ]
+          "pyramidflip"
+          "fr0141"
+          "generativeloop" ]
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins
 /// over a name entry; absent rules are enabled unless default-off.

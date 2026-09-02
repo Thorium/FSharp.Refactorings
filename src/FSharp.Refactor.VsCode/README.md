@@ -4,7 +4,7 @@
 [Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.fsharp-refactor-vscode)
 
 
-137 functional refactoring hints with one-click quick fixes for F#,
+140 functional refactoring hints with one-click quick fixes for F#,
 delivered through Ionide.
 
 VS Code has no analyzer concept of its own — F# analyzers load through

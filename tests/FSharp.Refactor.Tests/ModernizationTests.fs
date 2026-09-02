@@ -710,3 +710,41 @@ let ``the direct Seq map spelling is the lazy nothing-runs bug too`` () =
     match suggestions with
     | [ s ] -> Assert.Equal(None, s.ReplacementText)
     | other -> failwithf "Expected exactly one seq map-ignore note, got %A" other
+
+[<Fact>]
+let ``modern indexer syntax is not a single-tuple list`` () =
+    // `grid[0, 1, 2]` is INDEXING. Since F# 6 it parses as an atomic
+    // application of a bracket literal — the same shape as `[ 0, 1, 2 ]` —
+    // and TorchSharp code is nothing but this (6 false notes in Fuuga)
+    let _, _, tuples =
+        cleanupsIn
+            "module Test\nlet grid = Array3D.zeroCreate<int> 3 3 3\nlet read = grid[0, 1, 2]\nlet write () = grid[0, 1, 2] <- 5"
+
+    Assert.Empty tuples
+
+[<Fact>]
+let ``the legacy dot-bracket indexer is not a single-tuple list either`` () =
+    let _, _, tuples =
+        cleanupsIn "module Test\nlet grid = Array3D.zeroCreate<int> 3 3 3\nlet read = grid.[0, 1, 2]"
+
+    Assert.Empty tuples
+
+[<Fact>]
+let ``a genuine single-tuple list still fires`` () =
+    // the paste trap the rule exists for: `,` where `;` was meant
+    let _, _, tuples = cleanupsIn "module Test\nlet trap = [ 1, 2 ]"
+
+    match tuples with
+    | [ s ] -> Assert.Equal(2, s.Elements)
+    | other -> failwithf "Expected exactly one single-tuple note, got %A" other
+
+[<Fact>]
+let ``a spaced list ARGUMENT is still a literal, not an index`` () =
+    // `f [ 1, 2 ]` with a space is a real argument (NonAtomic) — the trap
+    // is just as real there, so the index gate must not swallow it
+    let _, _, tuples =
+        cleanupsIn "module Test\nlet f (xs: (int * int) list) = xs.Length\nlet n = f [ 1, 2 ]"
+
+    match tuples with
+    | [ s ] -> Assert.Equal(2, s.Elements)
+    | other -> failwithf "Expected exactly one single-tuple note, got %A" other

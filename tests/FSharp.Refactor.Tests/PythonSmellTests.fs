@@ -222,3 +222,56 @@ let ``an F#6 element write needs the index too`` () =
         indexedLoopsIn
             "module Test\nlet f (xs: int[]) =\n    for i in 0 .. xs.Length - 1 do\n        xs[i] <- xs[i] + 1"
     )
+
+// Both index spellings must behave alike — `.[ ]` and the F# 6 `[ ]` are
+// the same operation, and a rule that sees only one silently half-works.
+
+[<Fact>]
+let ``the F#6 index spelling is noted too`` () =
+    let suggestions =
+        listIndexingIn
+            "let f (names: string list) (count: int) =\n    for i in 0 .. count - 1 do\n        printfn \"%s\" names[i]"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("names", s.CollectionText)
+    | other -> failwithf "Expected exactly one list-indexing note, got %A" other
+
+[<Fact>]
+let ``a bound taken from the list's own Length still notes - legacy spelling`` () =
+    let suggestions =
+        listIndexingIn
+            "let f (names: string list) =\n    for i in 0 .. names.Length - 1 do\n        printfn \"%s\" names.[i]"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("names", s.CollectionText)
+    | other -> failwithf "Expected exactly one list-indexing note, got %A" other
+
+[<Fact>]
+let ``a bound taken from the list's own Length still notes - F#6 spelling`` () =
+    let suggestions =
+        listIndexingIn
+            "let f (names: string list) =\n    for i in 0 .. names.Length - 1 do\n        printfn \"%s\" names[i]"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("names", s.CollectionText)
+    | other -> failwithf "Expected exactly one list-indexing note, got %A" other
+
+[<Fact>]
+let ``chained member access off the index - legacy spelling`` () =
+    let suggestions =
+        listIndexingIn
+            "let f (xs: string list) =\n    let mutable n = 0\n    for i in 0 .. xs.Length - 1 do\n        n <- n + xs.[i].Length\n    n"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("xs", s.CollectionText)
+    | other -> failwithf "Expected exactly one list-indexing note, got %A" other
+
+[<Fact>]
+let ``chained member access off the index - F#6 spelling`` () =
+    let suggestions =
+        listIndexingIn
+            "let f (xs: string list) =\n    let mutable n = 0\n    for i in 0 .. xs.Length - 1 do\n        n <- n + xs[i].Length\n    n"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("xs", s.CollectionText)
+    | other -> failwithf "Expected exactly one list-indexing note, got %A" other

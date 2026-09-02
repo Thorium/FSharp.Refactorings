@@ -34,6 +34,8 @@
     <Compile Include="..\FSharp.Refactor.Analyzers\ConversionMove.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\MapFusion.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\SeqOnArray.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\ObjectInitializer.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\GenerativeLoop.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\StringEmptiness.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\CeStrip.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\ActivePattern.fs" />

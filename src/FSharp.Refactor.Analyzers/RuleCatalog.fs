@@ -177,6 +177,8 @@ let private categories =
       "FR0137", Category.Performance // consecutive same-module map passes fuse via composition
       "FR0138", Category.Idiom // hand-rolled emptiness tests become String.IsNullOrEmpty/IsNullOrWhiteSpace
       "FR0139", Category.Performance // Seq.* on a proven array goes through IEnumerable
+      "FR0140", Category.Idiom // constructor then property sets is named-property construction spelled out
+      "FR0141", Category.Idiom // a state-carrying while loop is tail recursion written inside out
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

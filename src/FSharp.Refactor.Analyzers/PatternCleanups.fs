@@ -97,10 +97,23 @@ let find
     // tuples fire: that is the paste-trap shape, while a single tuple of
     // expressions ([ range, text, code ]) or of strings
     // ([ "SearchValues", "Create" ]) is a deliberate one-element table
-    for _, e in index.Exprs do
+    // `grid[0, 1, 2]` is INDEXING, not a literal. Since F# 6 that spells
+    // as an ATOMIC application of a bracket to the thing before it — the
+    // same parse shape as a list — so the atomic flag is what separates
+    // them (`f [1; 2]`, with a space, is a real argument and NonAtomic).
+    // The `.[ ]` spelling never reached here; the modern one it
+    // recommends did, and TorchSharp code is nothing but multi-dimensional
+    // indexing: 6 false notes in Fuuga's EvalTests alone.
+    let inIndexPosition (path: SyntaxNode list) (e: SynExpr) =
+        match path with
+        | SyntaxNode.SynExpr(SynExpr.App(flag = ExprAtomicFlag.Atomic; argExpr = arg)) :: _ -> arg.Range = e.Range
+        | _ -> false
+
+    for path, e in index.Exprs do
         match e with
         | SynExpr.ArrayOrListComputed(expr = SynExpr.Tuple(isStruct = false; exprs = elems)) when
-            elems.Length >= 2
+            not (inIndexPosition path e)
+            && elems.Length >= 2
             && elems
                |> List.forall (fun el ->
                    match el with
