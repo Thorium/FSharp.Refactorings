@@ -10,6 +10,7 @@ let private objInitIn (source: string) =
     let tree, sourceText, checkResults = parseAndCheck source
     ObjectInitializer.find tree sourceText checkResults
 
+[<Literal>]
 let private klass =
     "module Test\ntype Henkilo() =\n    member val Id = 0L with get, set\n    member val Etunimi = \"\" with get, set\n    member this.Shout () = 1\n"
 
@@ -219,3 +220,18 @@ let ``a factory whose parameter shares the property name must not silently rebin
         "module Test\ntype H() =\n    member val Id = 0L with get, set\ntype Factory =\n    static member Create (?Id: int64) = H()\nlet f () =\n    let h = Factory.Create()\n    h.Id <- 1L\n    h"
 
     Assert.Empty(objInitIn source)
+
+[<Fact>]
+let ``a cast value is parenthesised`` () =
+    // SQLProvider: `Connection = con :?> SqlConnection` parses as
+    // `(Connection = con) :?> SqlConnection` — an equality against an
+    // undefined `Connection`. The cast binds looser than the named `=`.
+    let source =
+        "module Test\ntype Conn() = class end\ntype Cmd() =\n    member val Connection : Conn = Conn() with get, set\nlet f (con: obj) =\n    let cmd = Cmd()\n    cmd.Connection <- con :?> Conn\n    cmd"
+
+    match objInitIn source with
+    | [ s ] ->
+        Assert.Equal("Cmd(Connection = (con :?> Conn))", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one suggestion, got %A" other

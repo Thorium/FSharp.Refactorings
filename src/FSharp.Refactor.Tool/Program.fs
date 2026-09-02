@@ -470,6 +470,22 @@ let private whitespaceRunRegex =
 let private compileItemRegex =
     Text.RegularExpressions.Regex("<Compile\\s+Include=\"([^\"]+)\"", Text.RegularExpressions.RegexOptions.Compiled)
 
+/// A PropertyGroup carrying a Condition — usually `'$(TargetFramework)'
+/// == 'net8.0'`. Its constants belong to ONE framework, and --parse-only
+/// picks no framework at all, so taking them would activate `#if`
+/// branches for a compilation that is no framework in particular:
+/// SQLProvider defines NETSTANDARD21 only for net6/8/10 and
+/// netstandard2.1, and reading it unconditionally hides the branch every
+/// other target actually compiles. The README already promised these are
+/// not parsed; now they are not.
+let private conditionalPropertyGroupRegex =
+    Text.RegularExpressions.Regex(
+        "<PropertyGroup[^>]*\\sCondition\\s*=[^>]*>.*?</PropertyGroup>",
+        Text.RegularExpressions.RegexOptions.Compiled
+        ||| Text.RegularExpressions.RegexOptions.Singleline
+        ||| Text.RegularExpressions.RegexOptions.IgnoreCase
+    )
+
 let private defineConstantsElementRegex =
     Text.RegularExpressions.Regex(
         "<DefineConstants[^>]*>([^<]*)</DefineConstants>",
@@ -507,8 +523,12 @@ let private parseOnlyArgs (projectPath: string) =
     if sources.Length = 0 then
         Error "no <Compile Include> items to parse (wildcards and imported items are beyond --parse-only)"
     else
+        // framework-conditional groups are blanked first, so only the
+        // constants that hold for EVERY target survive
+        let unconditionalText = conditionalPropertyGroupRegex.Replace(projectText, "")
+
         let defines =
-            [| for m in defineConstantsElementRegex.Matches projectText do
+            [| for m in defineConstantsElementRegex.Matches unconditionalText do
                    for piece in m.Groups.[1].Value.Split ';' do
                        let piece = piece.Trim()
 
@@ -2244,6 +2264,14 @@ let private frameworksOf (target: Target) =
 
 /// Build every framework, so a fix that suits the one we analyzed but not
 /// the others cannot pass as success.
+/// Every distinct error the build reported, not just the first few. The
+/// COUNT is what decides blame when a project was already broken: a
+/// pass/fail answer cannot tell "the breakage is not ours" from "the
+/// breakage is not ONLY ours", and answering the first when the second
+/// is true puts genuinely broken fixes back. SQLProvider had a vendored
+/// paket-files source broken outside this run; restoring the snapshot
+/// left it broken, the rebuild failed again, and every fix that had
+/// broken netstandard2.0 was re-applied on the strength of it.
 let private buildAllFrameworks (project: string) =
     let exitCode, stdout, stderr =
         runProcess processTimeout "dotnet" $"build \"{project}\" --nologo -v q"
@@ -2251,12 +2279,12 @@ let private buildAllFrameworks (project: string) =
     if exitCode = 0 then
         Ok()
     else
-        let lines =
+        Error(
             (stdout + stderr).Split '\n'
             |> Array.filter (fun l -> l.Contains "error")
-            |> Array.truncate 5
-
-        Error(String.concat "\n" lines)
+            |> Array.map (fun l -> l.Trim())
+            |> Array.distinct
+        )
 
 /// The source files as they stand, so one framework's pass can be undone
 /// if it turns out to have broken another's.
@@ -2936,21 +2964,36 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
                             let restored = restoreSnapshot snapshot
 
+                            let report (errors: string array) =
+                                errors |> Array.truncate 5 |> String.concat "\n"
+
                             match buildAllFrameworks project with
-                            | Error _ ->
+                            // Still broken without the fixes — but "still
+                            // broken" is not "not our fault". Comparing the
+                            // COUNT separates the two: fewer errors without
+                            // our changes means they were adding some, and
+                            // putting them back would hand over a project
+                            // broken in ways this run caused.
+                            | Error withoutFixes when withoutFixes.Length >= output.Length ->
                                 for path, text in currentTexts do
                                     writeSource path text
 
                                 eprintfn
                                     "A target framework fails to build, but it fails WITHOUT this run's fixes too — pre-existing breakage, fixes kept:"
 
-                                eprintfn $"{output}"
+                                eprintfn $"{report output}"
+                                1
+                            | Error withoutFixes ->
+                                eprintfn
+                                    $"A target framework was ALREADY broken, but applying broke it further ({output.Length} error(s) with this run's fixes, {withoutFixes.Length} without), so the {restored} file(s) it changed were put back:"
+
+                                eprintfn $"{report output}"
                                 1
                             | Ok() ->
                                 eprintfn
                                     $"Applying broke a target framework this run did not analyze, so the {restored} file(s) it changed were put back:"
 
-                                eprintfn $"{output}"
+                                eprintfn $"{report output}"
                                 1
                     | Target.Script _ ->
                         printfn "done; project still checks clean"

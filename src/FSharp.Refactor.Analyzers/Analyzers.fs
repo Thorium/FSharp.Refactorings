@@ -188,14 +188,40 @@ let cancellationCliAnalyzer (ctx: CliContext) : Async<Message list> =
 // ---- FR0119 AwaitableOverload ----
 
 let private awaitableMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    // The async twin is a CAPABILITY: DbConnection.BeginTransactionAsync
+    // and its kind arrived in netstandard2.1, and the twin resolves only
+    // against the framework being swept. On a wider pass of a
+    // multi-targeted project this rewrite lands in shared code and the
+    // narrow frameworks stop compiling — SQLProvider's Postgresql
+    // provider did exactly that.
+    //
+    // Unlike FR0038 the fix is SEVERAL edits (the binding keyword and the
+    // call), so it cannot pair with the project's guard the way a
+    // single-span swap does: two independent #if blocks would leave a
+    // `let!` in one world and its call in another. So on a pass that
+    // would need a guard the advice stands and the edit does not.
+    let guarded = (CapabilityFix.dualGuardConstant ()).IsSome
+
     AwaitableOverload.find parseTree source checkResults
     |> List.map (fun s ->
+        let fixes =
+            if guarded then
+                []
+            else
+                s.Fixes
+                |> List.map (fun (r, original, replacement) -> fix r original replacement)
+
+        let suffix =
+            if guarded then
+                " (no automatic fix here: this project targets frameworks whose surface differs, and the swap spans more than one edit)"
+            else
+                ""
+
         hint
             "FR0119"
-            $"'{s.MethodName}' blocks inside the computation although '{s.MethodName}Async' exists; binding the async twin keeps the thread free — and FR0118 hands it the CancellationToken on the next pass."
+            $"'{s.MethodName}' blocks inside the computation although '{s.MethodName}Async' exists; binding the async twin keeps the thread free — and FR0118 hands it the CancellationToken on the next pass.{suffix}"
             s.Range
-            (s.Fixes
-             |> List.map (fun (r, original, replacement) -> fix r original replacement)))
+            fixes)
 
 [<EditorAnalyzer("AwaitableOverload", "Use the async twin of a blocking call inside task/async", HelpBase)>]
 let awaitableEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -1407,7 +1433,7 @@ let private fsharpCoreAtLeast (major: int) (options: AnalyzerProjectOptions) =
             if arg.StartsWith "-r:" then
                 // a path with spaces arrives quoted; matching the raw arg
                 // would miss it and silently wave the project through
-                let path = (arg.Substring 3).Trim('"')
+                let path = (arg.Substring 3).Trim '"'
 
                 if path.EndsWith("FSharp.Core.dll", System.StringComparison.OrdinalIgnoreCase) then
                     Some path
@@ -1750,9 +1776,15 @@ let private caseInsensitiveMessages
                     method
                     method
 
+        // a capability fix like FR0038's: the StringComparison overloads of
+        // Contains/StartsWith/EndsWith arrived in netstandard2.1, so on a
+        // multi-targeted project this pairs with the project's own guard
+        // rather than breaking the frameworks that lack them. SQLProvider
+        // took `Contains("UNSIGNED", StringComparison.OrdinalIgnoreCase)`
+        // into shared code and stopped compiling for netstandard2.0.
         let fixes =
             match s.Replacement with
-            | Some replacement -> [ fix s.Range (Text.textOfRange source s.Range) replacement ]
+            | Some replacement -> [ CapabilityFix.make source s.Range (Text.textOfRange source s.Range) replacement ]
             | None -> []
 
         let primary = hint "FR0039" message s.Range fixes

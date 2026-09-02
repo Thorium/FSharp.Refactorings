@@ -60,6 +60,7 @@ let private (|PropertySet|_|) (name: string) (e: SynExpr) =
     | _ -> ValueNone
 
 /// Peel the leading run of property sets off a statement sequence.
+[<TailCall>]
 let rec private leadingSets (name: string) (e: SynExpr) (acc: (Ident * SynExpr) list) =
     match e with
     | SynExpr.Sequential(expr1 = PropertySet name (prop, rhs); expr2 = rest) ->
@@ -69,17 +70,19 @@ let rec private leadingSets (name: string) (e: SynExpr) (acc: (Ident * SynExpr) 
     | _ -> List.rev acc, Some e
 
 /// The identifier naming what is being called, for a typed lookup.
+[<TailCall>]
 let rec private calleeIdent (e: SynExpr) =
     match e with
-    | SynExpr.Ident i -> Some i
-    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
+    | SynExpr.Ident i -> ValueSome i
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
     | SynExpr.App(funcExpr = inner) -> calleeIdent inner
     | SynExpr.New(targetType = t) ->
         match t with
-        | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
-        | SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty -> Some(List.last ids)
-        | _ -> None
-    | _ -> None
+        | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty -> ValueSome(List.last ids)
+        | SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty ->
+            ValueSome(List.last ids)
+        | _ -> ValueNone
+    | _ -> ValueNone
 
 /// Does this expression CONSTRUCT, as opposed to merely returning an
 /// object? The distinction decides correctness, not tidiness: named
@@ -93,7 +96,7 @@ let private isConstruction (check: FSharpCheckFileResults) (source: ISourceText)
     | SynExpr.New _
     | SynExpr.App(isInfix = false) ->
         match calleeIdent e with
-        | Some ident ->
+        | ValueSome ident ->
             let r = ident.idRange
             let lineText = source.GetLineString(r.EndLine - 1)
 
@@ -113,7 +116,7 @@ let private isConstruction (check: FSharpCheckFileResults) (source: ISourceText)
                          false)
                 | _ -> false
             | None -> false
-        | None -> false
+        | ValueNone -> false
     | _ -> false
 
 /// Does any expression inside `r` mention `name`? Inside the constructor
@@ -168,6 +171,7 @@ let private isSettableProperty (check: FSharpCheckFileResults) (source: ISourceT
 /// Wrap once the one-line form would run past this column. Seven
 /// properties spliced onto one line made a 380-character line on the
 /// sample this rule was written for — correct, compiling, and unreadable.
+[<Literal>]
 let private wrapColumn = 110
 
 /// Splice the named properties into the constructor call's argument list.
@@ -209,7 +213,7 @@ let private withNamedArgs (ctorText: string) (startColumn: int) (args: string li
     let splice (joined: string) =
         if openIndex < 0 then
             // no argument list at all (`T` alone is not a construction we match)
-            trimmed + "(" + joined + ")"
+            $"{trimmed}({joined})"
         elif argsAreEmpty then
             trimmed.Substring(0, openIndex) + "(" + joined + ")"
         else
@@ -269,9 +273,14 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
                           let region = Range.mkRange ctor.Range.FileName ctor.Range.Start last.Range.End
 
+                          // the VALUE is parenthesised unless atomic. `=` in a
+                          // named property binds tighter than a cast, so
+                          // `Connection = con :?> SqlConnection` parses as
+                          // `(Connection = con) :?> SqlConnection` — an
+                          // equality against an undefined `Connection`, which
+                          // is exactly the error SQLProvider reported
                           let args =
-                              sets
-                              |> List.map (fun (p, rhs) -> $"{p.idText} = {textOfRange source rhs.Range}")
+                              sets |> List.map (fun (p, rhs) -> $"{p.idText} = {argumentText source rhs}")
 
                           { Range = region
                             OriginalText = textOfRange source region
