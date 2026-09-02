@@ -169,3 +169,55 @@ let ``sort family is not moved across an Array boundary`` () =
 let ``item is not treated as consuming`` () =
     // review regression: Array.item and List.item throw different exception types
     assertNoSuggestion "module Test\nlet f xs = xs |> Seq.toList |> List.item 1"
+
+[<Fact>]
+let ``a mutating operation keeps its eager conversion`` () =
+    // SQLProvider's shape, and 19 of its tests: the sequence is built FROM
+    // the dictionary the body assigns into, so Seq.toList is what keeps
+    // enumeration and mutation apart. Dropping it throws "Collection was
+    // modified" at run time - and it compiles, so no build check sees it
+    assertNoSuggestion
+        "module Test\nopen System.Collections.Generic\nlet f (d: Dictionary<int,int>) (items: seq<int * int>) =\n    items |> Seq.toList |> List.iter (fun (k, v) -> d.[k] <- v)"
+
+[<Fact>]
+let ``a non-mutating operation still moves`` () =
+    // the guard must not cost the ordinary case
+    assertPatched
+        "module Test\nlet f (xs: seq<int>) = xs |> Seq.toList |> List.iter (printfn \"%d\")"
+        "module Test\nlet f (xs: seq<int>) = xs |> Seq.iter (printfn \"%d\")"
+
+[<Fact>]
+let ``a module-level collection is never enumerated lazily under a callback`` () =
+    // `register` may write into the very collection the sequence reads —
+    // nothing in this file can tell — and the eager copy is what kept
+    // that safe. A collection owned by the function cannot be reached
+    // by a function it did not receive it from, so only a wider-scoped
+    // source is gated out
+    assertNoSuggestion
+        "module Test\nopen System.Collections.Generic\nlet registry = Dictionary<int, int>()\nlet register k = registry.[k] <- 1\nlet f () = registry.Keys |> Seq.toList |> List.iter register"
+
+[<Fact>]
+let ``a module-level collection under a callback-free operation still moves`` () =
+    // List.length takes no function: nothing can write during the walk
+    assertPatched
+        "module Test\nlet registry = ResizeArray<int>()\nlet f () = registry |> Seq.toList |> List.length"
+        "module Test\nlet registry = ResizeArray<int>()\nlet f () = registry |> Seq.length"
+
+[<Fact>]
+let ``a local collection written by a local closure keeps its conversion`` () =
+    // the write is not in the operation but in a closure the function
+    // itself defines: the whole function body is what gets read for `<-`
+    assertNoSuggestion
+        "module Test\nopen System.Collections.Generic\nlet f () =\n    let d = Dictionary<int, int>()\n    let register k = d.[k] <- 1\n    d.Keys |> Seq.toList |> List.iter register"
+
+[<Fact>]
+let ``a local collection under a pure callback moves`` () =
+    assertPatched
+        "module Test\nlet f () =\n    let xs = ResizeArray<int>()\n    xs |> Seq.toList |> List.iter (printfn \"%d\")"
+        "module Test\nlet f () =\n    let xs = ResizeArray<int>()\n    xs |> Seq.iter (printfn \"%d\")"
+
+[<Fact>]
+let ``a list literal source is already materialised`` () =
+    assertPatched
+        "module Test\nlet f g = [ 1; 2; 3 ] |> Seq.toArray |> Array.map g"
+        "module Test\nlet f g = [ 1; 2; 3 ] |> Seq.map g |> Seq.toArray"

@@ -48,3 +48,40 @@ let ``a three-element tuple is neither fst nor snd`` () =
 let ``a method argument keeps its lambda`` () =
     // the lambda-to-delegate conversion is doing work a function value may not
     assertNoSuggestion "module Test\nlet m (xs: System.Collections.Generic.List<int>) = xs.ConvertAll(fun x -> x)"
+
+[<Fact>]
+let ``a file that rebinds id does not get id`` () =
+    // nu's Behavior module redefines all three: `let id bhvr = returnB bhvr`.
+    // Rewriting `fun x -> x` to `id` there calls the module's own function,
+    // not FSharp.Core's — verified to break the build and roll back
+    assertNoSuggestion "module Test\nlet id (x: int) = x + 1\nlet m = List.map (fun x -> x) []"
+
+[<Fact>]
+let ``a file that rebinds fst still gets snd`` () =
+    // the guard is per NAME, not per file: shadowing one builtin says
+    // nothing about the others
+    assertReplacement "module Test\nlet fst (x: int) = x\nlet m = List.map (fun (a, b) -> b) []" "snd"
+
+[<Fact>]
+let ``a local id in another function does not cost this one its fix`` () =
+    // `let id = 42` somewhere in the file is the common shadowing; it only
+    // reaches the scope it sits in
+    assertReplacement "module Test\nlet g () =\n    let id = 42\n    id + 1\n\nlet m = List.map (fun x -> x) []" "id"
+
+[<Fact>]
+let ``a local id earlier in the same function shadows`` () =
+    assertNoSuggestion "module Test\nlet g () =\n    let id = 42\n    List.map (fun x -> x) [ id ]"
+
+[<Fact>]
+let ``a module-level id declared AFTER the lambda does not shadow it`` () =
+    // F# scope runs downward: the rebinding is not visible above itself
+    assertReplacement "module Test\nlet m = List.map (fun x -> x) []\nlet id (x: int) = x + 1" "id"
+
+[<Fact>]
+let ``a parameter named fst shadows`` () =
+    assertNoSuggestion "module Test\nlet g fst = List.map (fun (a, b) -> a) [ fst ]"
+
+[<Fact>]
+let ``a match-bound snd shadows`` () =
+    assertNoSuggestion
+        "module Test\nlet g o =\n    match o with\n    | Some snd -> List.map (fun (a, b) -> b) [ snd ]\n    | None -> []"

@@ -24,8 +24,27 @@ type Suggestion =
       OriginalText: string
       ReplacementText: string }
 
+/// How many attributes may share one bracket. Four is about where a merged
+/// line stops being a list you scan and starts being one you parse — but
+/// that is a house-style call, not a correctness one, so a repository can
+/// say otherwise:
+///
+///     { "FR0060": { "maxAttributes": 6, "wrapColumn": 120 } }
+[<Literal>]
+let DefaultMaxAttributes = 4
+
+/// And where the line stops fitting, whatever the count. Overridden by the
+/// `wrapColumn` knob above.
+[<Literal>]
+let DefaultWrapColumn = 110
+
 /// Merge candidate from one declaration's attribute lists.
-let private suggestionFor (source: ISourceText) (attributeLists: SynAttributeList list) =
+let private suggestionFor
+    (maxMerged: int)
+    (wrapColumn: int)
+    (source: ISourceText)
+    (attributeLists: SynAttributeList list)
+    =
     if attributeLists.Length < 2 then
         None
     elif
@@ -51,24 +70,37 @@ let private suggestionFor (source: ISourceText) (attributeLists: SynAttributeLis
 
             let span = Range.mkRange first.Range.FileName first.Range.Start last.Range.End
 
+            let attributes = attributeLists |> List.collect (fun l -> l.Attributes)
+
             let merged =
-                attributeLists
-                |> List.collect (fun l -> l.Attributes)
+                attributes
                 |> List.map (fun a -> textOfRange source a.Range)
                 |> String.concat "; "
 
-            Some
-                { Range = span
-                  OriginalText = textOfRange source span
-                  ReplacementText = $"[<{merged}>]" }
+            let replacement = $"[<{merged}>]"
+
+            // one merged line stops helping somewhere. Past a handful the
+            // list is no longer scannable, and past the wrap column it no
+            // longer fits; either way the separate brackets read better, so
+            // the rule stands down rather than inventing a wrapped layout
+            if
+                attributes.Length > maxMerged
+                || first.Range.StartColumn + replacement.Length > wrapColumn
+            then
+                None
+            else
+                Some
+                    { Range = span
+                      OriginalText = textOfRange source span
+                      ReplacementText = replacement }
 
 /// Find declarations wearing more than one attribute bracket group.
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+let find (maxMerged: int) (wrapColumn: int) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree
     let suggestions = ResizeArray<Suggestion>()
 
     let ofBinding (SynBinding(attributes = attrs)) =
-        suggestionFor source attrs |> Option.iter suggestions.Add
+        suggestionFor maxMerged wrapColumn source attrs |> Option.iter suggestions.Add
 
     for _, decl in index.Decls do
         match decl with
@@ -76,7 +108,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
         | SynModuleDecl.Types(typeDefns = defns) ->
             for SynTypeDefn(typeInfo = SynComponentInfo(attributes = typeAttrs); typeRepr = repr; members = extra) in
                 defns do
-                suggestionFor source typeAttrs |> Option.iter suggestions.Add
+                suggestionFor maxMerged wrapColumn source typeAttrs
+                |> Option.iter suggestions.Add
 
                 let members =
                     match repr with
@@ -92,10 +125,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                 match repr with
                 | SynTypeDefnRepr.Simple(simpleRepr = SynTypeDefnSimpleRepr.Union(unionCases = cases)) ->
                     for SynUnionCase(attributes = caseAttrs) in cases do
-                        suggestionFor source caseAttrs |> Option.iter suggestions.Add
+                        suggestionFor maxMerged wrapColumn source caseAttrs
+                        |> Option.iter suggestions.Add
                 | SynTypeDefnRepr.Simple(simpleRepr = SynTypeDefnSimpleRepr.Record(recordFields = fields)) ->
                     for SynField(attributes = fieldAttrs) in fields do
-                        suggestionFor source fieldAttrs |> Option.iter suggestions.Add
+                        suggestionFor maxMerged wrapColumn source fieldAttrs
+                        |> Option.iter suggestions.Add
                 | _ -> ()
         | _ -> ()
 

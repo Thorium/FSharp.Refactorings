@@ -259,7 +259,87 @@ let private walkPat record pat = walkPatsLoop record [ pat ]
 /// too; the names then come from whatever destructuring sites this file
 /// happens to hold, which is partial evidence but never an unsafe edit —
 /// naming fields leaves positional patterns working everywhere.
+/// What the companion signature says about this file's union cases.
+///
+/// A `.fsi` declares the case too — `| Box of int * int` — so naming the
+/// fields in the implementation ALONE gives "The names differ" and the
+/// project stops compiling (found on fcs-fable's TipFormatter). The fix
+/// therefore carries the signature with it: one atomic edit set spanning
+/// both files, or no suggestion at all.
+[<RequireQualifiedAccess>]
+type private Signature =
+    /// No companion signature; nothing to keep in step.
+    | Absent
+    /// The signature's union cases by name, with its own source for
+    /// rendering edits.
+    | Cases of cases: Map<string, SynField list> * sigSource: ISourceText
+    /// A signature exists but cannot be read here — editors install no
+    /// cross-file parser — so the fix cannot be completed and is withheld.
+    | Unreadable
+
+/// Union cases declared anywhere in a signature tree, by case name.
+let private unionCasesOfSignature (tree: ParsedInput) =
+    let cases = System.Collections.Generic.Dictionary<string, SynField list>()
+
+    let rec ofDecls (decls: SynModuleSigDecl list) =
+        for decl in decls do
+            match decl with
+            | SynModuleSigDecl.NestedModule(moduleDecls = inner) -> ofDecls inner
+            | SynModuleSigDecl.Types(types = types) ->
+                for SynTypeDefnSig(typeRepr = repr) in types do
+                    match repr with
+                    | SynTypeDefnSigRepr.Simple(repr = SynTypeDefnSimpleRepr.Union(unionCases = unionCases)) ->
+                        for SynUnionCase(ident = SynIdent(ident = id); caseType = caseType) in unionCases do
+                            match caseType with
+                            | SynUnionCaseKind.Fields fields -> cases[id.idText] <- fields
+                            | SynUnionCaseKind.FullType _ -> ()
+                    | _ -> ()
+            | _ -> ()
+
+    match tree with
+    | ParsedInput.SigFile(ParsedSigFileInput(contents = modules)) ->
+        for SynModuleOrNamespaceSig(decls = decls) in modules do
+            ofDecls decls
+    | ParsedInput.ImplFile _ -> ()
+
+    cases |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+
+/// Read the companion signature, if there is one.
+let private readSignature (implFile: string) =
+    if not (hasSignatureFile implFile) then
+        Signature.Absent
+    else
+        match ProjectSources.tryParse (System.IO.Path.ChangeExtension(implFile, ".fsi")) with
+        | Some(tree, sigSource) -> Signature.Cases(unionCasesOfSignature tree, sigSource)
+        | None -> Signature.Unreadable
+
+/// The signature's half of the edit set for one case, or None when the fix
+/// cannot be completed and so must not be offered.
+///
+/// A case the signature does not declare needs no edit: the type is hidden
+/// behind the signature, and the representation is the implementation's own
+/// business. A case it declares with a DIFFERENT arity, or with fields that
+/// are already named, is not the case we think it is — withhold.
+let private signatureEditsFor (signature: Signature) (caseName: string) (names: string list) (colon: string) =
+    match signature with
+    | Signature.Absent -> ValueSome []
+    | Signature.Unreadable -> ValueNone
+    | Signature.Cases(cases, sigSource) ->
+        match cases.TryFind caseName with
+        | None -> ValueSome []
+        | Some fields when
+            fields.Length = names.Length
+            && fields |> List.forall (fun (SynField(idOpt = idOpt)) -> idOpt.IsNone)
+            ->
+            ValueSome
+                [ for name, SynField(range = fieldRange) in List.zip names fields do
+                      let original = textOfRange sigSource fieldRange
+                      fieldRange, original, $"{name}{colon}{original}" ]
+        | Some _ -> ValueNone
+
 let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+    let signature = readSignature parseTree.FileName
+
     let index = AstIndex.ofTree parseTree
 
     // every union case name in the file, to detect ambiguous attribution
@@ -395,33 +475,39 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
 
               match named with
               | Some(names, sourceName) ->
+                  // the inserted names take the tuple's OWN spacing:
+                  // `int * int` gains `rx: int * ry: int`, the compact
+                  // `int*int` gains `rx:int*ry:int` — a space after the
+                  // colon in a spaceless tuple reads lopsided
+                  let fieldsText =
+                      match fields with
+                      | first :: _ ->
+                          let (SynField(range = fr)) = first
+                          let (SynField(range = lr)) = List.last fields
+                          textOfRange source (Range.mkRange fr.FileName fr.Start lr.End)
+                      | [] -> ""
+
+                  let colon =
+                      if fieldsText.Contains " * " || fields.Length = 1 then
+                          ": "
+                      else
+                          ":"
+
                   let edits =
-                      // the inserted names take the tuple's OWN spacing:
-                      // `int * int` gains `rx: int * ry: int`, the compact
-                      // `int*int` gains `rx:int*ry:int` — a space after the
-                      // colon in a spaceless tuple reads lopsided
-                      let fieldsText =
-                          match fields with
-                          | first :: _ ->
-                              let (SynField(range = fr)) = first
-                              let (SynField(range = lr)) = List.last fields
-                              textOfRange source (Range.mkRange fr.FileName fr.Start lr.End)
-                          | [] -> ""
-
-                      let colon =
-                          if fieldsText.Contains " * " || fields.Length = 1 then
-                              ": "
-                          else
-                              ":"
-
                       List.zip names fields
                       |> List.map (fun (name, SynField(range = fieldRange)) ->
                           let original = textOfRange source fieldRange
                           fieldRange, original, $"{name}{colon}{original}")
 
-                  { CaseName = caseName
-                    Names = names
-                    Source = sourceName
-                    Range = caseRange
-                    Edits = edits }
+                  // the signature must say the same thing, or nothing is
+                  // said at all: its edits join this set so both files
+                  // change together or neither does
+                  match signatureEditsFor signature caseName names colon with
+                  | ValueSome signatureEdits ->
+                      { CaseName = caseName
+                        Names = names
+                        Source = sourceName
+                        Range = caseRange
+                        Edits = edits @ signatureEdits }
+                  | ValueNone -> ()
               | None -> () ]

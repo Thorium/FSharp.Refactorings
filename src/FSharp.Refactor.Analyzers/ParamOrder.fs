@@ -303,6 +303,10 @@ let findApiChanges
     (check: FSharpCheckFileResults)
     (project: FSharpCheckProjectResults)
     (fileLookup: string -> FileContext option)
+    /// Call sites OUTSIDE this project's compilation — a script that
+    /// `#load`s the defining file compiles it into a different
+    /// compilation, so its uses are invisible to `project`.
+    (extraUses: FSharpSymbol -> FSharpSymbolUse[])
     : Suggestion list =
     if OptionModule.hasErrors check then
         []
@@ -335,7 +339,10 @@ let findApiChanges
                 | None -> None
                 | Some symbolUse when hasDistinctParamTypes symbolUse.Symbol ->
                     let uses =
-                        project.GetUsesOfSymbol symbolUse.Symbol
+                        // a `#load`ing script is a real call site that `project` cannot
+                        // see. Missing one is the single thing this rule cannot survive:
+                        // the definition changes shape and the script stops compiling.
+                        Array.append (project.GetUsesOfSymbol symbolUse.Symbol) (extraUses symbolUse.Symbol)
                         |> Array.filter (fun u -> not u.IsFromDefinition)
 
                     buildSuggestion candidate defFile.Source artifactsFor uses

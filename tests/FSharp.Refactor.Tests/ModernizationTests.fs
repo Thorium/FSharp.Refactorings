@@ -748,3 +748,55 @@ let ``a spaced list ARGUMENT is still a literal, not an index`` () =
     match tuples with
     | [ s ] -> Assert.Equal(2, s.Elements)
     | other -> failwithf "Expected exactly one single-tuple note, got %A" other
+
+[<Fact>]
+let ``new stays where a union case would capture the construction`` () =
+    // in expression position a UNION CASE wins over a type name, so `new` is
+    // the only thing forcing the constructor path. Nu's OpenGL.Texture
+    // declares a LazyTexture class beside a Texture.LazyTexture case:
+    // dropping `new` made a six-argument construction into a one-argument
+    // case application, and the tuple was checked against the case payload
+    let source =
+        "module Test\ntype Thing(a: int, b: int) =\n    member _.Sum = a + b\n\ntype Wrapper =\n    | Thing of Thing\n\nlet shadowed = new Thing(1, 2)"
+
+    Assert.Empty(newsIn source)
+
+[<Fact>]
+let ``new is still dropped where nothing shadows the type`` () =
+    // the guard must not cost the ordinary case
+    match newsIn "module Test\nlet sb = new System.Text.StringBuilder()" with
+    | [ s ] -> Assert.Equal("StringBuilder", s.TypeName)
+    | other -> failwithf "Expected the plain construction, got %A" other
+
+[<Fact>]
+let ``new is dropped where one assembly holds the name at both arities`` () =
+    // .NET overloads type names by arity, and a namespace is one fragment per
+    // assembly. Within ONE fragment F# picks by arity, so the bare `Resp()`
+    // compiles, as `TaskCompletionSource()` and `Lazy<int>(...)` do. The hazard
+    // is a name SPLIT across fragments: Microsoft.Extensions.AI.Abstractions
+    // holds `ChatResponse`, Microsoft.Extensions.AI holds `ChatResponse<'T>`,
+    // and Fuuga's Eval failed with "takes 2 argument(s) but is here given 0".
+    // A single compilation cannot stage that; the guard counts fragments, so
+    // this fixture must NOT be declined
+    let source =
+        "namespace Test
+
+type Resp() =
+    member _.X = 1
+
+type Resp<'a>(a: 'a, b: int) =
+    member _.A = a
+
+module M =
+    let r = new Resp()"
+
+    match newsIn source with
+    | [ s ] ->
+        let patched = applyEdit source s.Range ""
+
+        Assert.True(
+            typechecksCleanly patched,
+            $"Patched source does not typecheck:
+%s{patched}"
+        )
+    | other -> failwithf "Expected the one-fragment construction to qualify, got %A" other

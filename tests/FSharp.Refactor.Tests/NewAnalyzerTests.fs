@@ -298,3 +298,37 @@ let ``a piped construction of the async is flagged too`` () =
     match suggestions with
     | [ s ] -> Assert.Equal("makeAsync", s.Name)
     | other -> failwithf "Expected exactly one piped suggestion, got %A" other
+
+[<Fact>]
+let ``a shape-changing fix beside a signature file fires only on private declarations`` () =
+    // a .fsi declares every internal declaration too, and must agree on the
+    // compiled shape: `[<Struct>]` on the implementation alone is a
+    // representation mismatch. Only private escapes the signature. The gate
+    // is Visibility.isInScope, shared by FR0011, FR0016 and FR0134
+    let dir =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsref-sig-" + System.Guid.NewGuid().ToString "N")
+
+    System.IO.Directory.CreateDirectory dir |> ignore
+
+    try
+        let du name =
+            $"module internal M\n\ntype {name} Shape =\n    | Box of side: int\n    | Ball of radius: int\n"
+
+        System.IO.File.WriteAllText(
+            System.IO.Path.Combine(dir, "M.fsi"),
+            "module internal M\n\ntype Shape =\n    | Box of side: int\n    | Ball of radius: int\n"
+        )
+
+        let impl = System.IO.Path.Combine(dir, "M.fs")
+        let internalTree, internalText = parseNamed impl (du "internal")
+        Assert.Empty(StructDu.find true internalTree internalText)
+
+        let privateTree, privateText = parseNamed impl (du "private")
+        Assert.NotEmpty(StructDu.find false privateTree privateText)
+
+        // no signature beside it: internal is in scope as before
+        let lone = System.IO.Path.Combine(dir, "N.fs")
+        let loneTree, loneText = parseNamed lone (du "internal")
+        Assert.NotEmpty(StructDu.find false loneTree loneText)
+    finally
+        System.IO.Directory.Delete(dir, true)

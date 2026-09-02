@@ -41,20 +41,27 @@ let dualGuardConstant () : string voption =
     | c when c |> Seq.forall (fun ch -> Char.IsLetterOrDigit ch || ch = '_') -> ValueSome c
     | _ -> ValueNone
 
+/// Set on a pass over a framework WIDER than the project's narrowest,
+/// when the project offers no framework-shaped constant to guard with.
+/// A capability fix there can only be applied plainly, into code the
+/// narrow framework also compiles, and the all-frameworks build then
+/// reverts it — taking every innocent fix in those files with it.
+/// SwaggerProvider paid 62 applied fixes and 7 files reverted for a
+/// handful of char overloads.
+///
+/// Nothing can be emitted safely in that position, so nothing is: the
+/// rule keeps its advice and drops the fix.
+let guardUnavailable () =
+    Environment.GetEnvironmentVariable "FSREF_NO_GUARD" = "1"
+
 /// Does the file already use conditional compilation? Only then may a
 /// fix introduce more of it.
 let usesConditionals (source: ISourceText) =
-    let mutable found = false
-    let mutable i = 0
-    let count = source.GetLineCount()
-
-    while not found && i < count do
-        if source.GetLineString(i).TrimStart().StartsWith "#if" then
-            found <- true
-
-        i <- i + 1
-
-    found
+    // ISourceText is an indexer, not a sequence, so the range is the thing
+    // being searched. Seq.exists short-circuits exactly as the hand-rolled
+    // flag loop did
+    seq { 0 .. source.GetLineCount() - 1 }
+    |> Seq.exists (fun i -> source.GetLineString(i).TrimStart().StartsWith "#if")
 
 /// The directive condition governing a line, scanned upward with nesting
 /// tracked: an `#endif` above us opens a balanced region to skip; an

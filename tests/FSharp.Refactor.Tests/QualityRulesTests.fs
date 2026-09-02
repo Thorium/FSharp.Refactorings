@@ -2266,3 +2266,42 @@ let ``a single return-bang arm is never wrapped`` () =
         for r, _ in edits do
             Assert.False(r.StartLine <= 7 && r.EndLine >= 7 && r.StartLine > 5)
     | None -> ()
+
+[<Fact>]
+let ``FR0013 leaves parens alone inside a shorthand lambda`` () =
+    // `_.` demands an ATOMIC body: `_.reshape([| n |])` compiles and
+    // `_.reshape [| n |]` does not. Found on toro, where six of these were
+    // applied, broke the build and were rolled back
+    let source =
+        "module Test\ntype Box() =\n    member _.reshape(a: int64[]) = a\nlet f (bs: Box list) = bs |> List.map _.reshape([| 1L |])"
+
+    let tree, sourceText = parse source
+    Assert.Empty(RedundantParens.find tree sourceText)
+
+[<Fact>]
+let ``FR0130 stands down where a signature file declares the value`` () =
+    // `[<Literal>]` is part of what a signature must agree on, so annotating
+    // only the implementation gives "The literal constant values and/or
+    // attributes differ" and the project stops compiling. Found on Fable's
+    // fcs-fable, which carries 176 signature files
+    let dir =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsref-fsi-" + System.Guid.NewGuid().ToString "N")
+
+    System.IO.Directory.CreateDirectory dir |> ignore
+
+    try
+        let impl = System.IO.Path.Combine(dir, "M.fs")
+        System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "M.fsi"), "module M\n\nval internal version: string\n")
+        let source = "module M\n\nlet internal version = \"1.0\"\n"
+        System.IO.File.WriteAllText(impl, source)
+
+        let tree, sourceText = parseNamed impl source
+        Assert.Empty(LiteralConst.find false tree sourceText)
+
+        // ...and the same source without a signature beside it still qualifies
+        let lone = System.IO.Path.Combine(dir, "N.fs")
+        System.IO.File.WriteAllText(lone, source)
+        let loneTree, loneText = parseNamed lone source
+        Assert.NotEmpty(LiteralConst.find false loneTree loneText)
+    finally
+        System.IO.Directory.Delete(dir, true)

@@ -475,3 +475,49 @@ let commentsWithText (parseTree: ParsedInput) (source: ISourceText) =
             | FSharp.Compiler.SyntaxTrivia.CommentTrivia.BlockComment r -> r)
 
     ranges |> List.map (fun r -> r, textOfRange source r)
+
+/// Does a companion `.fsi` declare this file's contents?
+///
+/// A signature and its implementation must agree on more than types: field
+/// NAMES, and attributes like `[<Literal>]`, are part of the contract. A rule
+/// that reshapes a declaration in the .fs alone therefore stops the project
+/// compiling — "The names differ", "The literal constant values and/or
+/// attributes differ". Both were found on Fable's fcs-fable, which carries
+/// 176 signature files.
+///
+/// Fixing such a rewrite properly means editing the .fsi in step, which is
+/// the same reason the api pass skips projects carrying signatures. Until a
+/// rule can do that, it stands down here.
+let hasSignatureFile (fileName: string) =
+    try
+        not (System.String.IsNullOrEmpty fileName)
+        && System.IO.File.Exists(System.IO.Path.ChangeExtension(fileName, ".fsi"))
+    with _ -> // an unreadable path simply is not a signature; fsharpanalyzer: ignore-line FR0055
+        false
+
+/// Every name a pattern binds: `x`, the `a` and `b` of `(a, b)`, the `f`
+/// and its parameters of `f (x: int) y`, the `v` of `Some v as v`.
+[<TailCall>]
+let rec private patNamesLoop (acc: string list) (pending: SynPat list) =
+    match pending with
+    | [] -> acc
+    | p :: rest ->
+        let acc, next =
+            match p with
+            | SynPat.Named(ident = SynIdent(ident = id)) -> id.idText :: acc, rest
+            | SynPat.As(lhsPat = lhs; rhsPat = rhs) -> acc, lhs :: rhs :: rest
+            | SynPat.Typed(pat = inner)
+            | SynPat.Attrib(pat = inner)
+            | SynPat.Paren(inner, _) -> acc, inner :: rest
+            | SynPat.Tuple(elementPats = ps)
+            | SynPat.ArrayOrList(elementPats = ps)
+            | SynPat.Ands(pats = ps) -> acc, ps @ rest
+            | SynPat.Or(lhsPat = lhs; rhsPat = rhs) -> acc, lhs :: rhs :: rest
+            | SynPat.LongIdent(longDotId = SynLongIdent(id = [ head ]); argPats = SynArgPats.Pats ps) ->
+                head.idText :: acc, ps @ rest
+            | SynPat.LongIdent(argPats = SynArgPats.Pats ps) -> acc, ps @ rest
+            | _ -> acc, rest
+
+        patNamesLoop acc next
+
+let patNames (p: SynPat) : string list = patNamesLoop [] [ p ]

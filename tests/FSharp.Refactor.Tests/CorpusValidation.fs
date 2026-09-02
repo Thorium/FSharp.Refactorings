@@ -118,7 +118,12 @@ let ``corpus fixes still parse`` () : unit =
                       for s in TrailingSemicolon.find tree sourceText -> s.Range, s.ReplacementText, "FR0099"
                       for s in MatchToIf.find tree sourceText -> s.Range, s.ReplacementText, "FR0001"
                       for s in RaiseFailwith.find tree sourceText -> s.Range, s.ReplacementText, "FR0024"
-                      for s in AttributeMerge.find tree sourceText -> s.Range, s.ReplacementText, "FR0060"
+                      for s in
+                          AttributeMerge.find
+                              AttributeMerge.DefaultMaxAttributes
+                              AttributeMerge.DefaultWrapColumn
+                              tree
+                              sourceText -> s.Range, s.ReplacementText, "FR0060"
                       for s in HintEngine.find [] tree sourceText None -> s.Range, s.ReplacementText, "FR0011/12"
                       for s in Simplification.find tree sourceText None -> s.Range, s.ReplacementText, "FR0010"
                       for s in ConversionMove.find tree sourceText -> s.Range, s.ReplacementText, "FR0004"

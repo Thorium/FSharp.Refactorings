@@ -94,7 +94,18 @@ let private defaultOff =
           "fr0114"
           "pyramidflip"
           "fr0141"
-          "generativeloop" ]
+          "generativeloop"
+          // both of these have documented themselves as off by default since
+          // they were written, and neither was ever listed here — so they ran
+          // on every sweep. They are the two churniest rules in the
+          // catalogue: one annotates every constant in the codebase, the
+          // other renames every test. FR0130 is how fcs-fable ended up with
+          // [<Literal>] on values its signature files declare without one,
+          // which does not compile
+          "fr0130"
+          "literalconst"
+          "fr0133"
+          "namequoting" ]
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins
 /// over a name entry; absent rules are enabled unless default-off.

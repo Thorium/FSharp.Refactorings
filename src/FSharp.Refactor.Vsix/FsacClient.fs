@@ -81,7 +81,7 @@ let private findFsac () =
         Path.Combine(Path.GetDirectoryName(typeof<Diag>.Assembly.Location), "fsac", "fsautocomplete.dll")
 
     if File.Exists bundled then
-        Some("dotnet", $"\"%s{bundled}\"")
+        ValueSome("dotnet", $"\"%s{bundled}\"")
     else
         let toolExe =
             Path.Combine(
@@ -91,7 +91,10 @@ let private findFsac () =
                 "fsautocomplete.exe"
             )
 
-        if File.Exists toolExe then Some(toolExe, "") else None
+        if File.Exists toolExe then
+            ValueSome(toolExe, "")
+        else
+            ValueNone
 
 /// Directories to hand FSAC as analyzer paths: the analyzers bundled with
 /// this extension (built against the same SDK its FSAC pairs with).
@@ -111,10 +114,10 @@ let private startLock = obj ()
 
 let private startSession (rootDir: string) : Session option =
     match findFsac () with
-    | None ->
+    | ValueNone ->
         trace "fsautocomplete not found: bundle it or `dotnet tool install -g fsautocomplete`"
         None
-    | Some(exe, argPrefix) ->
+    | ValueSome(exe, argPrefix) ->
         let psi =
             ProcessStartInfo(
                 FileName = exe,

@@ -168,6 +168,27 @@ let private isSettableProperty (check: FSharpCheckFileResults) (source: ISourceT
         | _ -> false
     | None -> false
 
+/// Does the construction already carry a TYPE-ANNOTATED argument?
+///
+/// `ChatResponse(assistantMsg: ChatMessage)` cannot take named properties
+/// appended to it: after the `:` the parser is reading a TYPE, and the comma
+/// that would introduce the first property ends it — "Unexpected symbol ','
+/// in expression", then the rest of the file fails to parse. Verified
+/// directly: `Resp(m: Msg, Model = "a")` does not compile, while
+/// `Resp(m, Model = "a")` does. Found on Fuuga's McpToolRouting.
+let private hasAnnotatedArgument (e: SynExpr) =
+    let rec annotated (arg: SynExpr) =
+        match arg with
+        | SynExpr.Typed _ -> true
+        | SynExpr.Paren(expr = inner) -> annotated inner
+        | SynExpr.Tuple(exprs = items) -> items |> List.exists annotated
+        | _ -> false
+
+    match e with
+    | SynExpr.App(argExpr = arg) -> annotated arg
+    | SynExpr.New(expr = arg) -> annotated arg
+    | _ -> false
+
 /// Wrap once the one-line form would run past this column. Seven
 /// properties spliced onto one line made a 380-character line on the
 /// sample this rule was written for — correct, compiling, and unreadable.
@@ -247,7 +268,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
               | LetOrUseE lou when not (lou.IsBang || lou.IsUse) ->
                   match lou.Bindings with
                   | [ SynBinding(headPat = SynPat.Named(ident = SynIdent(ident = name)); expr = ctor) ] when
-                      isSingleLine ctor.Range && isConstruction check source ctor
+                      isSingleLine ctor.Range && not (hasAnnotatedArgument ctor)
                       ->
                       // `rest` must exist: these are the statements of an
                       // expression body, so folding away every one of them
@@ -267,6 +288,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           && sets
                              |> List.forall (fun (_, rhs) ->
                                  isSingleLine rhs.Range && not (mentions index name.idText rhs.Range))
+                          // the typed lookups go LAST: each costs an FCS symbol
+                          // resolution, and only a binding actually followed by
+                          // property sets can reach them. From the `when` clause
+                          // `isConstruction` charged that price for every
+                          // single-line `let x = f a` in the file.
+                          && isConstruction check source ctor
                           && sets |> List.forall (fun (p, _) -> isSettableProperty check source p)
                       then
                           let last = sets |> List.last |> snd

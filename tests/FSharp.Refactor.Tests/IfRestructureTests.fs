@@ -682,3 +682,42 @@ let ``an INDENTED group's commented member extracts without eating indentation``
         Assert.DoesNotContain("\n        /// Adds one", patched)
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``each arm keeps its own comment inside the or-pattern`` () =
+    // an arm carrying a comment is an arm the author treats as a distinct
+    // case, whatever its body says. Merging is fine; losing the comments
+    // that tell the cases apart is not, so they travel with their patterns
+    let source =
+        "module Test\nlet f (a: int) =\n    match a with\n    | 1 ->\n        // one\n        true\n    | 2 ->\n        // two\n        true\n    | _ -> false"
+
+    match armMergesIn source with
+    | [ s ] ->
+        Assert.Equal(2, s.Count)
+        Assert.Equal("| 1\n    // one\n    | 2 ->\n        // two\n        true", s.NewText)
+    | other -> failwithf "Expected one comment-carrying merge, got %A" other
+
+[<Fact>]
+let ``a comment between two arms is not reproduced, so the merge is held back`` () =
+    // it belongs to neither arm's range and cannot be placed. The rule still
+    // offers the merge; the comment guard is what refuses it, and refusing
+    // beats deleting
+    let source =
+        "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> true\n    // between\n    | 2 -> true\n    | _ -> false"
+
+    match armMergesIn source with
+    | [ s ] -> Assert.DoesNotContain("// between", s.NewText)
+    | other -> failwithf "Expected one merge, got %A" other
+
+[<Fact>]
+let ``a comment inside the body is not hoisted as well as spliced`` () =
+    // the rule only fires when the bodies are textually identical, so a
+    // comment inside one IS the comment the survivor already carries.
+    // Hoisting it printed `(* why *)` three times — and it compiles, so no
+    // build check would ever have caught it
+    let source =
+        "module Test\nlet f (a: int) =\n    match a with\n    | 1 -> 1 (* why *) + 1\n    | 2 -> 1 (* why *) + 1\n    | _ -> 0"
+
+    match armMergesIn source with
+    | [ s ] -> Assert.Equal("| 1\n    | 2 -> 1 (* why *) + 1", s.NewText)
+    | other -> failwithf "Expected one merge, got %A" other

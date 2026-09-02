@@ -593,6 +593,40 @@ let private isOverloadedMethodGroup (check: FSharpCheckFileResults) (source: ISo
         | None -> false
     | _ -> false
 
+/// An `=` that might be a NAMED ARGUMENT rather than a comparison.
+///
+/// F# parses `Timer(period, AutoReset = true)` with the named argument as an
+/// ordinary equality — only the type checker ever knows better. A hint that
+/// rewrites `x = true` to `x` therefore turns a property assignment into a
+/// stray identifier: "The value or constructor 'AutoReset' is not defined",
+/// and the constructor is suddenly handed two positional arguments. Found on
+/// Fuuga's LspClient.
+///
+/// Position is the only syntactic signal available here — the engine runs
+/// under --parse-only, where no symbol can be resolved — so an equality
+/// sitting directly in a call's argument list is left alone. That costs the
+/// rewrite of a genuine comparison passed as an argument, `f (x = true)`,
+/// which is the cheaper mistake: a fix not offered rather than a file that
+/// stops compiling.
+let private maybeNamedArgument (path: SyntaxNode list) (e: SynExpr) =
+    let isEquality =
+        match e with
+        | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SynExpr.Ident op)) -> op.idText = "op_Equality"
+        | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ op ])))) ->
+            op.idText = "op_Equality"
+        | _ -> false
+
+    let rec insideCallArguments nodes =
+        match nodes with
+        // the argument list itself, and the tuple of arguments within it
+        | SyntaxNode.SynExpr(SynExpr.Paren _) :: rest
+        | SyntaxNode.SynExpr(SynExpr.Tuple _) :: rest -> insideCallArguments rest
+        | SyntaxNode.SynExpr(SynExpr.New _) :: _ -> true
+        | SyntaxNode.SynExpr(SynExpr.App _) :: _ -> true
+        | _ -> false
+
+    isEquality && insideCallArguments path
+
 let find
     (extraRules: string list)
     (parseTree: ParsedInput)
@@ -719,7 +753,11 @@ let find
                             | SyntaxNode.SynExpr(SynExpr.Quote _) -> true
                             | _ -> false)
 
-                    if isSingleLine expr.Range && not insideQuotation then
+                    if
+                        isSingleLine expr.Range
+                        && not insideQuotation
+                        && not (maybeNamedArgument path expr)
+                    then
                         index.TryFind(headKey expr) |> Option.iter (tryRules path expr)
 
                         // a pipelined expression can also match rules indexed

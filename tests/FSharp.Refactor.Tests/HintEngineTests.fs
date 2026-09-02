@@ -193,6 +193,15 @@ let ``named argument in a multi-argument call is never rewritten`` () =
     assertNoSuggestion
         "module Test\nlet f () = System.Text.Json.JsonDocumentOptions(CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true)"
 
+[<Fact>]
+let ``named argument on a new construction is never rewritten`` () =
+    // the argument list of `new T(...)` hangs off SynExpr.New, not App:
+    // Fuuga's `new Timers.Timer(period, AutoReset = true)` lost its
+    // AutoReset until the guard learned that ancestor
+    assertNoSuggestion
+        "module Test
+let f (period: float) = new System.Timers.Timer(period, AutoReset = true)"
+
 // ---- harder cases ----
 
 [<Fact>]

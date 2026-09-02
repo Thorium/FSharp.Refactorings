@@ -182,7 +182,7 @@ if applying ever introduces one.
 | `--format json` | Machine-readable stdout: progress prose moves to stderr and the run's findings leave as one JSON document (code, severity, fixable, position, message, fingerprint, source snippet). The default output stays human-readable. |
 | `--rules` | Print the rule catalog — code, category, enabled-by-default (honors `--format json`). |
 | `--mcp` | Serve the tool as an MCP server over stdio (newline-delimited JSON-RPC, no extra dependencies): tools `analyze` (target, codes/categories, parseOnly, apply) and `list_rules`. One warm typechecker lives across calls, so the first analyze pays the reference parse and the rest answer from a hot cache — the economics agent loops need. |
-| `--parse-only` | For a codebase that cannot COMPILE on this machine — a type provider needing its database, references that cannot restore. No MSBuild, no reference resolution: sources come straight from the fsproj's `<Compile>` items, and only the 56 of 113 analyzers that never consult the typechecker run (the typed rules are excluded outright, not trusted to self-silence). **It is not a substitute for a real run, and what survives is skewed the wrong way**: measured across the corpus, roughly a quarter of the correctness rules and a quarter of the performance rules still fire, against three quarters of the cosmetic ones — so a clean `--parse-only` says very little, and says least about the things worth knowing. Findings lost run to 38% on a typed-heavy codebase and under 10% on one the cosmetic rules dominate. Safety shifts accordingly: instead of a build, the gate is that a pass must not RAISE the compilation's error count over its baseline, and the usual parse-level protections (comment guard, overlap holds) still apply. Limitations: `#if` branches behind conditional or computed `DefineConstants` are not parsed, wildcard `<Compile>` globs are refused, and multi-framework passes collapse to one. Review the diff — the all-frameworks build arbiter is exactly what this mode does without. |
+| `--parse-only` | For a codebase that cannot COMPILE on this machine — a type provider needing its database, references that cannot restore. No MSBuild, no reference resolution: sources come straight from the fsproj's `<Compile>` items, and only the 55 of 113 analyzers that never consult the typechecker run (the typed rules are excluded outright, not trusted to self-silence). **It is not a substitute for a real run, and what survives is skewed the wrong way**: measured across the corpus, roughly a quarter of the correctness rules and a quarter of the performance rules still fire, against three quarters of the cosmetic ones — so a clean `--parse-only` says very little, and says least about the things worth knowing. Findings lost run to 38% on a typed-heavy codebase and under 10% on one the cosmetic rules dominate. Safety shifts accordingly: instead of a build, the gate is that a pass must not RAISE the compilation's error count over its baseline, and the usual parse-level protections (comment guard, overlap holds) still apply. Limitations: `#if` branches behind conditional or computed `DefineConstants` are not parsed, wildcard `<Compile>` globs are refused, and multi-framework passes collapse to one. Review the diff — the all-frameworks build arbiter is exactly what this mode does without. |
 
 ### CI setup (SARIF)
 
@@ -558,14 +558,27 @@ trailing commas are tolerated:
 ```
 
 Rules with tunable thresholds read numeric properties from the same
-object-valued entries. FR0114 is the first: `thenAtLeast` (default 20)
-is how long a then-branch must be before flipping is suggested, and
-`elseAtMost` (default 3) is how short the else must stay:
+object-valued entries. FR0114 takes `thenAtLeast` (default 20), how long
+a then-branch must be before flipping is suggested, and `elseAtMost`
+(default 3), how short the else must stay:
 
 ```json
 {
   "rules": {
     "FR0114": { "enabled": true, "thenAtLeast": 30, "elseAtMost": 2 }
+  }
+}
+```
+
+FR0060 takes `maxAttributes` (default 4), how many attributes may share
+one `[<A; B>]` bracket, and `wrapColumn` (default 110), how wide the
+merged line may get. Both are house style rather than correctness, and
+the rule simply declines to merge past either limit:
+
+```json
+{
+  "rules": {
+    "FR0060": { "enabled": true, "maxAttributes": 6, "wrapColumn": 120 }
   }
 }
 ```

@@ -75,16 +75,128 @@ open System.Reflection
 open System.Text.Json
 open FSharp.Analyzers.SDK
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.SyntaxTrivia
 open FSharp.Compiler.Text
 open FSharp.Refactor
 open FSharp.Refactor.Text
 
+/// Colour, when the terminal is actually a terminal.
+///
+/// A redirected stream is a pipe or a file, where escape codes are
+/// corruption rather than decoration; NO_COLOR (no-color.org) is the de
+/// facto way to ask for plain text, and TERM=dumb says the same thing.
+/// `Console.ForegroundColor` rather than raw ANSI, because .NET already
+/// knows how to say this to a legacy Windows console and a VT terminal
+/// alike.
+///
+/// The palette carries PRIORITY, not decoration. A run prints a lot, and
+/// someone reading it should be able to find what failed without reading
+/// the progress: timings recede, skips are visibly deliberate, failures
+/// come forward. Colour is never the only carrier — every line still says
+/// in words what it is, because a fair share of readers cannot rely on hue.
+module private Out =
+    let mutable private forcePlain = false
+
+    /// --no-color, for a terminal that claims colour it cannot show.
+    let goPlain () = forcePlain <- true
+
+    let private allowed (redirected: bool) =
+        not forcePlain
+        && not redirected
+        && String.IsNullOrEmpty(Environment.GetEnvironmentVariable "NO_COLOR")
+        && Environment.GetEnvironmentVariable "TERM" <> "dumb"
+
+    /// Console colour is PROCESS-GLOBAL, and the sweep's heartbeat prints
+    /// from inside Async.Parallel. Two threads interleaving read-previous /
+    /// set / restore leave the terminal stuck in whichever colour lost the
+    /// race — surviving the run and colouring the user's next prompt. One
+    /// gate makes a line atomic; output is serialized for readability
+    /// anyway, so it costs nothing worth measuring.
+    let private gate = obj ()
+
+    /// Emit exactly once, coloured if we can. Reading or setting the colour
+    /// throws on a console that is not one; that costs the colour, never the
+    /// message. The previous colour is always put back, so a piece of a line
+    /// never leaves its colour hanging over whatever prints next.
+    let private coloured
+        (stream: IO.TextWriter)
+        (redirected: bool)
+        (color: ConsoleColor)
+        (emit: IO.TextWriter -> unit)
+        =
+        lock gate (fun () ->
+            let restore =
+                if allowed redirected then
+                    try
+                        let previous = Console.ForegroundColor
+                        Console.ForegroundColor <- color
+                        Some previous
+                    with _ -> // not a colour-capable console; fsharpanalyzer: ignore-line FR0055
+                        None
+                else
+                    None
+
+            try
+                emit stream
+            finally
+                match restore with
+                | Some previous ->
+                    try
+                        Console.ForegroundColor <- previous
+                    with _ -> // fsharpanalyzer: ignore-line FR0055
+                        ()
+                | None -> ())
+
+    let private line (stream: IO.TextWriter) redirected color (text: string) =
+        coloured stream redirected color (fun s -> s.WriteLine text)
+
+    let private part (stream: IO.TextWriter) redirected color (text: string) =
+        coloured stream redirected color (fun s -> s.Write text)
+
+    /// Progress and timing: true, and not what anyone is looking for.
+    let dim text =
+        line Console.Out Console.IsOutputRedirected ConsoleColor.DarkGray text
+
+    /// A piece of a line that several writes assemble — a progress prefix
+    /// printed before the work, completed by the elapsed time after it.
+    let dimPart text =
+        part Console.Out Console.IsOutputRedirected ConsoleColor.DarkGray text
+
+    /// The same on stderr, where the sweep's heartbeat lives so that piped
+    /// stdout stays machine-readable.
+    let dimPartErr text =
+        part Console.Error Console.IsErrorRedirected ConsoleColor.DarkGray text
+
+    /// Work that landed.
+    let good text =
+        line Console.Out Console.IsOutputRedirected ConsoleColor.Green text
+
+    /// Deliberately not done — a skip, a hold-back, a stand-down. Not a
+    /// failure, and worth being able to tell apart at a glance.
+    let skip text =
+        line Console.Out Console.IsOutputRedirected ConsoleColor.DarkYellow text
+
+    /// Advice with no fix behind it. Deliberately NOT the skip colour: a
+    /// skip says we declined to act, a note asks the reader to — and for a
+    /// note-only rule it is the whole output, not an aside.
+    let note text =
+        line Console.Out Console.IsOutputRedirected ConsoleColor.DarkCyan text
+
+    /// Failure. Stays on stderr, where it already was.
+    let bad text =
+        line Console.Error Console.IsErrorRedirected ConsoleColor.Red text
+
+
 type private Options =
     {
         Target: string
         ShowHelp: bool
+        /// Print the version and stop. Worth its own flag: several builds
+        /// can be installed over a session, and "which one am I running"
+        /// should not require reading a nupkg name.
+        ShowVersion: bool
         Codes: Set<string> option
         /// The codes the user TYPED in --codes, before any --categories
         /// expansion is folded into `Codes`. Only these outrank a rule's
@@ -95,6 +207,9 @@ type private Options =
         /// same way whichever order they were given in.
         Categories: Set<RuleCatalog.Category> option
         DryRun: bool
+        /// Suppress colour even where the terminal supports it. NO_COLOR
+        /// and TERM=dumb say the same thing; this is the flag form.
+        NoColor: bool
         ApiChanges: bool
         /// Suppresses dual-framework #if pair emission: capability fixes
         /// stay plain everywhere, and the all-frameworks build check alone
@@ -169,6 +284,9 @@ OPTIONS
                         back and merely counted without this. Public
                         signatures are never rewritten: their callers can
                         live outside the checked project
+  --no-color            plain output, even on a colour-capable terminal.
+                        NO_COLOR=1 and TERM=dumb do the same, and a piped or
+                        redirected stream is never coloured either way
   --no-if-defs          never emit #if/#else/#endif pairs for capability
                         fixes on multi-targeted projects. The fixes stay
                         plain, and any that break a legacy framework are
@@ -176,7 +294,7 @@ OPTIONS
   --report <file>       write every finding as SARIF 2.1.0 — the format CI
                         turns into inline annotations. Pairs with --dry-run
   --parse-only          no MSBuild, no reference resolution: sources come
-                        straight from the fsproj and only the 56 of 113
+                        straight from the fsproj and only the 55 of 113
                         analyzers that never consult the typechecker run.
                         NOT a substitute for a real run: what survives is
                         skewed the wrong way — roughly a quarter of the
@@ -206,6 +324,7 @@ OPTIONS
   --mcp                 serve analyze/list_rules as an MCP server over
                         stdio, keeping the typechecker warm between calls
   --max-passes <n>      fix-then-reanalyse iterations (default 5)
+  --version, -v         print the version being invoked and stop
   --help, -h, /?        this text
 
 A run refuses a compilation that already has errors, and fails loudly if
@@ -224,13 +343,27 @@ let rec private parseArgsLoop opts args =
     | "--project" :: path :: rest
     | "--script" :: path :: rest -> parseArgsLoop { opts with Target = path } rest
     | "--codes" :: codes :: rest ->
-        let parsed = codes.Split(',') |> Array.map _.Trim() |> Set.ofArray
+        // codes are spelled upper case in the catalogue; accepting either
+        // costs nothing and a lower-case code used to match nothing at all
+        let parsed =
+            codes.Split ','
+            |> Array.map (fun c -> c.Trim().ToUpperInvariant())
+            |> Array.filter (fun c -> c <> "")
+            |> Set.ofArray
 
-        parseArgsLoop
-            { opts with
-                Codes = Some parsed
-                ExplicitCodes = Some parsed }
-            rest
+        // an unrecognised code is otherwise pure silence: `--codes FR013`,
+        // one digit short, sweeps the whole project, matches nothing, and
+        // reports zero findings as though the code were clean
+        match parsed |> Set.filter (RuleCatalog.known.Contains >> not) |> Set.toList with
+        | [] ->
+            parseArgsLoop
+                { opts with
+                    Codes = Some parsed
+                    ExplicitCodes = Some parsed }
+                rest
+        | unknown ->
+            let listed = String.concat ", " unknown
+            Error $"not a rule code: {listed}. --rules lists every code."
     | "--categories" :: names :: rest ->
         let parsed = names.Split(',') |> Array.map RuleCatalog.parse
 
@@ -247,7 +380,10 @@ let rec private parseArgsLoop opts args =
     | "-h" :: _
     | "/?" :: _
     | "-?" :: _ -> Ok { opts with ShowHelp = true }
+    | "--version" :: _
+    | "-v" :: _ -> Ok { opts with ShowVersion = true }
     | "--dry-run" :: rest -> parseArgsLoop { opts with DryRun = true } rest
+    | "--no-color" :: rest -> parseArgsLoop { opts with NoColor = true } rest
     | "--api-changes" :: rest -> parseArgsLoop { opts with ApiChanges = true } rest
     | "--no-if-defs" :: rest -> parseArgsLoop { opts with NoIfDefs = true } rest
     | "--report" :: file :: rest -> parseArgsLoop { opts with Report = Some file } rest
@@ -271,6 +407,24 @@ let rec private parseArgsLoop opts args =
         | _ -> Error $"--max-passes needs a positive number, got '{n}'"
     // a bare path: the common case, no flag needed
     | path :: rest when not (path.StartsWith '-') && opts.Target = "" -> parseArgsLoop { opts with Target = path } rest
+    // a SECOND bare path is not an unknown argument, it is one target too
+    // many — saying "unknown" sends the reader hunting for a typo
+    | extra :: _ when not (extra.StartsWith '-') -> Error $"'{extra}' is a second target; one target per run"
+    // a value-taking flag given without its value would otherwise fall into
+    // the catch-all below and be reported as UNKNOWN, sending the reader off
+    // to hunt for a typo in a flag they spelled correctly
+    | [ flag ] when
+        [ "--report"
+          "--baseline"
+          "--format"
+          "--framework"
+          "--jobs"
+          "--max-passes"
+          "--codes"
+          "--categories" ]
+        |> List.contains flag
+        ->
+        Error $"'{flag}' needs a value after it"
     | unknown :: _ -> Error $"Unknown argument '{unknown}'"
 
 /// Fold `--categories` into `--codes`. Doing it here rather than in the loop
@@ -293,10 +447,12 @@ let private parseArgs (argv: string[]) =
     parseArgsLoop
         { Target = ""
           ShowHelp = false
+          ShowVersion = false
           Codes = None
           ExplicitCodes = None
           Categories = None
           DryRun = false
+          NoColor = false
           ApiChanges = false
           NoIfDefs = false
           Report = None
@@ -597,7 +753,7 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
         let tfmArg =
             match targetFramework with
             | Some tfm ->
-                printfn $"  (multi-targeted; analysing against {tfm})"
+                Out.dim $"  (multi-targeted; analysing against {tfm})"
                 $" -p:TargetFramework={tfm}"
             | None -> ""
 
@@ -698,7 +854,6 @@ let parseOnlySafeAnalyzers =
           "BooleanSimplify"
           "CeStrip"
           "CheckedArithmetic"
-          "Composition"
           "ConversionMove"
           // reads the parse tree only, so it belongs in the mode meant for
           // codebases that cannot compile
@@ -977,6 +1132,262 @@ type private ApiSuggestion =
       FunctionName: string
       Edits: (Range * string * string) list }
 
+/// One script's contribution, cached across the compilations of a run.
+/// Discovery is per PROJECT, but the expensive part — resolving a script's
+/// references and typechecking it — depends only on the script, and a
+/// solution sweep calls the api pass once per compilation (Fuuga: 39).
+/// Re-typechecking 13 scripts 39 times over is half an hour of nothing.
+type private ScriptInfo =
+    {
+        /// Files this script pulls in, so a project can ask "does this
+        /// concern me?" without recomputing anything.
+        Loaded: string[]
+        /// None when the script does not typecheck: its calls cannot be
+        /// read, so nothing it #loads may be reshaped.
+        Context: FileContext option
+        Uses: FSharpSymbolUse[]
+    }
+
+/// Keyed by script path; the write time is the invalidation, so a script
+/// this run just edited is re-read on the next pass.
+let private scriptCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, DateTime * ScriptInfo>(StringComparer.OrdinalIgnoreCase)
+
+/// Call sites that live OUTSIDE the project's compilation: scripts under
+/// the scanned path that `#load` its sources.
+///
+/// A `#load`ing script compiles those files INTO itself, so it sees the
+/// `internal` bindings — exactly the ones this pass is allowed to reshape,
+/// public ones being held back precisely because their callers can live
+/// somewhere we cannot see. But the script is a separate compilation, so
+/// its calls are absent from the project's symbol tables, and the pass's
+/// own "every use resolves or the change is abandoned" guard never fires.
+/// The definition changed shape and the script stopped compiling.
+///
+/// Note there is no build check behind this: `dotnet build` compiles the
+/// project, not the scripts beside it. A script edit is answerable to the
+/// same-symbol reasoning that produced it and nothing else, which is why
+/// the matching below is by declaration rather than by name.
+type private ScriptCallSites =
+    {
+        /// Parse contexts, so a call-site edit can be rendered in the script.
+        Contexts: (string * FileContext) list
+        /// Uses inside the scripts, indexed by the symbol's full name.
+        UsesByFullName: System.Collections.Generic.Dictionary<string, FSharpSymbolUse[]>
+        /// Project sources #loaded by a script we could NOT typecheck. Its
+        /// call sites are unreadable, so nothing defined in these files may
+        /// be reshaped — the same restraint as an unresolvable use.
+        Unverifiable: System.Collections.Generic.HashSet<string>
+    }
+
+/// FullName throws for a few symbol kinds; a symbol we cannot name simply
+/// contributes no cross-compilation match.
+let private symbolFullName (s: FSharpSymbol) =
+    try
+        Some s.FullName
+    with _ -> // fsharpanalyzer: ignore-line FR0055
+        None
+
+/// Are these two symbols — one from the project's compilation, one from a
+/// script's — the same declaration? Full names alone are not identity: a
+/// referenced assembly can carry a module and function of exactly the same
+/// name, and rewriting THAT call site would break a script no build check
+/// covers. Both compilations read the same source file, so the declaration
+/// position is shared and exact.
+let private sameDeclaration (a: FSharpSymbol) (b: FSharpSymbol) =
+    match a.DeclarationLocation, b.DeclarationLocation with
+    | Some ra, Some rb ->
+        ra.StartLine = rb.StartLine
+        && ra.StartColumn = rb.StartColumn
+        && String.Equals(Path.GetFullPath ra.FileName, Path.GetFullPath rb.FileName, StringComparison.OrdinalIgnoreCase)
+    | _ -> false
+
+/// Read one script: what it loads, and — when it typechecks — its parse
+/// context and the uses it makes. Cached on the file's write time.
+let private readScript (checker: FSharpChecker) (script: string) =
+    let stamp =
+        try
+            File.GetLastWriteTimeUtc script
+        with _ -> // fsharpanalyzer: ignore-line FR0055
+            DateTime.MinValue
+
+    match scriptCache.TryGetValue script with
+    | true, (cached, info) when cached = stamp -> info
+    | _ ->
+        let info =
+            let text =
+                try
+                    Some(File.ReadAllText script)
+                with _ -> // fsharpanalyzer: ignore-line FR0055
+                    None
+
+            match text with
+            // only a #load can pull project sources into a script's
+            // compilation; a `#r` against the built dll sees no internals,
+            // so it is not a call site this pass can break
+            | Some text when text.Contains "#load" ->
+                let sourceText = SourceText.ofString text
+
+                let scriptOptions, _ =
+                    checker.GetProjectOptionsFromScript(
+                        script,
+                        sourceText,
+                        assumeDotNetFramework = false,
+                        useFsiAuxLib = true
+                    )
+                    |> Async.RunSynchronously
+
+                let results = checker.ParseAndCheckProject scriptOptions |> Async.RunSynchronously
+
+                let broken =
+                    results.Diagnostics
+                    |> Array.exists (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+
+                let loaded = scriptOptions.SourceFiles |> Array.map Path.GetFullPath
+
+                if broken then
+                    { Loaded = loaded
+                      Context = None
+                      Uses = [||] }
+                else
+                    let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions scriptOptions
+
+                    let parsed =
+                        checker.ParseFile(script, sourceText, parsingOptions) |> Async.RunSynchronously
+
+                    let full = Path.GetFullPath script
+
+                    // only uses IN THE SCRIPT: the #loaded files belong to
+                    // this compilation too, and the project pass owns those
+                    let uses =
+                        results.GetAllUsesOfAllSymbols()
+                        |> Array.filter (fun u ->
+                            not u.IsFromDefinition
+                            && String.Equals(
+                                Path.GetFullPath u.Range.FileName,
+                                full,
+                                StringComparison.OrdinalIgnoreCase
+                            ))
+
+                    { Loaded = loaded
+                      Context =
+                        Some
+                            { FileName = script
+                              Source = sourceText
+                              ParseTree = parsed.ParseTree }
+                      Uses = uses }
+            | _ ->
+                { Loaded = [||]
+                  Context = None
+                  Uses = [||] }
+
+        scriptCache.[script] <- (stamp, info)
+        info
+
+/// Build output can hold scripts too, and one there is neither a call site
+/// worth honouring nor a file worth editing.
+let private isBuildOutput (path: string) =
+    let normalized = path.Replace("\\", "/").ToLowerInvariant()
+    normalized.Contains "/obj/" || normalized.Contains "/bin/"
+
+[<return: Struct>]
+let inline private (|Exists|_|) (input: string) =
+    if Directory.Exists input then
+        ValueSome input
+    else
+        ValueNone
+
+/// Index the call sites this project's compilation cannot see.
+let private findScriptCallSites (checker: FSharpChecker) (root: string) (options: FSharpProjectOptions) =
+    let searchRoot =
+        let full =
+            try
+                Some(Path.GetFullPath root)
+            with _ -> // a glob or otherwise unopenable target; fsharpanalyzer: ignore-line FR0055
+                None
+
+        // a glob target ("src/**/*.fsproj") resolves to no directory at all.
+        // Falling through to "no scripts" there would silently restore the
+        // very hazard this exists to close, so the project's own directory
+        // is the floor.
+        let projectDir =
+            try
+                match Path.GetDirectoryName(Path.GetFullPath options.ProjectFileName) with
+                | null -> None
+                | Exists dir -> Some dir
+                | _ -> None
+            with _ -> // fsharpanalyzer: ignore-line FR0055
+                None
+
+        match full with
+        | Some f when Directory.Exists f -> Some f
+        | Some f ->
+            match Path.GetDirectoryName f with
+            | null -> projectDir
+            | dir when Directory.Exists dir -> Some dir
+            | _ -> projectDir
+        | None -> projectDir
+
+    let projectSources =
+        System.Collections.Generic.HashSet<string>(
+            options.SourceFiles |> Array.map Path.GetFullPath,
+            StringComparer.OrdinalIgnoreCase
+        )
+
+    let scripts =
+        match searchRoot with
+        | None -> [||]
+        | Some dir ->
+            try
+                Directory.EnumerateFiles(dir, "*.fsx", SearchOption.AllDirectories)
+                |> Seq.filter (fun f -> not ((isBuildOutput f) || (Configuration.isIgnoredPath f)))
+                |> Seq.toArray
+            with _ -> // an unreadable tree contributes no call sites; fsharpanalyzer: ignore-line FR0055
+                [||]
+
+    let contexts = ResizeArray()
+
+    let usesByName =
+        System.Collections.Generic.Dictionary<string, ResizeArray<FSharpSymbolUse>>()
+
+    let unverifiable =
+        System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+
+    for script in scripts do
+        let info = readScript checker script
+        let loaded = info.Loaded |> Array.filter projectSources.Contains
+
+        if not (Array.isEmpty loaded) then
+            match info.Context with
+            | None ->
+                Out.skip
+                    $"  ({Path.GetFileName script} does not typecheck, so its calls cannot be read; nothing it #loads will be reshaped)"
+
+                for f in loaded do
+                    unverifiable.Add f |> ignore
+            | Some ctx ->
+                contexts.Add(script, ctx)
+
+                for u in info.Uses do
+                    match symbolFullName u.Symbol with
+                    | Some name ->
+                        match usesByName.TryGetValue name with
+                        | true, existing -> existing.Add u
+                        | false, _ ->
+                            let fresh = ResizeArray()
+                            fresh.Add u
+                            usesByName.[name] <- fresh
+                    | None -> ()
+
+    let byName = System.Collections.Generic.Dictionary<string, FSharpSymbolUse[]>()
+
+    for kv in usesByName do
+        byName.[kv.Key] <- kv.Value.ToArray()
+
+    { Contexts = List.ofSeq contexts
+      UsesByFullName = byName
+      Unverifiable = unverifiable }
+
 /// The API-CHANGING pass: project-wide refactorings whose edits cross file
 /// boundaries — currying internal/public tupled functions (FR0090) and
 /// reordering their parameters (FR0091), rewriting every call site in the
@@ -992,12 +1403,15 @@ type private ApiSuggestion =
 let private runApiPass
     (checker: FSharpChecker)
     (options: FSharpProjectOptions)
+    /// Call sites in #loading scripts, which the project compilation
+    /// cannot see.
+    (scriptSites: ScriptCallSites)
     (codes: Set<string> option)
     (dryRun: bool)
     (suppressed: System.Collections.Generic.HashSet<string * string * string * string>)
     =
     if options.SourceFiles |> Array.exists (fun f -> f.EndsWith ".fsi") then
-        printfn "  (api pass skipped: signature files would need the same changes)"
+        Out.skip "  (api pass skipped: signature files would need the same changes)"
         0, []
     else
         let wanted (file: string) (code: string) (name: string) =
@@ -1022,6 +1436,11 @@ let private runApiPass
                   Source = sourceText
                   ParseTree = parsed.ParseTree }
 
+        // a #loading script is looked up exactly like a project file: its
+        // edits are rendered from its own parse tree and source
+        for script, ctx in scriptSites.Contexts do
+            fileContexts.[Path.GetFullPath script] <- ctx
+
         let fileLookup (name: string) =
             match fileContexts.TryGetValue(Path.GetFullPath name) with
             | true, ctx -> Some ctx
@@ -1029,7 +1448,23 @@ let private runApiPass
 
         let suggestions = ResizeArray<ApiSuggestion>()
 
-        for file in options.SourceFiles do
+        /// The uses a #loading script contributes for this symbol, matched
+        /// by full name because the script compiled it separately.
+        let extraUses (symbol: FSharpSymbol) =
+            match symbolFullName symbol with
+            | Some name ->
+                match scriptSites.UsesByFullName.TryGetValue name with
+                | true, uses -> uses |> Array.filter (fun u -> sameDeclaration symbol u.Symbol)
+                | false, _ -> [||]
+            | None -> [||]
+
+        // a file a broken script #loads is left alone entirely: we cannot
+        // read that script's calls, and reshaping blind is how it broke
+        let reshapable =
+            options.SourceFiles
+            |> Array.filter (Path.GetFullPath >> scriptSites.Unverifiable.Contains >> not)
+
+        for file in reshapable do
             let ctx = fileContexts.[Path.GetFullPath file]
 
             let _, checkAnswer =
@@ -1039,14 +1474,14 @@ let private runApiPass
             match checkAnswer with
             | FSharpCheckFileAnswer.Succeeded checkResults ->
                 if wanted file "FR0090" "TupleParams" then
-                    for s in TupleParams.findApiChanges ctx checkResults projectResults fileLookup do
+                    for s in TupleParams.findApiChanges ctx checkResults projectResults fileLookup extraUses do
                         suggestions.Add
                             { Code = "FR0090"
                               FunctionName = s.FunctionName
                               Edits = s.Edits |> List.map (fun e -> e.Range, e.Original, e.Replacement) }
 
                 if wanted file "FR0091" "ParamOrder" then
-                    for s in ParamOrder.findApiChanges ctx checkResults projectResults fileLookup do
+                    for s in ParamOrder.findApiChanges ctx checkResults projectResults fileLookup extraUses do
                         suggestions.Add
                             { Code = "FR0091"
                               FunctionName = s.FunctionName
@@ -1080,7 +1515,21 @@ let private runApiPass
                 printfn
                     $"  {s.Code} {kindColumn s.Code} {s.FunctionName}: held back this round (edits nest inside another change)"
             else
-                printfn $"  {s.Code} {kindColumn s.Code} {s.FunctionName}: {s.Edits.Length} edit(s) across the project"
+                // scripts are worth naming: they are the call sites a reader
+                // assumes were out of scope, and the ones that used to break
+                let inScripts =
+                    s.Edits
+                    |> List.filter (fun (r, _, _) -> r.FileName.EndsWith(".fsx", StringComparison.OrdinalIgnoreCase))
+                    |> List.length
+
+                let scriptNote =
+                    if inScripts > 0 then
+                        $" ({inScripts} of them in scripts)"
+                    else
+                        ""
+
+                printfn
+                    $"  {s.Code} {kindColumn s.Code} {s.FunctionName}: {s.Edits.Length} edit(s) across the project{scriptNote}"
 
                 nextGroup <- nextGroup + 1
 
@@ -1106,7 +1555,55 @@ let private runApiPass
                         fresh.Add range
                         acceptedRanges.[target] <- fresh
 
-        applyEditGroups dryRun suppressed editsByFile
+        let applied, changed = applyEditGroups dryRun suppressed editsByFile
+
+        // Scripts sit outside the build check: `dotnet build` compiles the
+        // project, not the .fsx beside it, so nothing downstream would ever
+        // notice a script we broke. Check them directly. Every script we
+        // edited typechecked cleanly beforehand — call sites are never read
+        // from one that did not — so the baseline is zero errors and any
+        // error now is ours.
+        //
+        // A suggestion is atomic across files, so a broken script takes its
+        // whole group with it: leaving the definition reshaped while putting
+        // the script back is precisely the breakage this exists to prevent.
+        let brokenGroups =
+            if dryRun then
+                Set.empty
+            else
+                changed
+                |> List.filter (fun cf ->
+                    cf.Path.EndsWith(".fsx", StringComparison.OrdinalIgnoreCase)
+                    && (readScript checker cf.Path).Context.IsNone)
+                |> List.collect (fun cf -> cf.Fixes |> List.map (fun (g, _, _) -> g))
+                |> Set.ofList
+
+        if Set.isEmpty brokenGroups then
+            applied, changed
+        else
+            // restore everything this pass wrote, then re-apply the groups
+            // that were not implicated, so one bad suggestion does not cost
+            // the others their edits
+            for cf in changed do
+                writeSource cf.Path cf.Before
+
+            let survivors =
+                System.Collections.Generic.Dictionary<string, ResizeArray<int * string * Fix>>(
+                    StringComparer.OrdinalIgnoreCase
+                )
+
+            for kv in editsByFile do
+                let kept =
+                    kv.Value
+                    |> Seq.filter (fun (g, _, _) -> not (brokenGroups.Contains g))
+                    |> ResizeArray
+
+                if kept.Count > 0 then
+                    survivors.[kv.Key] <- kept
+
+            Out.skip $"  ({brokenGroups.Count} suggestion(s) put back: the script they rewrote stopped typechecking)"
+
+            applyEditGroups dryRun suppressed survivors
 
 /// One analyze-and-apply pass over every file. Returns the number of fixes
 /// applied.
@@ -1575,7 +2072,6 @@ let private runPass
     let mutable nextGroup = 0
 
     let mutable crossFileSkipped = 0
-    let mutable commentHeldBack = 0
 
     // files FCS could not check cleanly: most rules stay silent on those, so
     // without this a run over a project that does not typecheck would just
@@ -1770,7 +2266,10 @@ let private runPass
     // paket-files above all — is neither analyzed nor typechecked here:
     // fixing someone else's vendored source is churn, and sweeping it in
     // every project that includes it is where multi-project runs go to die
-    let filesToSweep = named |> Array.filter (Configuration.isIgnoredPath >> not)
+    // partitioned rather than filtered: the skipped names are worth keeping,
+    // since a short list says more than a count
+    let ignoredFiles, filesToSweep =
+        named |> Array.partition Configuration.isIgnoredPath
 
     // files an earlier compilation of this RUN already swept under the
     // same conditional-compilation defines: same defines, same parse tree,
@@ -1781,13 +2280,22 @@ let private runPass
         |> Array.partition (fun f ->
             sweptFiles.Contains(Path.GetFullPath(f).ToLowerInvariant(), fileSweepKey (definesKey options) f))
 
-    if named.Length - alreadySwept.Length - filesToSweep.Length > 0 then
-        printfn $"  ({named.Length - alreadySwept.Length - filesToSweep.Length} ignored-path file(s) skipped)"
+    if ignoredFiles.Length > 0 then
+        // a handful of names tells you WHICH file was passed over and lets
+        // you judge whether that was right; a long list is just a wall, so
+        // past a handful the count carries it alone. Base names only — the
+        // paths are long, repetitive, and not what identifies the file
+        if ignoredFiles.Length < 9 then
+            let names = ignoredFiles |> Array.map Path.GetFileName |> String.concat ", "
+
+            Out.skip $"  ({ignoredFiles.Length} ignored-path file(s) skipped: {names})"
+        else
+            Out.skip $"  ({ignoredFiles.Length} ignored-path file(s) skipped)"
 
     if alreadySwept.Length > 0 then
         printfn $"  ({alreadySwept.Length} shared file(s) already swept in an earlier compilation)"
 
-    printf $"sweeping {filesToSweep.Length} file(s)... "
+    Out.dimPart $"sweeping {filesToSweep.Length} file(s)... "
     Console.Out.Flush()
     let sweepSw = Stopwatch.StartNew()
 
@@ -1800,7 +2308,7 @@ let private runPass
         let n = System.Threading.Interlocked.Increment sweptCount
 
         if n % 25 = 0 then
-            eprintf $"[{n}/{filesToSweep.Length}] "
+            Out.dimPartErr $"[{n}/{filesToSweep.Length}] "
 
     let outcomes =
         filesToSweep
@@ -1853,7 +2361,7 @@ let private runPass
                         | [] -> text
                         | cuts -> text.Substring(0, List.min cuts + 1)
 
-                    printfn
+                    Out.note
                         $"  {note.Code} {kindColumn note.Code} {Path.GetFileName outcome.File}({note.Range.StartLine},{note.Range.StartColumn}) note: {firstSentence}"
                 else
                     let kind = RuleCatalog.name (RuleCatalog.categoryOf note.Code)
@@ -1864,6 +2372,14 @@ let private runPass
                              | true, n -> n
                              | false, _ -> 0)
                             + 1)
+
+        // depends only on the file under analysis, so it is computed once
+        // rather than per fix: a sweep applies thousands of them
+        let companionSignature =
+            try
+                Path.GetFullPath(Path.ChangeExtension(outcome.File, ".fsi"))
+            with _ -> // fsharpanalyzer: ignore-line FR0055
+                ""
 
         // a fix whose span contains a comment the replacement does not carry
         // would silently DELETE it — a match collapsed to one line takes its
@@ -1893,8 +2409,15 @@ let private runPass
                             f.FromRange.FileName
                     )
 
+                // a fix landing in this file's own COMPANION SIGNATURE is not
+                // a cross-file change. It is the other half of a single edit —
+                // naming a union case's fields in the .fs while the .fsi still
+                // declares them unnamed does not compile — so gating it behind
+                // --api-changes would apply one half and roll the pair back.
                 let sameFile =
                     String.Equals(target, Path.GetFullPath outcome.File, StringComparison.OrdinalIgnoreCase)
+                    || (companionSignature <> ""
+                        && String.Equals(target, companionSignature, StringComparison.OrdinalIgnoreCase))
 
                 // a cross-file fix guards against the TARGET file's comments,
                 // parsed through ProjectSources — the same rule as same-file
@@ -1911,10 +2434,12 @@ let private runPass
                     (sameFile && losesComment [ for sibling in msg.Fixes -> sibling.ToText ] f)
                     || (not sameFile && apiChanges && losesCrossFileComment ())
                 then
-                    commentHeldBack <- commentHeldBack + 1
-
-                    printfn
-                        $"  {msg.Code} {kindColumn msg.Code} {Path.GetFileName outcome.File}({f.FromRange.StartLine},{f.FromRange.StartColumn}): held back (a comment inside its span would be lost)"
+                    // a comment inside the span is information the rewrite
+                    // would delete, and code that carries one is already
+                    // good F#. Nothing is wrong and nothing is deferred, so
+                    // there is nothing to say: this is not a held-back fix,
+                    // it is simply not a fix.
+                    ()
                 // a rule the divergence guard blocked in this file: it kept
                 // re-firing pass after pass while the file GREW — the
                 // signature of a fix feeding on its own output
@@ -1931,7 +2456,7 @@ let private runPass
                     crossFileSkipped <- crossFileSkipped + 1
 
     if crossFileSkipped > 0 then
-        printfn $"  ({crossFileSkipped} cross-file fix(es) held back — rerun with --api-changes to apply them)"
+        Out.skip $"  ({crossFileSkipped} cross-file fix(es) held back — rerun with --api-changes to apply them)"
 
     if filesWithErrors > 0 then
         eprintfn
@@ -1941,10 +2466,10 @@ let private runPass
 
     // the per-file and analyzer figures are summed across threads, so they
     // add up to more than the sweep's wall clock — that gap IS the parallelism
-    printfn
+    Out.dim
         $"  timing: project check {projectSw.ElapsedMilliseconds} ms, file sweep {sweepSw.ElapsedMilliseconds} ms wall"
 
-    printfn $"          (summed across threads: checks {checkMs} ms, analyzers {totalAnalyzerMs} ms)"
+    Out.dim $"          (summed across threads: checks {checkMs} ms, analyzers {totalAnalyzerMs} ms)"
 
     let slowest =
         analyzerMs
@@ -1954,7 +2479,7 @@ let private runPass
         |> String.concat ", "
 
     if slowest <> "" then
-        printfn $"  slowest analyzers: {slowest}"
+        Out.dim $"  slowest analyzers: {slowest}"
 
     applyEditGroups dryRun suppressed editsByFile
 
@@ -2171,7 +2696,7 @@ let private optionsFor (checker: FSharpChecker) (parseOnly: bool) (chosenFramewo
         // announced BEFORE it starts: this step can take a minute, and a
         // line that only appears afterwards is no help while you are
         // staring at a silent terminal wondering whether it is stuck
-        printf (
+        Out.dimPart (
             if parseOnly then
                 "reading sources from the project file... "
             else
@@ -2188,7 +2713,7 @@ let private optionsFor (checker: FSharpChecker) (parseOnly: bool) (chosenFramewo
                 fscArgs chosenFramework project
 
         argsSw.Stop()
-        printfn $"{argsSw.ElapsedMilliseconds} ms"
+        Out.dim $"{argsSw.ElapsedMilliseconds} ms"
 
         match fscResult with
         | Error message -> Error message
@@ -2730,12 +3255,12 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                 printfn "  (every source file already swept in an earlier compilation — project check skipped)"
                 0
             else
-                printf "typechecking the project... "
+                Out.dimPart "typechecking the project... "
                 Console.Out.Flush()
                 let baselineSw = Stopwatch.StartNew()
                 let n = errorCount checker options
                 baselineSw.Stop()
-                printfn $"{baselineSw.ElapsedMilliseconds} ms"
+                Out.dim $"{baselineSw.ElapsedMilliseconds} ms"
                 n
 
         // a SCRIPT that does not resolve is not refused: scripts routinely
@@ -2763,7 +3288,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                 $"  ({baselineErrors} unresolved-reference error(s) ignored; syntactic rules only ({analyzers.Length}))"
 
         if baselineErrors > 0 && not opts.ParseOnly && not degradedScript then
-            eprintfn $"The project has {baselineErrors} error(s) before any fix; fix those first:"
+            Out.bad $"The project has {baselineErrors} error(s) before any fix; fix those first:"
 
             if showHeader && not opts.DryRun then
                 // in a multi-compilation run these "pre-existing" errors can
@@ -2782,7 +3307,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
             // asking for one file and getting edits in its callers would be
             // a surprise, and that is exactly what the cross-file rules do
             if opts.ApiChanges && onlyFile.IsSome then
-                printfn "  (api pass skipped: a single file was named, and these fixes edit call sites elsewhere)"
+                Out.skip "  (api pass skipped: a single file was named, and these fixes edit call sites elsewhere)"
 
             // Everything the run actually wrote, across the api-changes
             // rounds and the normal passes. Zero means an untouched tree:
@@ -2804,7 +3329,13 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     printfn $"api pass {apiPass}:"
 
                     let applied, changedFiles =
-                        runApiPass checker options opts.Codes opts.DryRun suppressed
+                        runApiPass
+                            checker
+                            options
+                            (findScriptCallSites checker opts.Target options)
+                            opts.Codes
+                            opts.DryRun
+                            suppressed
 
                     apiApplied <- applied
                     totalApplied <- totalApplied + applied
@@ -2889,7 +3420,7 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                     updateDivergenceGuard changedFiles
 
                 let prefix = if opts.DryRun then "would be " else ""
-                printfn $"  {lastApplied} fix(es) {prefix}applied"
+                Out.good $"  {lastApplied} fix(es) {prefix}applied"
 
                 if opts.DryRun then
                     lastApplied <- 0 // a dry run never converges; stop after one pass
@@ -3208,6 +3739,19 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
                                  | _ -> null)
                             )
 
+                            // no constant to guard with, and this pass sees a
+                            // wider surface than the narrowest target: a
+                            // capability fix here can only go in plainly and
+                            // be reverted by the all-frameworks build, taking
+                            // the innocent fixes in those files with it
+                            Environment.SetEnvironmentVariable(
+                                "FSREF_NO_GUARD",
+                                (if dualConstant.IsNone && not (isLegacy tfm) && not legacyTfms.IsEmpty then
+                                     "1"
+                                 else
+                                     null)
+                            )
+
                             runTarget checker { opts with Framework = tfm } true target)
 
                     Environment.SetEnvironmentVariable("FSREF_DUAL_TFM", null)
@@ -3234,7 +3778,7 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
                     |> List.map (fun kv -> $"{kv.Value} {kv.Key}")
                     |> String.concat ", "
 
-                printfn $"  {total} advisory note(s) held: {breakdown} — list with --notes, export with --report"
+                Out.note $"  {total} advisory note(s) held: {breakdown} — list with --notes, export with --report"
 
             if baselineSuppressed > 0 then
                 printfn $"  ({baselineSuppressed} finding(s) matched the baseline and were suppressed)"
@@ -3271,7 +3815,7 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
                     else
                         $"the findings above cover only the {runCompilations - runBuildFailures} that built"
 
-                eprintfn
+                Out.bad
                     $"  WARNING: {runBuildFailures} of {runCompilations} compilation(s) could not be analysed — they do not build, so {scope}. Fix the build (a missing `dotnet tool restore`/`paket restore` is the usual cause), or use --parse-only for the syntactic rules."
 
             if exitCode = 0 && opts.FailOnFindings && reportedFindings.Count > 0 then
@@ -3544,12 +4088,35 @@ let private runMcp () =
 
 [<EntryPoint>]
 let main argv =
-    match parseArgs argv with
+    // colour is decided before anything is printed, so --no-color governs
+    // even the argument errors below
+    let parsed = parseArgs argv
+
+    match parsed with
+    | Ok opts when opts.NoColor -> Out.goPlain ()
+    | _ -> ()
+
+    match parsed with
     | Error message ->
         eprintfn $"{message}"
         2
     | Ok opts when opts.ShowHelp ->
         printfn $"{helpText}"
+        0
+    | Ok opts when opts.ShowVersion ->
+        // the informational version carries what Directory.Build.props set;
+        // the assembly version drops the patch component
+        let asm = Reflection.Assembly.GetExecutingAssembly()
+
+        let version =
+            asm.GetCustomAttributes(typeof<Reflection.AssemblyInformationalVersionAttribute>, false)
+            |> Array.tryHead
+            |> Option.map (fun a -> (a :?> Reflection.AssemblyInformationalVersionAttribute).InformationalVersion)
+            // a source-built run may carry a +sha suffix; the version is the part before it
+            |> Option.map (fun v -> v.Split('+').[0])
+            |> Option.defaultValue (string (asm.GetName().Version))
+
+        printfn $"fsharp-refactor {version}"
         0
     | Ok opts when opts.ListRules ->
         printRules opts.Json

@@ -36,7 +36,7 @@ type JsonRpc(input: Stream, output: Stream, onError: string -> unit) =
 
     /// Blocking read loop; run it on a background thread.
     member _.Listen(ct: CancellationToken) =
-        let reader = new BinaryReader(input)
+        use reader = new BinaryReader(input)
 
         let readLine () =
             let sb = StringBuilder()
@@ -111,7 +111,7 @@ type JsonRpc(input: Stream, output: Stream, onError: string -> unit) =
         | :? IOException ->
             // sidecar exited; pending requests fail fast
             for kv in pending do
-                kv.Value.TrySetCanceled() |> ignore
+                kv.Value.TrySetCanceled(ct) |> ignore
 
     member _.OnNotification(name: string, handler: JToken -> unit) = notificationHandlers[name] <- handler
 

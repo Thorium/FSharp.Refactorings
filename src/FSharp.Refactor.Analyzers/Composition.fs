@@ -23,6 +23,8 @@
 module FSharp.Refactor.Composition
 
 open System.Text.RegularExpressions
+open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Analyzers.SDK
@@ -82,52 +84,117 @@ let private stageText (source: ISourceText) (stage: SynExpr) =
     let text = textOfRange source stage.Range
     if isPlainApplication stage then text else $"({text})"
 
+/// A BARE operator cannot be spliced in where a function reference goes.
+/// Prefix negation is `~-` in the tree but just `-` in the source, so
+/// `fun i -> d.AddDays -i` came out as `- >> d.AddDays` — not a wrong
+/// composition but not an expression at all, and it took the rest of the
+/// file's parse down with it (found on FSharp.Finance.Personal). The
+/// parenthesised `(~-) >> d.AddDays` would compile, but a composition
+/// spelled out of operators is not the readability this rule exists to buy,
+/// so the lambda simply stays.
+///
+/// Read off the SOURCE rather than the node kind: the same operator arrives
+/// as an Ident or a LongIdent depending on how it was written, and the
+/// question is only whether the text can stand on its own. An operator the
+/// author already wrote in parens (`(+) 1`) reads as a normal application
+/// and passes, which is right — that form composes fine.
+let private isOperatorStage (source: ISourceText) (stage: SynExpr) =
+    let text = (textOfRange source stage.Range).Trim()
+
+    text.Length = 0
+    || not (System.Char.IsLetter text[0] || text[0] = '_' || text[0] = '(' || text[0] = '[')
+
 /// Conservative free-variable check: reject the rewrite if the parameter name
 /// appears anywhere in the stage's text (over-approximates, which is the safe
 /// direction).
 let private mentionsParam (param: string) (text: string) =
     Regex.IsMatch(text, sprintf @"\b%s\b" (Regex.Escape param))
 
+/// Does this stage name a .NET MEMBER rather than a function value? A method
+/// is not first class in F#. `SwitchCase.switchCase (transformGuard e)` is a
+/// CALL, but `transformGuard >> SwitchCase.switchCase` needs the method as a
+/// value — and where it is overloaded, or declared with optional parameters
+/// (`static member switchCase(?test, ?body, ?loc)`), that is a different
+/// thing entirely. On Fable's Fable2Babel the composition typed as `unit`
+/// where an `Expression` was wanted and the file stopped compiling. The same
+/// lesson FR0012 learned from `Path.GetFileName`, which carries two overloads
+/// and cannot be passed by name either.
+///
+/// Nothing syntactic separates `SwitchCase.switchCase` from `List.map`, so
+/// this needs the typed tree — which is why the rule no longer runs under
+/// --parse-only.
+let private isMemberStage (check: FSharpCheckFileResults) (source: ISourceText) (stage: SynExpr) =
+    let rec headIdent (e: SynExpr) =
+        match stripParens e with
+        | SynExpr.Ident i -> Some i
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
+        | SynExpr.App(funcExpr = f) -> headIdent f
+        | SynExpr.TypeApp(expr = inner) -> headIdent inner
+        | _ -> None
+
+    match headIdent stage with
+    | Some ident ->
+        let r = ident.idRange
+        let lineText = source.GetLineString(r.EndLine - 1)
+
+        match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ ident.idText ]) with
+        | Some symbolUse ->
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as value ->
+                (try
+                    value.IsMember
+                 with _ -> // a symbol we cannot interrogate is one we do not compose; fsharpanalyzer: ignore-line FR0055
+                     true)
+            | _ -> false
+        | None -> false
+    | None -> false
+
 /// Find all parenthesized lambdas that are pipelines or nested applications of
 /// their parameter and can be rewritten as `f >> g` compositions.
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
-    let suggestions = ResizeArray<Suggestion>()
+let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
+    if OptionModule.hasErrors check then
+        []
+    else
+        let suggestions = ResizeArray<Suggestion>()
 
-    let collector =
-        { new SyntaxCollectorBase() with
-            override _.WalkExpr(path, expr) =
-                match expr with
-                | SynExpr.Lambda(parsedData = Some([ SynPat.Named(ident = SynIdent(ident = param)) ], body)) ->
-                    // genuine argument position only: a parenthesized lambda
-                    // bound by a let (`let h = (fun x -> ...)`) is generalized,
-                    // while the composition it would become is an application
-                    // and falls under the value restriction
-                    let isArgument =
-                        match path with
-                        | SyntaxNode.SynExpr(SynExpr.Paren _) :: SyntaxNode.SynExpr(SynExpr.App _) :: _ -> true
-                        | _ -> false
+        let collector =
+            { new SyntaxCollectorBase() with
+                override _.WalkExpr(path, expr) =
+                    match expr with
+                    | SynExpr.Lambda(parsedData = Some([ SynPat.Named(ident = SynIdent(ident = param)) ], body)) ->
+                        // genuine argument position only: a parenthesized lambda
+                        // bound by a let (`let h = (fun x -> ...)`) is generalized,
+                        // while the composition it would become is an application
+                        // and falls under the value restriction
+                        let isArgument =
+                            match path with
+                            | SyntaxNode.SynExpr(SynExpr.Paren _) :: SyntaxNode.SynExpr(SynExpr.App _) :: _ -> true
+                            | _ -> false
 
-                    if isArgument then
-                        let stages =
-                            match pipeStages param.idText body with
-                            | Some stages -> Some stages
-                            | None -> applicationStages param.idText body
+                        if isArgument then
+                            let stages =
+                                match pipeStages param.idText body with
+                                | Some stages -> Some stages
+                                | None -> applicationStages param.idText body
 
-                        match stages with
-                        | Some stages when
-                            List.length stages >= 2
-                            && stages |> List.forall (fun s -> isSingleLine s.Range)
-                            && stages
-                               |> List.forall (fun s -> not (mentionsParam param.idText (textOfRange source s.Range)))
-                            ->
-                            let replacement = stages |> List.map (stageText source) |> String.concat " >> "
+                            match stages with
+                            | Some stages when
+                                List.length stages >= 2
+                                && stages |> List.forall (fun s -> isSingleLine s.Range)
+                                && stages |> List.forall (isOperatorStage source >> not)
+                                && stages |> List.forall (isMemberStage check source >> not)
+                                && stages
+                                   |> List.forall (fun s ->
+                                       not (mentionsParam param.idText (textOfRange source s.Range)))
+                                ->
+                                let replacement = stages |> List.map (stageText source) |> String.concat " >> "
 
-                            suggestions.Add
-                                { Range = expr.Range
-                                  OriginalText = textOfRange source expr.Range
-                                  ReplacementText = replacement }
-                        | _ -> ()
-                | _ -> () }
+                                suggestions.Add
+                                    { Range = expr.Range
+                                      OriginalText = textOfRange source expr.Range
+                                      ReplacementText = replacement }
+                            | _ -> ()
+                    | _ -> () }
 
-    AstIndex.replay collector parseTree
-    List.ofSeq suggestions
+        AstIndex.replay collector parseTree
+        List.ofSeq suggestions

@@ -200,19 +200,27 @@ let private awaitableMessages (parseTree: ParsedInput) (source: ISourceText) che
     // single-span swap does: two independent #if blocks would leave a
     // `let!` in one world and its call in another. So on a pass that
     // would need a guard the advice stands and the edit does not.
-    let guarded = (CapabilityFix.dualGuardConstant ()).IsSome
+    // EITHER position means this pass sees a wider surface than the
+    // project's narrowest target: a guard exists and the multi-edit swap
+    // cannot pair with it, or no guard exists at all. Reading only the
+    // first left SwaggerProvider — which has no framework-shaped constant
+    // — taking `Dispose()` to `DisposeAsync()`, whose interface
+    // netstandard2.0 does not have: "System from netstandard did not
+    // contain IAsyncDisposable".
+    let widerThanNarrowest =
+        (CapabilityFix.dualGuardConstant ()).IsSome || CapabilityFix.guardUnavailable ()
 
     AwaitableOverload.find parseTree source checkResults
     |> List.map (fun s ->
         let fixes =
-            if guarded then
+            if widerThanNarrowest then
                 []
             else
                 s.Fixes
                 |> List.map (fun (r, original, replacement) -> fix r original replacement)
 
         let suffix =
-            if guarded then
+            if widerThanNarrowest then
                 " (no automatic fix here: this project targets frameworks whose surface differs, and the swap spans more than one edit)"
             else
                 ""
@@ -541,8 +549,8 @@ let optionModuleCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0003 Composition ----
 
-let private compositionMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    Composition.find parseTree source
+let private compositionMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    Composition.find parseTree source checkResults
     |> List.map (fun s ->
         hint
             "FR0003"
@@ -553,13 +561,14 @@ let private compositionMessages (parseTree: ParsedInput) (source: ISourceText) :
 [<EditorAnalyzer("Composition", "Extract a function composition from a lambda", HelpBase)>]
 let compositionEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0003" "Composition" (fun () ->
-        compositionMessages ctx.ParseFileResults.ParseTree ctx.SourceText
-        |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
+        whenChecked ctx (fun checkResults ->
+            compositionMessages ctx.ParseFileResults.ParseTree ctx.SourceText checkResults
+            |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText))
 
 [<CliAnalyzer("Composition", "Extract a function composition from a lambda", HelpBase)>]
 let compositionCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0003" "Composition" (fun () ->
-        compositionMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        compositionMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 // ---- FR0004 ConversionMove ----
 
@@ -1723,7 +1732,10 @@ let private charOverloadMessages (parseTree: ParsedInput) (source: ISourceText) 
                 // a capability fix: on a dual-framework run this may emit
                 // an #if NET6_0_OR_GREATER / #else pair (char overloads
                 // are net-core-era; net4x siblings compile the #else)
-                [ CapabilityFix.make source s.Range s.OriginalText replacement ]
+                (if CapabilityFix.guardUnavailable () then
+                     []
+                 else
+                     [ CapabilityFix.make source s.Range s.OriginalText replacement ])
         | None ->
             hint
                 "FR0038"
@@ -1784,6 +1796,7 @@ let private caseInsensitiveMessages
         // into shared code and stopped compiling for netstandard2.0.
         let fixes =
             match s.Replacement with
+            | Some _ when CapabilityFix.guardUnavailable () -> []
             | Some replacement -> [ CapabilityFix.make source s.Range (Text.textOfRange source s.Range) replacement ]
             | None -> []
 
@@ -2315,8 +2328,21 @@ let structOptionCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0060 AttributeMerge ----
 
-let private attributeMergeMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
-    AttributeMerge.find parseTree source
+let private attributeMergeMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+    // how wide a merged bracket may get is house style, not correctness:
+    //     { "FR0060": { "maxAttributes": 6, "wrapColumn": 120 } }
+    let maxAttributes =
+        Configuration.parameterInt
+            fileName
+            "FR0060"
+            "AttributeMerge"
+            "maxAttributes"
+            AttributeMerge.DefaultMaxAttributes
+
+    let wrapColumn =
+        Configuration.parameterInt fileName "FR0060" "AttributeMerge" "wrapColumn" AttributeMerge.DefaultWrapColumn
+
+    AttributeMerge.find maxAttributes wrapColumn parseTree source
     |> List.map (fun s ->
         hint
             "FR0060"
@@ -2327,12 +2353,12 @@ let private attributeMergeMessages (parseTree: ParsedInput) (source: ISourceText
 [<EditorAnalyzer("AttributeMerge", "Merge consecutive attribute brackets", HelpBase)>]
 let attributeMergeEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0060" "AttributeMerge" (fun () ->
-        attributeMergeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        attributeMergeMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("AttributeMerge", "Merge consecutive attribute brackets", HelpBase)>]
 let attributeMergeCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0060" "AttributeMerge" (fun () ->
-        attributeMergeMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        attributeMergeMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 // ---- FR0061 ArgNames ----
 
@@ -3096,6 +3122,18 @@ let private structHintsMessages
     if not (voptionEnabled || structEnabled || structTupleEnabled) then
         []
     else
+        // A companion .fsi declares these types too, and a migration changes
+        // what it declares — `{ Seen: int option }` becoming voption stops
+        // the project compiling. The api pass sidesteps this by skipping
+        // signature-carrying projects wholesale, but these migrations run in
+        // the NORMAL pass, so that skip never covered them: verified by
+        // running FR0069 against a signature, which applied four edits and
+        // was rolled back.
+        //
+        // The advice still stands; only the edit is withheld, the same way a
+        // capability fix stands down where it has nowhere safe to live.
+        let signatureBound = Text.hasSignatureFile parseTree.FileName
+
         let voptions, structs, structTuples =
             StructHints.find (Visibility.apiChangesAllowed ()) parseTree source
 
@@ -3109,7 +3147,7 @@ let private structHintsMessages
                     // rewritable shapes keeps it a note
                     let migration =
                         match checkOpt with
-                        | Some check when s.IsFilePrivate ->
+                        | Some check when s.IsFilePrivate && not signatureBound ->
                             VOptionMigration.migrate
                                 parseTree
                                 source
@@ -3117,7 +3155,7 @@ let private structHintsMessages
                                 s.FieldIdRange
                                 s.FieldName
                                 s.OptionNameRange
-                        | Some check when Visibility.apiChangesAllowed () && s.IsConfined ->
+                        | Some check when Visibility.apiChangesAllowed () && s.IsConfined && not signatureBound ->
                             // a strictly INTERNAL field under --api-changes:
                             // every use in the project classified against its
                             // own file, one edit set spanning files. Public
@@ -3182,9 +3220,9 @@ let private structHintsMessages
                     // in this file by construction
                     let migration =
                         match checkOpt with
-                        | Some check when s.IsFilePrivate ->
+                        | Some check when s.IsFilePrivate && not signatureBound ->
                             StructTupleMigration.migrate parseTree source check s.FieldIdRange s.FieldName s.Range
-                        | Some check when Visibility.apiChangesAllowed () && s.IsConfined ->
+                        | Some check when Visibility.apiChangesAllowed () && s.IsConfined && not signatureBound ->
                             projectCheck
                             |> Option.filter (ProjectSources.hasInternalsVisibleTo >> not)
                             |> Option.bind (fun pc ->
@@ -3795,7 +3833,10 @@ let private substringSpanMessages (parseTree: ParsedInput) (source: ISourceText)
             s.Range
             // a capability fix: on a dual-framework run this may emit an
             // #if NET6_0_OR_GREATER / #else pair instead of the plain swap
-            [ CapabilityFix.make source s.Range "Substring" "AsSpan" ])
+            (if CapabilityFix.guardUnavailable () then
+                 []
+             else
+                 [ CapabilityFix.make source s.Range "Substring" "AsSpan" ]))
 
 [<EditorAnalyzer("SubstringSpan", "Parse from a span instead of a Substring copy", HelpBase)>]
 let substringSpanEditorAnalyzer (ctx: EditorContext) : Async<Message list> =

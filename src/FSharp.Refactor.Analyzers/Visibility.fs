@@ -41,10 +41,49 @@ let isConfined (path: SyntaxNode list) (accessibilities: SynAccess option list) 
            | SyntaxNode.SynModuleOrNamespace(SynModuleOrNamespace(accessibility = acc)) -> isNonPublic acc
            | _ -> false)
 
+/// Is the declaration private — by its own modifier, or a private module
+/// around it? Private is the one visibility a signature file never mentions.
+let private isPrivate (path: SyntaxNode list) (accessibilities: SynAccess option list) =
+    let isPrivateModifier (accessibility: SynAccess option) =
+        match accessibility with
+        | Some(SynAccess.Private _) -> true
+        | _ -> false
+
+    accessibilities |> List.exists isPrivateModifier
+    || path
+       |> List.exists (fun node ->
+           match node with
+           | SyntaxNode.SynModule(SynModuleDecl.NestedModule(moduleInfo = SynComponentInfo(accessibility = acc))) ->
+               isPrivateModifier acc
+           | SyntaxNode.SynModuleOrNamespace(SynModuleOrNamespace(accessibility = acc)) -> isPrivateModifier acc
+           | _ -> false)
+
+/// Does a companion .fsi govern the file this declaration sits in?
+///
+/// A signature must agree with the implementation on the compiled shape —
+/// `[<Struct>]` on the type, an active pattern's return type, a union case's
+/// field names — for everything it declares, and it declares every internal
+/// declaration as well as every public one. Only private escapes it.
+/// FR0022, FR0069, FR0093 and FR0130 each found this separately on
+/// fcs-fable, which carries 176 signature files; the gate they share now
+/// asks once, so FR0011, FR0016 and FR0134 need not find it a fifth time.
+let private signatureBound (path: SyntaxNode list) =
+    path
+    |> List.tryPick (fun node ->
+        match node with
+        | SyntaxNode.SynModuleOrNamespace(SynModuleOrNamespace(range = r)) -> Some r.FileName
+        | _ -> None)
+    |> Option.exists Text.hasSignatureFile
+
 /// The gate itself: fire on contained declarations always, on any
-/// declaration when the caller opted into API changes.
+/// declaration when the caller opted into API changes — except beside a
+/// signature file, where only a private declaration can change shape
+/// without the .fsi disagreeing.
 let isInScope (allowApiChanges: bool) (path: SyntaxNode list) (accessibilities: SynAccess option list) =
-    allowApiChanges || isConfined path accessibilities
+    if signatureBound path then
+        isPrivate path accessibilities
+    else
+        allowApiChanges || isConfined path accessibilities
 
 /// Which DEFINITIONS a scan may touch, for the rules that rewrite a
 /// function's signature and every one of its call sites.

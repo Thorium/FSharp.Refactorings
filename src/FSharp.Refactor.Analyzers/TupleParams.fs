@@ -22,6 +22,7 @@ module FSharp.Refactor.TupleParams
 
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Diagnostics
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Analyzers.SDK
@@ -189,6 +190,10 @@ let findApiChanges
     (check: FSharpCheckFileResults)
     (project: FSharpCheckProjectResults)
     (fileLookup: string -> FileContext option)
+    /// Call sites OUTSIDE this project's compilation — a script that
+    /// `#load`s the defining file compiles it into a different
+    /// compilation, so its uses are invisible to `project`.
+    (extraUses: FSharpSymbol -> FSharpSymbolUse[])
     : Suggestion list =
     let hasErrors =
         check.Diagnostics
@@ -234,7 +239,10 @@ let findApiChanges
                     | None -> None
                     | Some symbolUse ->
                         let uses =
-                            project.GetUsesOfSymbol symbolUse.Symbol
+                            // a `#load`ing script is a real call site that `project` cannot
+                            // see. Missing one is the single thing this rule cannot survive:
+                            // the definition changes shape and the script stops compiling.
+                            Array.append (project.GetUsesOfSymbol symbolUse.Symbol) (extraUses symbolUse.Symbol)
                             |> Array.filter (fun u -> not u.IsFromDefinition)
 
                         let callEdits =

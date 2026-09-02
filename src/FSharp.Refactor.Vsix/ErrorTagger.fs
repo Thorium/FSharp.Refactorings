@@ -23,9 +23,7 @@ type FrErrorTypeExports() =
     [<Export(typeof<ErrorTypeDefinition>); Name(FrHintErrorType)>]
     member val FrHintDefinition: ErrorTypeDefinition = null with get, set
 
-[<Export(typeof<EditorFormatDefinition>)>]
-[<Name(FrHintErrorType)>]
-[<UserVisible true>]
+[<Export(typeof<EditorFormatDefinition>); Name(FrHintErrorType); UserVisible true>]
 type FrHintFormat() as this =
     inherit EditorFormatDefinition()
 

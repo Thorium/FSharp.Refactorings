@@ -235,3 +235,27 @@ let ``a cast value is parenthesised`` () =
         let patched = applyEdit source s.Range s.ReplacementText
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one suggestion, got %A" other
+
+[<Fact>]
+let ``a type-annotated constructor argument stands down`` () =
+    // after `m: Henkilo` the parser is reading a TYPE, and the comma that
+    // would introduce `Id = 1L` ends it: `Wrap(m: Henkilo, Id = 1L)` is
+    // "Unexpected symbol ',' in expression" (Fuuga's McpToolRouting)
+    let source =
+        klass
+        + "type Wrap(h: Henkilo) =\n    member val Id = 0L with get, set\nlet f (m: Henkilo) =\n    let w = Wrap(m: Henkilo)\n    w.Id <- 1L\n    w"
+
+    Assert.Empty(objInitIn source)
+
+[<Fact>]
+let ``a plain constructor argument still folds`` () =
+    let source =
+        klass
+        + "type Wrap(h: Henkilo) =\n    member val Id = 0L with get, set\nlet f (m: Henkilo) =\n    let w = Wrap(m)\n    w.Id <- 1L\n    w"
+
+    match objInitIn source with
+    | [ s ] ->
+        Assert.Equal("Wrap(m, Id = 1L)", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected the plain argument to fold, got %A" other

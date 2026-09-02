@@ -81,6 +81,48 @@ let private isMethod (funcExpr: SynExpr) =
 let private argumentToMethod (path: SyntaxNode list) =
     enclosingCallee path |> Option.exists isMethod
 
+/// Names in scope at a position that the file itself binds. `id`, `fst` and
+/// `snd` are only the builtins while nothing nearer shadows them, and `let
+/// id bhvr = returnB bhvr` in a module (nu's Behavior does exactly this for
+/// all three) makes `id` mean something else for the rest of it — so `fun x
+/// -> x` becoming `id` would call the wrong function. Verified: FR0095
+/// rewrote a lambda inside such a module, broke the build and was rolled
+/// back.
+///
+/// Scope is read off the tree, because this rule carries no typed results
+/// and is worth keeping usable under --parse-only: the enclosing `let`s,
+/// parameters, lambda arguments, match and loop patterns on the path, and
+/// the module-level bindings declared ABOVE the position. The far more
+/// common `let id = 42` in some unrelated function stays where it is and
+/// costs nothing here. A module opened from another file that rebinds the
+/// name is the one case this cannot see; the verification build catches it.
+let private shadowedAt (path: SyntaxNode list) (at: range) =
+    let bindingNames (bindings: SynBinding list) =
+        bindings
+        |> List.collect (fun (SynBinding(headPat = headPat)) -> patNames headPat)
+
+    let declaredAbove (decls: SynModuleDecl list) =
+        decls
+        |> List.collect (fun decl ->
+            match decl with
+            | SynModuleDecl.Let(bindings = bindings; range = r) when Position.posLt r.Start at.Start ->
+                bindingNames bindings
+            | _ -> [])
+
+    path
+    |> List.collect (fun node ->
+        match node with
+        | SyntaxNode.SynExpr(LetOrUseE lou) -> bindingNames lou.Bindings
+        | SyntaxNode.SynBinding(SynBinding(headPat = headPat)) -> patNames headPat
+        | SyntaxNode.SynExpr(SynExpr.Lambda(parsedData = Some(parameters, _))) -> parameters |> List.collect patNames
+        | SyntaxNode.SynMatchClause(SynMatchClause(pat = pat)) -> patNames pat
+        | SyntaxNode.SynExpr(SynExpr.ForEach(pat = pat)) -> patNames pat
+        | SyntaxNode.SynExpr(SynExpr.For(ident = ident)) -> [ ident.idText ]
+        | SyntaxNode.SynModuleOrNamespace(SynModuleOrNamespace(decls = decls))
+        | SyntaxNode.SynModule(SynModuleDecl.NestedModule(decls = decls)) -> declaredAbove decls
+        | _ -> [])
+    |> Set.ofList
+
 /// Find lambdas that are just `id`, `fst` or `snd`.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
@@ -100,12 +142,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         | _ -> None
 
                     match builtin with
-                    | Some replacement ->
+                    | Some replacement when not ((shadowedAt path expr.Range).Contains replacement) ->
                         suggestions.Add
                             { Range = expr.Range
                               OriginalText = textOfRange source expr.Range
                               ReplacementText = replacement }
-                    | None -> ()
+                    | _ -> ()
                 | _ -> () }
 
     AstIndex.replay collector parseTree

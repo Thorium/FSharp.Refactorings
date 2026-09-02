@@ -244,6 +244,9 @@ let rec private bindsNothing (p: SynPat) =
 let findMergeableArms (parseTree: ParsedInput) (source: ISourceText) : ArmMerge list =
     let index = AstIndex.ofTree parseTree
 
+    // one traversal for the file; an arm's comments are read out of this
+    let allComments = commentsWithText parseTree source
+
     let clauseView (SynMatchClause(pat = p; whenExpr = w; resultExpr = r; trivia = t) as clause) =
         let barOnOwnLine =
             match t.BarRange with
@@ -294,20 +297,69 @@ let findMergeableArms (parseTree: ParsedInput) (source: ISourceText) : ArmMerge 
 
                           if not (spansDirective source replaceRange) then
                               let indent = String.replicate bar.StartColumn " "
+                              let bodyIndent = indent + "    "
                               let body = (textOfRange source lastResult.Range).Trim()
 
-                              let alternatives =
-                                  run |> List.map (fun (_, p, _, _, _) -> textOfRange source p.Range)
+                              // Each arm's own comment travels with its own
+                              // pattern. An arm that carries a comment is an
+                              // arm the author considered a distinct case,
+                              // whatever its body currently says, and folding
+                              // the arms while dropping the comments would
+                              // delete the only thing telling the merged
+                              // cases apart. F# accepts comments between the
+                              // alternatives of an or-pattern, and fantomas
+                              // keeps them there.
+                              //
+                              // A comment BETWEEN two arms belongs to neither
+                              // range and is not reproduced; the fix is then
+                              // held back by the comment guard, which is the
+                              // right answer rather than a silent loss.
+                              // ...but only the comments we are NOT already
+                              // reproducing. The pattern and the surviving body
+                              // are spliced verbatim, so a comment inside either
+                              // travels with that text; hoisting it as well
+                              // printed `1 (* why *) + 1` with the comment three
+                              // times over. It compiles, so no build check would
+                              // ever have caught it
+                              let commentsIn (r: range) (verbatim: range list) =
+                                  allComments
+                                  |> List.filter (fun (cr, _) ->
+                                      Range.rangeContainsRange r cr
+                                      && not (verbatim |> List.exists (fun v -> Range.rangeContainsRange v cr)))
+                                  |> List.sortBy (fun (cr, _) -> cr.StartLine, cr.StartColumn)
+                                  |> List.map snd
 
                               let lines =
-                                  alternatives
-                                  |> List.mapi (fun i pat ->
-                                      let prefix = if i = 0 then "" else indent
+                                  [ for i, (clause, pat, armResult, _, _) in List.indexed run do
+                                        let prefix = if i = 0 then "" else indent
+                                        let patText = textOfRange source pat.Range
 
-                                      if i = alternatives.Length - 1 then
-                                          $"{prefix}| {pat} -> {body}"
-                                      else
-                                          $"{prefix}| {pat}")
+                                        // the pattern is spliced verbatim, and so
+                                        // is the surviving body — and the rule only
+                                        // fires when the bodies are textually
+                                        // IDENTICAL, so a comment inside a discarded
+                                        // body is the same comment the survivor
+                                        // already carries. Hoisting either one just
+                                        // says it twice
+                                        let armComments = commentsIn clause.Range [ pat.Range; armResult.Range ]
+
+                                        if i = run.Length - 1 then
+                                            // the last arm keeps the body, so its
+                                            // comment stays above it
+                                            if List.isEmpty armComments then
+                                                $"{prefix}| {patText} -> {body}"
+                                            else
+                                                $"{prefix}| {patText} ->"
+
+                                                for c in armComments do
+                                                    $"{bodyIndent}{c}"
+
+                                                $"{bodyIndent}{body}"
+                                        else
+                                            $"{prefix}| {patText}"
+
+                                            for c in armComments do
+                                                $"{indent}{c}" ]
 
                               { ReplaceRange = replaceRange
                                 NewText = String.concat "\n" lines

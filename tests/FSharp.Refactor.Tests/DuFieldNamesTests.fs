@@ -102,3 +102,36 @@ let ``ambiguous case name across two unions is skipped`` () =
 [<Fact>]
 let ``case without any destructuring site is left alone`` () =
     Assert.Empty(fieldNamesIn "module Test\ntype private Order =\n    | Line of int * decimal\n    | Total of decimal")
+
+[<Fact>]
+let ``FR0022 stands down where a signature declares the case`` () =
+    // the .fsi declares `Box of int * int`; naming the fields in the .fs
+    // alone gives "The names differ" and the project stops compiling
+    // (found on fcs-fable's TipFormatter)
+    let dir =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsref-du-" + System.Guid.NewGuid().ToString "N")
+
+    System.IO.Directory.CreateDirectory dir |> ignore
+
+    try
+        let source =
+            "module internal M\n\ntype Shape =\n    | Box of int * int\n\nlet area s =\n    match s with\n    | Box(width, height) -> width * height\n"
+
+        let impl = System.IO.Path.Combine(dir, "M.fs")
+        System.IO.File.WriteAllText(impl, source)
+
+        System.IO.File.WriteAllText(
+            System.IO.Path.Combine(dir, "M.fsi"),
+            "module internal M\n\ntype Shape =\n    | Box of int * int\n\nval area: Shape -> int\n"
+        )
+
+        let tree, sourceText = parseNamed impl source
+        Assert.Empty(DuFieldNames.find false tree sourceText)
+
+        // the same source with no signature beside it still qualifies
+        let lone = System.IO.Path.Combine(dir, "N.fs")
+        System.IO.File.WriteAllText(lone, source)
+        let loneTree, loneText = parseNamed lone source
+        Assert.NotEmpty(DuFieldNames.find false loneTree loneText)
+    finally
+        System.IO.Directory.Delete(dir, true)

@@ -13,9 +13,14 @@
 /// *toward* seq are never moved — that would turn eager code lazy — and an
 /// operation is never moved INTO the List module (see worthMovingInto).
 ///
-/// Known (pathological) caveat shared with all such rewrites: if the mapped
-/// function mutates the source collection while it is being enumerated, the
-/// eager copy made by the conversion masked that; the moved form would throw.
+/// An operation that MUTATES is refused outright, and this is the rule's
+/// sharpest edge rather than a footnote. `Seq.toList |> List.iter (fun k ->
+/// dict[k] <- v)` materialises before the writes begin; `Seq.iter` interleaves
+/// them, and where the sequence reads what the body writes the enumeration
+/// throws "Collection was modified". SQLProvider lost 19 tests to exactly
+/// this shape, on a sequence built from the very dictionary its body
+/// assigned into. Nothing downstream can catch it either: the rewrite
+/// compiles, so only a test run ever finds out.
 ///
 /// Safety rules: both pipeline stages single-line; the conversion must be a
 /// bare `Module.function`; the operation's head must be exactly the
@@ -164,15 +169,103 @@ let rec private headModuleFunc (e: SynExpr) =
     | SynExpr.TypeApp(expr = inner) -> headModuleFunc inner
     | _ -> ValueNone
 
+/// Does this text write to anything? The eager conversion this rule removes
+/// is what keeps enumeration and mutation apart, so code that assigns
+/// cannot have it taken away.
+///
+/// Read off the source text deliberately: it over-approximates, and it does
+/// so in the SAFE direction — a `<-` inside a string or a comment costs a
+/// fix that was available, never a rewrite that breaks at run time.
+let private mutatesSomething (text: string) = text.Contains "<-"
+
+/// Does the operation take anything that could RUN during the walk? `List.iter
+/// register` and `List.map (fun k -> ...)` do; `List.length`, `List.rev` and
+/// `List.take 3` cannot write to the collection they are reading.
+let private takesCallback (opStage: SynExpr) =
+    let rec arguments (e: SynExpr) =
+        match e with
+        | SynExpr.App(isInfix = false; funcExpr = funcExpr; argExpr = argExpr) -> argExpr :: arguments funcExpr
+        | SynExpr.TypeApp(expr = inner) -> arguments inner
+        | _ -> []
+
+    arguments opStage
+    |> List.exists (fun arg ->
+        match stripParens arg with
+        | SynExpr.Const _ -> false
+        | _ -> true)
+
+/// The identifier a pipeline source ultimately reads from: `d` in `d.Keys`,
+/// `xs` in `xs |> h`, `getItems` in `getItems ()`.
+[<TailCall>]
+let rec private sourceRoot (e: SynExpr) =
+    match e with
+    | SynExpr.Ident id -> ValueSome id.idText
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = first :: _)) -> ValueSome first.idText
+    | SynExpr.DotGet(expr = inner)
+    | SynExpr.Paren(expr = inner)
+    | SynExpr.TypeApp(expr = inner) -> sourceRoot inner
+    | PipeApp(inner, _) -> sourceRoot inner
+    | SynExpr.App(funcExpr = funcExpr) -> sourceRoot funcExpr
+    | _ -> ValueNone
+
+/// Is the source collection OWNED by the function this pipeline sits in?
+///
+/// Under a callback, the eager copy can only matter where the callback can
+/// reach the collection being read. A collection the function itself binds
+/// — a local `let`, a parameter, a loop or match variable — is reachable
+/// only through the function's own text, which `mutatesSomething` reads in
+/// full. A module-level collection, or one captured from further out, can
+/// be written by any function the callback names (SQLProvider's shape: the
+/// sequence was built from a dictionary a helper assigned into), and
+/// nothing in this file can tell — so those are gated out, and only those.
+/// A list or array literal is already materialised and reads from nothing.
+let private sourceIsOwned (path: SyntaxNode list) (sourceExpr: SynExpr) =
+    match stripParens sourceExpr with
+    | SynExpr.ArrayOrList _
+    | SynExpr.ArrayOrListComputed _ -> true
+    | _ ->
+        match sourceRoot sourceExpr with
+        | ValueNone -> false
+        | ValueSome name ->
+            let bindingNames (bindings: SynBinding list) =
+                bindings
+                |> List.collect (fun (SynBinding(headPat = headPat)) -> patNames headPat)
+
+            path
+            |> List.exists (fun node ->
+                match node with
+                | SyntaxNode.SynExpr(LetOrUseE lou) -> bindingNames lou.Bindings |> List.contains name
+                | SyntaxNode.SynBinding(SynBinding(headPat = headPat)) -> patNames headPat |> List.contains name
+                | SyntaxNode.SynExpr(SynExpr.Lambda(parsedData = Some(parameters, _))) ->
+                    parameters |> List.collect patNames |> List.contains name
+                | SyntaxNode.SynMatchClause(SynMatchClause(pat = pat)) -> patNames pat |> List.contains name
+                | SyntaxNode.SynExpr(SynExpr.ForEach(pat = pat)) -> patNames pat |> List.contains name
+                | SyntaxNode.SynExpr(SynExpr.For(ident = ident)) -> ident.idText = name
+                | _ -> false)
+
+/// The text a callback could write from: the whole enclosing binding, so a
+/// local closure assigning into the collection is seen as well as the
+/// lambda in the operation itself.
+let private enclosingText (source: ISourceText) (path: SyntaxNode list) (opStage: SynExpr) =
+    // the path runs inward, so the OUTERMOST binding is the last on it
+    path
+    |> List.rev
+    |> List.tryPick (fun node ->
+        match node with
+        | SyntaxNode.SynBinding binding -> Some binding.RangeOfBindingWithRhs
+        | _ -> None)
+    |> Option.map (textOfRange source)
+    |> Option.defaultWith (fun () -> textOfRange source opStage.Range)
+
 /// Find pipeline segments `conv |> Module.op args` that can be rewritten.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
 
     let collector =
         { new SyntaxCollectorBase() with
-            override _.WalkExpr(_path, expr) =
+            override _.WalkExpr(path, expr) =
                 match expr with
-                | PipeApp(PipeApp(_, (ModuleFunc(convModule, convFunc, _) as convStage)), opStage) when
+                | PipeApp(PipeApp(sourceExpr, (ModuleFunc(convModule, convFunc, _) as convStage)), opStage) when
                     isSingleLine convStage.Range && isSingleLine opStage.Range
                     ->
                     let convKey = $"{convModule}.{convFunc}"
@@ -185,7 +278,19 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                             let consuming = consumingOps.Contains opFunc
 
-                            if (movable || consuming) && opAllowedForModules opFunc sourceModule targetModule then
+                            // a callback can write while the walk reads:
+                            // the collection must be the function's own,
+                            // and nothing in the function may assign
+                            let safeUnderCallback =
+                                not (takesCallback opStage)
+                                || (sourceIsOwned path sourceExpr
+                                    && not (mutatesSomething (enclosingText source path opStage)))
+
+                            if
+                                (movable || consuming)
+                                && opAllowedForModules opFunc sourceModule targetModule
+                                && safeUnderCallback
+                            then
                                 let argsText =
                                     textOfRange
                                         source

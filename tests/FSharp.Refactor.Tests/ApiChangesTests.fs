@@ -92,7 +92,7 @@ let private withTwoFiles
 /// FR0090, as (function name, [file, original, replacement]).
 let private findAcrossTwoFiles (defSource: string) (useSource: string) =
     withTwoFiles defSource useSource (fun ctx check project fileLookup ->
-        TupleParams.findApiChanges ctx check project fileLookup
+        TupleParams.findApiChanges ctx check project fileLookup (fun _ -> [||])
         |> List.map (fun s ->
             s.FunctionName,
             s.Edits
@@ -101,7 +101,7 @@ let private findAcrossTwoFiles (defSource: string) (useSource: string) =
 /// FR0091, in the same shape.
 let private findParamOrderAcrossTwoFiles (defSource: string) (useSource: string) =
     withTwoFiles defSource useSource (fun ctx check project fileLookup ->
-        ParamOrder.findApiChanges ctx check project fileLookup
+        ParamOrder.findApiChanges ctx check project fileLookup (fun _ -> [||])
         |> List.map (fun s ->
             s.FunctionName,
             s.Edits
@@ -225,5 +225,124 @@ let ``a private function is left to the single-file rule`` () =
         findAcrossTwoFiles
             "module LibA\n\nlet private add (a, b) = a + b\nlet internal sum = add (1, 2)\n"
             "module LibB\n\nlet x = 1\n"
+
+    Assert.Empty found
+
+/// A definition file, a project file using it, and a SCRIPT that `#load`s
+/// the definition — the shape --api-changes has to survive. The script is
+/// a SEPARATE compilation, so its calls never appear in the project's
+/// symbol tables; the tool supplies them through `extraUses`, matched by
+/// full name because the script's symbol is a different instance.
+///
+/// `registerScript` decides whether the script's parse tree is available.
+/// It stands in for a call site the tool cannot render, which must make
+/// the whole change stand down rather than reshape a definition whose
+/// caller stays in the old shape.
+let private withScriptCallSite (defSource: string) (useSource: string) (scriptSource: string) (registerScript: bool) =
+    let dir =
+        Path.Combine(Path.GetTempPath(), "fsref-script-" + Guid.NewGuid().ToString "N")
+
+    Directory.CreateDirectory dir |> ignore
+
+    try
+        let fileA = Path.Combine(dir, "LibA.fs")
+        let fileB = Path.Combine(dir, "LibB.fs")
+        let script = Path.Combine(dir, "use.fsx")
+        File.WriteAllText(fileA, defSource)
+        File.WriteAllText(fileB, useSource)
+        File.WriteAllText(script, scriptSource)
+
+        let options = optionsFor dir [ fileA; fileB ]
+        let project = checker.ParseAndCheckProject options |> Async.RunSynchronously
+
+        let scriptText = SourceText.ofString scriptSource
+
+        let scriptOptions, _ =
+            checker.GetProjectOptionsFromScript(script, scriptText, assumeDotNetFramework = false, useFsiAuxLib = true)
+            |> Async.RunSynchronously
+
+        let scriptProject =
+            checker.ParseAndCheckProject scriptOptions |> Async.RunSynchronously
+
+        // only uses IN THE SCRIPT: the #loaded file is part of this
+        // compilation too, and the project pass already owns those
+        let scriptUses =
+            scriptProject.GetAllUsesOfAllSymbols()
+            |> Array.filter (fun u ->
+                not u.IsFromDefinition
+                && String.Equals(
+                    Path.GetFullPath u.Range.FileName,
+                    Path.GetFullPath script,
+                    StringComparison.OrdinalIgnoreCase
+                ))
+
+        let fullName (s: FSharp.Compiler.Symbols.FSharpSymbol) =
+            try
+                Some s.FullName
+            with _ ->
+                None
+
+        let extraUses (symbol: FSharp.Compiler.Symbols.FSharpSymbol) =
+            match fullName symbol with
+            | Some name -> scriptUses |> Array.filter (fun u -> fullName u.Symbol = Some name)
+            | None -> [||]
+
+        let contexts =
+            System.Collections.Generic.Dictionary<string, Text.FileContext>(StringComparer.OrdinalIgnoreCase)
+
+        contexts.[Path.GetFullPath fileA] <- contextFor options fileA
+        contexts.[Path.GetFullPath fileB] <- contextFor options fileB
+
+        if registerScript then
+            let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions scriptOptions
+
+            let parsed =
+                checker.ParseFile(script, scriptText, parsingOptions) |> Async.RunSynchronously
+
+            contexts.[Path.GetFullPath script] <-
+                { FileName = script
+                  Source = scriptText
+                  ParseTree = parsed.ParseTree }
+
+        let fileLookup (name: string) =
+            match contexts.TryGetValue(Path.GetFullPath name) with
+            | true, ctx -> Some ctx
+            | false, _ -> None
+
+        let ctx = contexts.[Path.GetFullPath fileA]
+        let check = checkFile options ctx
+
+        TupleParams.findApiChanges ctx check project fileLookup extraUses
+        |> List.map (fun s ->
+            s.FunctionName,
+            s.Edits
+            |> List.map (fun e -> Path.GetFileName e.Range.FileName, e.Original, e.Replacement))
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``FR0090 rewrites the call site inside a #loading script`` () =
+    let found =
+        withScriptCallSite
+            "module LibA\n\nlet internal add (a: int, b: int) = a + b\n"
+            "module LibB\n\nlet run () = LibA.add (1, 2)\n"
+            "#load \"LibA.fs\"\n\nprintfn \"%d\" (LibA.add (3, 4))\n"
+            true
+
+    let edits = found |> List.collect snd
+
+    Assert.Contains(edits, (fun (file, _, _) -> file = "use.fsx"))
+    Assert.Contains(edits, (fun (_, original, replacement) -> original = "(3, 4)" && replacement = "3 4"))
+
+[<Fact>]
+let ``FR0090 stands down when a script call site cannot be rendered`` () =
+    // the script calls it, but its parse tree is unavailable: reshaping the
+    // definition would leave the script calling the old shape
+    let found =
+        withScriptCallSite
+            "module LibA\n\nlet internal add (a: int, b: int) = a + b\n"
+            "module LibB\n\nlet run () = LibA.add (1, 2)\n"
+            "#load \"LibA.fs\"\n\nprintfn \"%d\" (LibA.add (3, 4))\n"
+            false
 
     Assert.Empty found
