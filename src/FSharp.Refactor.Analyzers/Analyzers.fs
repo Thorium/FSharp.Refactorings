@@ -790,7 +790,7 @@ let tupleParamsCliAnalyzer (ctx: CliContext) : Async<Message list> =
 /// are older and stay.
 let private needsCore9 (target: string) =
     [ "Result.defaultValue"; "Result.defaultWith"; "Result.isOk"; "Result.isError" ]
-    |> List.exists (fun f -> target.Contains f)
+    |> List.exists target.Contains
 
 let private resultModuleMessages
     (allowCore9: bool)
