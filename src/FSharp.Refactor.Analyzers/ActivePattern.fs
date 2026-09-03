@@ -152,7 +152,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         // extracted only when a candidate clause is found
                         let declText = lazy (textOfRange source decl.Range)
 
-                        for SynMatchClause(pat = pat; whenExpr = whenExpr) in clauses do
+                        for SynMatchClause(pat = pat; whenExpr = whenExpr; resultExpr = body) in clauses do
                             match pat, whenExpr with
                             | SynPat.Named(ident = SynIdent(ident = var)),
                               Some(SynExpr.App(
@@ -201,13 +201,26 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                         let clauseRange =
                                             Range.mkRange pat.Range.FileName pat.Range.Start guard.Range.End
 
+                                        // a variable the body never reads becomes `_`:
+                                        // `| c when Char.IsDigit c -> Decimal` bound `c` only
+                                        // for the guard, and `| IsDigit c -> Decimal` left
+                                        // it unused — FS1182, an error under
+                                        // FsAutoComplete's warnings-as-errors
+                                        let bodyReads =
+                                            System.Text.RegularExpressions.Regex.IsMatch(
+                                                textOfRange source body.Range,
+                                                $@"\b{System.Text.RegularExpressions.Regex.Escape var.idText}\b"
+                                            )
+
+                                        let binder = if bodyReads then var.idText else "_"
+
                                         suggestions.Add
                                             { PatternName = patternName
                                               InsertRange = insertAt
                                               InsertText = $"{binding}\n{indent}"
                                               ClauseRange = clauseRange
                                               OriginalClauseText = textOfRange source clauseRange
-                                              ClauseText = $"{patternName} {var.idText}" }
+                                              ClauseText = $"{patternName} {binder}" }
                             | _ -> ()
                 | _ -> () }
 

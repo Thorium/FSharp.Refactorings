@@ -259,3 +259,14 @@ let ``a plain constructor argument still folds`` () =
         let patched = applyEdit source s.Range s.ReplacementText
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected the plain argument to fold, got %A" other
+
+[<Fact>]
+let ``a construction without parentheses stands down`` () =
+    // `ProcessStartInfo "dotnet"` has no argument list to splice named
+    // properties into: the splice gave `ProcessStartInfo "dotnet"(Arguments = ...)`
+    // and "This value is not a function and cannot be applied" (Fable's
+    // MSBuildCrackerResolver)
+    let source =
+        "module Test\ntype Wrap(name: string) =\n    member val Id = 0L with get, set\nlet f () =\n    let w = Wrap \"x\"\n    w.Id <- 1L\n    w"
+
+    Assert.Empty(objInitIn source)

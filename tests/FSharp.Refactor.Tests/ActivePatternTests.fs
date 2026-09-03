@@ -28,7 +28,7 @@ let ``dotted guard function becomes an active pattern`` () =
         // a .NET member's extracted input is annotated with its resolved
         // parameter type — for the overloaded ones (Path.IsPathRooted) it
         // is the difference between compiling and FS0041
-        "module Test\n[<return: Struct>]\nlet inline private (|IsNullOrEmpty|_|) (input: string) =\n    if System.String.IsNullOrEmpty input then ValueSome input else ValueNone\nlet describe (s: string) =\n    match s with\n    | IsNullOrEmpty s -> \"empty\"\n    | s -> s"
+        "module Test\n[<return: Struct>]\nlet inline private (|IsNullOrEmpty|_|) (input: string) =\n    if System.String.IsNullOrEmpty input then ValueSome input else ValueNone\nlet describe (s: string) =\n    match s with\n    | IsNullOrEmpty _ -> \"empty\"\n    | s -> s"
 
 [<Fact>]
 let ``module-level guard function becomes an active pattern`` () =
@@ -99,3 +99,12 @@ let ``an overloaded method guard annotates the extracted input`` () =
         let patched = applyEdit patched s.InsertRange s.InsertText
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one annotated suggestion, got %A" other
+
+[<Fact>]
+let ``a guard variable the body never reads becomes a wildcard`` () =
+    // `| c when Char.IsDigit c -> Decimal` bound `c` only for the guard;
+    // `| IsDigit c -> Decimal` would leave it unused, FS1182 — an error
+    // under warnings-as-errors (FsAutoComplete's AdjustConstant)
+    assertSingleSuggestion
+        "module Test\nlet kind (ch: char) =\n    match ch with\n    | c when System.Char.IsDigit c -> \"digit\"\n    | _ -> \"other\""
+        "module Test\n[<return: Struct>]\nlet inline private (|IsDigit|_|) (input: char) =\n    if System.Char.IsDigit input then ValueSome input else ValueNone\nlet kind (ch: char) =\n    match ch with\n    | IsDigit _ -> \"digit\"\n    | _ -> \"other\""

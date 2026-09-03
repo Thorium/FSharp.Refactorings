@@ -75,6 +75,101 @@ let commentSafeOnly (parseTree: ParsedInput) (source: ISourceText) (messages: Me
                             not (Range.rangeContainsRange f.FromRange r)
                             || toTexts |> List.exists (fun t -> t.Contains text)))))
 
+/// Does the project's --langversion allow at least this F# major version?
+/// An absent flag means the SDK default, which is the latest.
+let private langVersionAtLeast (major: float) (options: AnalyzerProjectOptions) =
+    let explicitVersion =
+        options.OtherOptions
+        |> List.tryPick (fun (arg: string) ->
+            if arg.StartsWith "--langversion:" then
+                Some(arg.Substring "--langversion:".Length)
+            else
+                None)
+
+    match explicitVersion with
+    | None
+    | Some("latest" | "preview" | "latestmajor") -> true
+    | Some v ->
+        match
+            System.Double.TryParse(
+                v,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture
+            )
+        with
+        | true, n -> n >= major
+        | false, _ -> false
+
+/// FSharp.Core versions already read, keyed by the reference path: the
+/// probe is file IO and every analyzer would otherwise repeat it per file.
+let private fsharpCoreVersions =
+    System.Collections.Concurrent.ConcurrentDictionary<string, int>()
+
+/// Does the project reference an FSharp.Core new enough for this major?
+///
+/// String interpolation is a LIBRARY feature, and the compiler says so:
+/// "Feature 'string interpolation' requires the F# library for language
+/// version 5.0 or greater". `--langversion` cannot answer that, and a
+/// legacy project usually sets no langversion at all — so the flag gate
+/// waves it through and every interpolation fix then fails to compile.
+/// PethostBackup pins FSharp.Core 4.7 out of a net45 packages folder: 28
+/// FR0031 fixes applied, failed, and took a pass of unrelated fixes down
+/// with them when the whole pass rolled back.
+///
+/// An absent or unreadable reference answers TRUE — the same
+/// assume-the-latest stance the langversion gate takes, so a probe
+/// failure never silences a rule that works today.
+let private fsharpCoreAtLeast (major: int) (options: AnalyzerProjectOptions) =
+    let referencePath =
+        options.OtherOptions
+        |> List.tryPick (fun (arg: string) ->
+            if arg.StartsWith "-r:" then
+                // a path with spaces arrives quoted; matching the raw arg
+                // would miss it and silently wave the project through
+                let path = (arg.Substring 3).Trim '"'
+
+                if path.EndsWith("FSharp.Core.dll", System.StringComparison.OrdinalIgnoreCase) then
+                    Some path
+                else
+                    None
+            else
+                None)
+
+    match referencePath with
+    | None -> true
+    | Some path ->
+        let found =
+            fsharpCoreVersions.GetOrAdd(
+                path,
+                fun p ->
+                    try
+                        System.Reflection.AssemblyName.GetAssemblyName(p).Version.Major
+                    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                        System.Int32.MaxValue
+            )
+
+        found >= major
+
+/// Interpolation needs BOTH halves: the F# 5 syntax and the FSharp.Core
+/// that backs it.
+let private canInterpolate (options: AnalyzerProjectOptions) =
+    langVersionAtLeast 5.0 options && fsharpCoreAtLeast 5 options
+
+/// Does the project reference an assembly of this simple name?
+let private referencesAssembly (name: string) (options: AnalyzerProjectOptions) =
+    options.OtherOptions
+    |> List.exists (fun (arg: string) ->
+        arg.StartsWith "-r:"
+        && System.IO.Path.GetFileNameWithoutExtension((arg.Substring 3).Trim '"')
+           |> fun n -> n.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+
+/// `task { }` needs FSharp.Core 6, and a Fable project compiles to a
+/// target where a test's blocking IS the behaviour under test — Fable's
+/// own suites assert `Async.RunSynchronously` semantics — so neither may
+/// have its tests rewritten around a Task.
+let private canReturnTask (options: AnalyzerProjectOptions) =
+    fsharpCoreAtLeast 6 options && not (referencesAssembly "Fable.Core" options)
+
 // ---- FR0001 MatchToIf ----
 
 let private matchToIfMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
@@ -483,9 +578,9 @@ let ifRestructureCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0116 RecGroup ----
 
-let private recGroupMessages (parseTree: ParsedInput) (source: ISourceText) : Message list =
+let private recGroupMessages check (parseTree: ParsedInput) (source: ISourceText) : Message list =
     let extractions =
-        RecGroup.find parseTree source
+        RecGroup.find check parseTree source
         |> List.map (fun s ->
             let explanation =
                 if s.IsSelfRecursive then
@@ -501,7 +596,7 @@ let private recGroupMessages (parseTree: ParsedInput) (source: ISourceText) : Me
                   fix s.RemoveRange (Text.textOfRange source s.RemoveRange) "" ])
 
     let recrowns =
-        RecGroup.findHeadRecrowns parseTree source
+        RecGroup.findHeadRecrowns check parseTree source
         |> List.map (fun s ->
             hint
                 "FR0116"
@@ -515,13 +610,13 @@ let private recGroupMessages (parseTree: ParsedInput) (source: ISourceText) : Me
 [<EditorAnalyzer("RecGroup", "Pull non-recursive members out of let rec groups", HelpBase)>]
 let recGroupEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0116" "RecGroup" (fun () ->
-        recGroupMessages ctx.ParseFileResults.ParseTree ctx.SourceText
+        recGroupMessages None ctx.ParseFileResults.ParseTree ctx.SourceText
         |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("RecGroup", "Pull non-recursive members out of let rec groups", HelpBase)>]
 let recGroupCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0116" "RecGroup" (fun () ->
-        recGroupMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        recGroupMessages (Some ctx.CheckFileResults) ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 // ---- FR0002 OptionModule ----
 
@@ -688,8 +783,23 @@ let tupleParamsCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0009 ResultModule ----
 
-let private resultModuleMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+/// `Result.defaultValue`, `defaultWith`, `isOk` and `isError` arrived in
+/// FSharp.Core 9: on Giraffe's example project (FSharp.Core 6) every such
+/// rewrite was "The value, constructor, namespace or type 'defaultValue'
+/// is not defined" and rolled back. `map`, `bind`, `mapError` and `iter`
+/// are older and stay.
+let private needsCore9 (target: string) =
+    [ "Result.defaultValue"; "Result.defaultWith"; "Result.isOk"; "Result.isError" ]
+    |> List.exists (fun f -> target.Contains f)
+
+let private resultModuleMessages
+    (allowCore9: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
     ResultModule.find parseTree source checkResults
+    |> List.filter (fun s -> allowCore9 || not (needsCore9 s.Target))
     |> List.map (fun s ->
         let message =
             if s.Target = "" then
@@ -702,13 +812,22 @@ let private resultModuleMessages (parseTree: ParsedInput) (source: ISourceText) 
 [<EditorAnalyzer("ResultModule", "Rewrite Ok/Error matching with Result-module functions", HelpBase)>]
 let resultModuleEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0009" "ResultModule" (fun () ->
-        whenChecked ctx (resultModuleMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        whenChecked
+            ctx
+            (resultModuleMessages
+                (fsharpCoreAtLeast 9 ctx.ProjectOptions)
+                ctx.ParseFileResults.ParseTree
+                ctx.SourceText)
         |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText)
 
 [<CliAnalyzer("ResultModule", "Rewrite Ok/Error matching with Result-module functions", HelpBase)>]
 let resultModuleCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0009" "ResultModule" (fun () ->
-        resultModuleMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        resultModuleMessages
+            (fsharpCoreAtLeast 9 ctx.ProjectOptions)
+            ctx.ParseFileResults.ParseTree
+            ctx.SourceText
+            ctx.CheckFileResults)
 
 // ---- FR0010 Simplification ----
 
@@ -1393,85 +1512,6 @@ let addRangeCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0030" "AddRange" (fun () ->
         addRangeMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
-/// Does the project's --langversion allow at least this F# major version?
-/// An absent flag means the SDK default, which is the latest.
-let private langVersionAtLeast (major: float) (options: AnalyzerProjectOptions) =
-    let explicitVersion =
-        options.OtherOptions
-        |> List.tryPick (fun (arg: string) ->
-            if arg.StartsWith "--langversion:" then
-                Some(arg.Substring "--langversion:".Length)
-            else
-                None)
-
-    match explicitVersion with
-    | None
-    | Some("latest" | "preview" | "latestmajor") -> true
-    | Some v ->
-        match
-            System.Double.TryParse(
-                v,
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture
-            )
-        with
-        | true, n -> n >= major
-        | false, _ -> false
-
-/// FSharp.Core versions already read, keyed by the reference path: the
-/// probe is file IO and every analyzer would otherwise repeat it per file.
-let private fsharpCoreVersions =
-    System.Collections.Concurrent.ConcurrentDictionary<string, int>()
-
-/// Does the project reference an FSharp.Core new enough for this major?
-///
-/// String interpolation is a LIBRARY feature, and the compiler says so:
-/// "Feature 'string interpolation' requires the F# library for language
-/// version 5.0 or greater". `--langversion` cannot answer that, and a
-/// legacy project usually sets no langversion at all — so the flag gate
-/// waves it through and every interpolation fix then fails to compile.
-/// PethostBackup pins FSharp.Core 4.7 out of a net45 packages folder: 28
-/// FR0031 fixes applied, failed, and took a pass of unrelated fixes down
-/// with them when the whole pass rolled back.
-///
-/// An absent or unreadable reference answers TRUE — the same
-/// assume-the-latest stance the langversion gate takes, so a probe
-/// failure never silences a rule that works today.
-let private fsharpCoreAtLeast (major: int) (options: AnalyzerProjectOptions) =
-    let referencePath =
-        options.OtherOptions
-        |> List.tryPick (fun (arg: string) ->
-            if arg.StartsWith "-r:" then
-                // a path with spaces arrives quoted; matching the raw arg
-                // would miss it and silently wave the project through
-                let path = (arg.Substring 3).Trim '"'
-
-                if path.EndsWith("FSharp.Core.dll", System.StringComparison.OrdinalIgnoreCase) then
-                    Some path
-                else
-                    None
-            else
-                None)
-
-    match referencePath with
-    | None -> true
-    | Some path ->
-        let found =
-            fsharpCoreVersions.GetOrAdd(
-                path,
-                fun p ->
-                    try
-                        System.Reflection.AssemblyName.GetAssemblyName(p).Version.Major
-                    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
-                        System.Int32.MaxValue
-            )
-
-        found >= major
-
-/// Interpolation needs BOTH halves: the F# 5 syntax and the FSharp.Core
-/// that backs it.
-let private canInterpolate (options: AnalyzerProjectOptions) =
-    langVersionAtLeast 5.0 options && fsharpCoreAtLeast 5 options
 
 // ---- FR0031 StringConcat ----
 
@@ -3464,24 +3504,73 @@ let mapIgnoreCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0092 FailwithContext ----
 
+// The text of an exception is observable behaviour: tests assert on it
+// (FSharp.Data's `at least one global complex element is needed` broke on
+// the sweep that rewrote an `internal` function's message) and callers
+// match on it. So the fix applies only under --api-changes, where the user
+// owns the callers and runs the tests; otherwise this is an advisory note.
 let private failwithContextMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    let applies = Visibility.apiChangesAllowed ()
+
     FailwithContext.find parseTree source checkResults
     |> List.map (fun s ->
         hint
             "FR0092"
-            $"This failure message is a constant: every occurrence in the log reads the same. Interpolating %s{s.FunctionName}'s arguments says which call produced it — check the values are safe to log first."
+            $"This failure message is a constant: every occurrence in the log reads the same. Interpolating %s{s.FunctionName}'s arguments says which call produced it — check the values are safe to log first, and that no test asserts on the text."
             s.Range
-            [ fix s.Range s.OriginalText s.ReplacementText ])
+            (if applies then
+                 [ fix s.Range s.OriginalText s.ReplacementText ]
+             else
+                 []))
 
+// The fix is an interpolated string, which needs the F# 5 syntax AND an
+// FSharp.Core that backs it: on PethostBackup's net48 project with
+// FSharp.Core 4.x it compiled to "Feature 'string interpolation' requires
+// the F# library for language version 5.0 or greater" and was rolled
+// back — the same gate FR0031 and FR0021 already consult.
 [<EditorAnalyzer("FailwithContext", "Static failwith messages that could carry their arguments", HelpBase)>]
 let failwithContextEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0092" "FailwithContext" (fun () ->
-        whenChecked ctx (failwithContextMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        if canInterpolate ctx.ProjectOptions then
+            whenChecked ctx (failwithContextMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+        else
+            [])
 
 [<CliAnalyzer("FailwithContext", "Static failwith messages that could carry their arguments", HelpBase)>]
 let failwithContextCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0092" "FailwithContext" (fun () ->
-        failwithContextMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        if canInterpolate ctx.ProjectOptions then
+            failwithContextMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+        else
+            [])
+
+// ---- FR0142 TestReturnsTask ----
+
+let private testReturnsTaskMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+    TestReturnsTask.find parseTree source checkResults
+    |> List.map (fun s ->
+        hint
+            "FR0142"
+            $"Test '{s.Name}' blocks a thread on async work at {s.Sites} site(s); returning the work as a Task lets the framework await it instead."
+            s.Range
+            [ fix s.Range s.OriginalText s.ReplacementText ])
+
+[<EditorAnalyzer("TestReturnsTask", "Tests that block on async work return a Task instead", HelpBase)>]
+let testReturnsTaskEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0142" "TestReturnsTask" (fun () ->
+        if canReturnTask ctx.ProjectOptions then
+            whenChecked ctx (testReturnsTaskMessages ctx.ParseFileResults.ParseTree ctx.SourceText)
+            |> commentSafeOnly ctx.ParseFileResults.ParseTree ctx.SourceText
+        else
+            [])
+
+[<CliAnalyzer("TestReturnsTask", "Tests that block on async work return a Task instead", HelpBase)>]
+let testReturnsTaskCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0142" "TestReturnsTask" (fun () ->
+        if canReturnTask ctx.ProjectOptions then
+            testReturnsTaskMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults
+        else
+            [])
 
 // ---- FR0079 SingleAwaitable ----
 

@@ -96,7 +96,23 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
                   match body with
                   | AddCall(addIdent, receiverRange, arg) when
-                      isSingleLine arg.Range && resolvesToListAdd check source addIdent
+                      isSingleLine arg.Range
+                      && resolvesToListAdd check source addIdent
+                      // the RECEIVER must be the same list on every
+                      // iteration: `columns[tile.Position.X].Add tile` picks
+                      // a list PER element, and `columns[tile.Position.X]
+                      // .AddRange tiles` leaves `tile` undefined (Nu's
+                      // Twenty 48 Gameplay)
+                      && (let receiver = textOfRange source receiverRange
+
+                          patNames pat
+                          |> List.forall (fun name ->
+                              not (
+                                  System.Text.RegularExpressions.Regex.IsMatch(
+                                      receiver,
+                                      $@"\b{System.Text.RegularExpressions.Regex.Escape name}\b"
+                                  )
+                              )))
                       ->
                       let receiverText = textOfRange source receiverRange
                       let element = stripParens arg

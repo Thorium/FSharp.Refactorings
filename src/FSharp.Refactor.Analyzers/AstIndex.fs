@@ -316,6 +316,19 @@ let private build (tree: ParsedInput) : Index =
 /// The memoized flat node index for a parse tree.
 let ofTree (tree: ParsedInput) : Index = cache.GetValue(tree, build)
 
+/// The quoted code in a file: `<@ @>`, `<@@ @@>` and `query { }` blocks,
+/// for the rules whose rewrite cannot be quoted at all (FR0070: a struct
+/// local captured in a quotation cannot have a field read).
+let quotationRanges (tree: ParsedInput) : range list =
+    (ofTree tree).Exprs
+    |> Seq.choose (fun (_, e) ->
+        match e with
+        | SynExpr.Quote _ -> Some e.Range
+        | SynExpr.App(funcExpr = SynExpr.Ident q; argExpr = SynExpr.ComputationExpr _) when q.idText = "query" ->
+            Some e.Range
+        | _ -> None)
+    |> List.ofSeq
+
 /// Which `Walk*` members a collector actually overrides.
 ///
 /// Every node kind the index holds must be replayed to whoever asked for it —

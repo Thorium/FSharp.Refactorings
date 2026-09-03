@@ -85,6 +85,16 @@ type Hint =
             NotFloatVars: Set<string>
             /// Coarse first-token key of the left side, for indexing.
             HeadKey: string
+            /// The metavariable that is the LAST argument of a right side
+            /// shaped `f args x` — the one a pipeline hands over. When the
+            /// matched code was a pipeline whose head binds it, the rewrite
+            /// is rendered back as a pipeline, `x |> f args`: rendered as
+            /// the application `f args x`, a lambda among `args` is
+            /// type-checked before `x`, and a member lookup on its
+            /// parameter meets an indeterminate type. Fable's UnionTests,
+            /// Nu's WorldModuleEntity and PethostBackup's Util all lost
+            /// `xs |> M.map (fun x -> x.Member) |> M.concat` this way.
+            PipeTail: string option
         }
 
 let private isMetaVar (name: string) =
@@ -334,6 +344,21 @@ let parseRule (rule: string) : Hint option =
                     walk lhs
                     Set.ofSeq acc
 
+                // `f args x` with a plain (non-operator) function head: the
+                // final argument is what a pipeline would hand over
+                let pipeTail =
+                    let rec plainHead (e: SynExpr) =
+                        match e with
+                        | SynExpr.App(isInfix = false; funcExpr = f) -> plainHead f
+                        | SynExpr.Ident id -> not (id.idText.StartsWith "op_")
+                        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+                            not ((List.last ids).idText.StartsWith "op_")
+                        | _ -> false
+
+                    match rhs with
+                    | SynExpr.App(isInfix = false; funcExpr = f; argExpr = MetaVar v) when plainHead f -> Some v
+                    | _ -> None
+
                 Some
                     { RuleText = $"{lhsText} ===> {rhsText}"
                       Lhs = lhs
@@ -342,7 +367,8 @@ let parseRule (rule: string) : Hint option =
                       PureOnlyVars = pureOnly
                       BoolTypedVars = boolTyped
                       NotFloatVars = notFloat
-                      HeadKey = headKey lhs }
+                      HeadKey = headKey lhs
+                      PipeTail = pipeTail }
         | _ -> None
     | _ -> None
 
@@ -712,12 +738,42 @@ let find
                     && not (inAttributeArg expr.Range)
                     && matchedRanges.Add rangeKey
                 then
-                    let replacement =
-                        hint.RhsVarSpans
+                    let substitute (spans: (string * int * int) list) (template: string) =
+                        spans
                         |> List.fold
                             (fun (text: string) (v, s, e) ->
                                 text.Substring(0, s) + argumentText source bindings.[v] + text.Substring e)
-                            hint.RhsText
+                            template
+
+                    // the innermost head of a pipeline: the `xs` of
+                    // `xs |> M.map f |> M.concat`
+                    let rec pipelineHead (e: SynExpr) =
+                        match e with
+                        | PipeApp(lhs, _) -> pipelineHead lhs
+                        | other -> other
+
+                    // matched a PIPELINE, and the right side ends with the
+                    // metavariable that pipeline's head binds: render it back
+                    // as a pipeline, so `xs` is typed before the lambda is
+                    // checked — `xs |> M.collect f`, not `M.collect f xs`
+                    let piped =
+                        match expr, hint.PipeTail, hint.RhsVarSpans with
+                        | PipeApp _, Some tail, (v, s, e) :: earlier when
+                            v = tail
+                            && hint.RhsText.Substring(e).Trim() = ""
+                            && (match bindings.TryGetValue v with
+                                | true, bound ->
+                                    Range.equals (stripParens bound).Range (stripParens (pipelineHead expr)).Range
+                                | _ -> false)
+                            ->
+                            let stages = substitute earlier (hint.RhsText.Substring(0, s).TrimEnd())
+                            Some $"{textOfRange source (pipelineHead expr).Range} |> {stages}"
+                        | _ -> None
+
+                    let replacement =
+                        match piped with
+                        | Some text -> text
+                        | None -> substitute hint.RhsVarSpans hint.RhsText
 
                     let inOperandPosition =
                         match path with

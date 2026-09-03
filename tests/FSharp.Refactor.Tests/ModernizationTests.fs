@@ -816,3 +816,45 @@ module M =
 %s{patched}"
         )
     | other -> failwithf "Expected the one-fragment construction to qualify, got %A" other
+
+// ---- FR0086 and an expected FormattableString ----
+
+let private holeFreeIn (source: string) =
+    syntaxIn source
+    |> List.filter (fun s -> s.Kind = RedundantSyntax.Kind.HoleFreeInterpolation)
+
+[<Fact>]
+let ``a hole-free interpolation annotated as FormattableString keeps its dollar`` () =
+    // the `$` is what makes the conversion to FormattableString available; a
+    // plain string never converts (Fable's StringTests)
+    Assert.Empty(holeFreeIn "module Test\nlet s3: System.FormattableString = $\"I have no holes\"")
+
+[<Fact>]
+let ``a hole-free interpolation passed to a method keeps its dollar`` () =
+    // only the typed tree could say whether the parameter is a
+    // FormattableString; a syntactic rule declines rather than guess
+    Assert.Empty(holeFreeIn "module Test\nlet s = System.FormattableString.Invariant($\"no holes\")")
+
+[<Fact>]
+let ``a hole-free interpolation bound plainly still loses its dollar`` () =
+    match holeFreeIn "module Test\nlet s = $\"no holes\"" with
+    | [ s ] -> Assert.Equal("\"no holes\"", s.ReplacementText)
+    | other -> failwithf "Expected the plain case to keep its fix, got %A" other
+
+[<Fact>]
+let ``a hole-free interpolation passed to an F# function keeps its dollar`` () =
+    // Ionide's `Log.setMessageI $"..."` takes a FormattableString and its
+    // spelling does not say so (FsAutoComplete's AdaptiveServerState)
+    Assert.Empty(
+        holeFreeIn
+            "module Test\nlet setMessageI (m: System.FormattableString) = m.Format\nlet s = setMessageI $\"Enter loading projects\""
+    )
+
+[<Fact>]
+let ``FR0092 leaves a message the file reads back elsewhere`` () =
+    // the test below asserts on the exact text (Fuuga): amending it breaks
+    // the assertion
+    Assert.Empty(
+        failwithContextIn
+            "module Test\nlet gen (prompt: string) =\n    failwith \"model inference failed\"\nlet check () =\n    try gen \"q\" with e -> e.Message = \"model inference failed\""
+    )

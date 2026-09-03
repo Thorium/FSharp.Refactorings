@@ -189,6 +189,25 @@ let private hasAnnotatedArgument (e: SynExpr) =
     | SynExpr.New(expr = arg) -> annotated arg
     | _ -> false
 
+/// Is the construction's argument list PARENTHESISED — `T(a)`, `T()`,
+/// `new T(a, b)`? Named properties splice in before a closing paren, and
+/// `ProcessStartInfo "dotnet"` — juxtaposed, no parens — has none: the
+/// splice produced `ProcessStartInfo "dotnet"(Arguments = ...)`, "This value
+/// is not a function and cannot be applied", and every later use of the
+/// value lost its type (Fable's MSBuildCrackerResolver). Such a call is left
+/// alone rather than re-shaped into a parenthesised one.
+let private hasParenthesisedArguments (e: SynExpr) =
+    let parenthesised (arg: SynExpr) =
+        match arg with
+        | SynExpr.Paren _
+        | SynExpr.Const(SynConst.Unit, _) -> true
+        | _ -> false
+
+    match e with
+    | SynExpr.App(argExpr = arg) -> parenthesised arg
+    | SynExpr.New(expr = arg) -> parenthesised arg
+    | _ -> false
+
 /// Wrap once the one-line form would run past this column. Seven
 /// properties spliced onto one line made a 380-character line on the
 /// sample this rule was written for — correct, compiling, and unreadable.
@@ -268,7 +287,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
               | LetOrUseE lou when not (lou.IsBang || lou.IsUse) ->
                   match lou.Bindings with
                   | [ SynBinding(headPat = SynPat.Named(ident = SynIdent(ident = name)); expr = ctor) ] when
-                      isSingleLine ctor.Range && not (hasAnnotatedArgument ctor)
+                      isSingleLine ctor.Range
+                      && hasParenthesisedArguments ctor
+                      && not (hasAnnotatedArgument ctor)
                       ->
                       // `rest` must exist: these are the statements of an
                       // expression body, so folding away every one of them

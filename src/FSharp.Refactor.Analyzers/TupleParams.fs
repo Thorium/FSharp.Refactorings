@@ -99,6 +99,14 @@ let private findCandidatesIn (scope: Visibility.Scope) (parseTree: ParsedInput) 
                             elements.Length >= 2
                             && isSingleLine paren.Range
                             && scopeMatches path accessibility
+                            // an ACTIVE PATTERN's tuple is its one input:
+                            // `(|A|B|) (xs, names)` is matched as `A pairs` on
+                            // a tuple, and curried it would expect an
+                            // expression argument — "This active pattern
+                            // expects 1 expression argument(s) and a pattern
+                            // argument" (FsAutoComplete's
+                            // ConvertPositionalDUToNamed)
+                            && not (ident.idText.StartsWith "|")
                             ->
                             candidates.Add
                                 { Ident = ident

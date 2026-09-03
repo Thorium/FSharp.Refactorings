@@ -80,6 +80,10 @@ let isBareableArgument (source: ISourceText) (inner: SynExpr) =
         text.StartsWith '('
         || (text.Length > 0 && (System.Char.IsLetter text.[0] || text.[0] = '_'))
     | SynExpr.LongIdent _ -> true
+    // `m (())` passes unit as a VALUE — to a generic `'t` parameter, say;
+    // bare, `m ()` is a call with no arguments, and a method with a
+    // required parameter stops compiling
+    | SynExpr.Const(SynConst.Unit, _) -> false
     | SynExpr.Const _ ->
         // a leading sign would re-parse as a binary operator: `f(-1)` / `f(+1)`
         let text = textOfRange source inner.Range

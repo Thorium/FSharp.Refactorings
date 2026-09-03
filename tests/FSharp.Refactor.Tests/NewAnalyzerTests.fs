@@ -1,3 +1,4 @@
+[<Xunit.Collection("ProjectSources")>]
 module FSharp.Refactor.Tests.NewAnalyzerTests
 
 open Xunit
@@ -320,6 +321,11 @@ let ``a shape-changing fix beside a signature file fires only on private declara
         )
 
         let impl = System.IO.Path.Combine(dir, "M.fs")
+
+        // without the cross-file parser (an editor) the signature is
+        // unreadable, and the internal fix is withheld; with it, the
+        // signature is edited in step instead (SignatureCoEditTests)
+        ProjectSources.configure None
         let internalTree, internalText = parseNamed impl (du "internal")
         Assert.Empty(StructDu.find true internalTree internalText)
 

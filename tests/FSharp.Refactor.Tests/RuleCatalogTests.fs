@@ -92,3 +92,62 @@ let ``the README's kind summary matches the rules it lists`` () =
     for KeyValue(kind, stated) in claimed do
         let counted = actual.TryFind kind |> Option.defaultValue 0
         Assert.True((stated = counted), $"README says %d{stated} %s{kind} rules; it lists %d{counted}")
+
+// ---- Rules.md: the quick-reference table ----
+
+let private repoFile name =
+    System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", name)
+    |> System.IO.File.ReadAllText
+
+/// The table's rows: code, category, enabled flag, api flag. An empty flag
+/// cell renders as a single space between its pipes.
+let private rulesTableRows () =
+    Regex.Matches(repoFile "Rules.md", @"^\| (FR\d{4}) \| (\w+) \| (v?) ?\| (v?) ?\|", RegexOptions.Multiline)
+    |> Seq.map (fun m -> m.Groups.[1].Value, m.Groups.[2].Value, m.Groups.[3].Value = "v", m.Groups.[4].Value = "v")
+    |> List.ofSeq
+
+[<Fact>]
+let ``Rules.md has exactly one row per catalogued rule`` () =
+    let rows = rulesTableRows () |> List.map (fun (code, _, _, _) -> code)
+    let missing = RuleCatalog.known - Set.ofList rows
+    let unknown = Set.ofList rows - RuleCatalog.known
+
+    let duplicated =
+        rows |> List.countBy id |> List.filter (fun (_, n) -> n > 1) |> List.map fst
+
+    Assert.True(missing.IsEmpty, $"Rules.md lacks a row for: %A{missing}")
+    Assert.True(unknown.IsEmpty, $"Rules.md lists codes the catalog does not know: %A{unknown}")
+    Assert.True(duplicated.IsEmpty, $"Rules.md lists twice: %A{duplicated}")
+
+[<Fact>]
+let ``Rules.md categories match the catalog`` () =
+    for code, category, _, _ in rulesTableRows () do
+        let expected = RuleCatalog.name (RuleCatalog.categoryOf code)
+
+        Assert.True(
+            System.String.Equals(category, expected, System.StringComparison.OrdinalIgnoreCase),
+            $"{code}: Rules.md says {category}, the catalog says {expected}"
+        )
+
+[<Fact>]
+let ``Rules.md enabled column matches the default-off list`` () =
+    // an analyzer's name is what `whenEnabled` receives beside its code —
+    // the default-off list keys some rules by that name
+    let names =
+        Regex.Matches(
+            repoFile "src/FSharp.Refactor.Analyzers/Analyzers.fs",
+            @"whenEnabled ctx\.FileName ""(FR\d{4})"" ""(\w+)""",
+            RegexOptions.Multiline
+        )
+        |> Seq.map (fun m -> m.Groups.[1].Value, m.Groups.[2].Value)
+        |> Seq.distinct
+        |> Map.ofSeq
+
+    for code, _, enabled, _ in rulesTableRows () do
+        let name = names.TryFind code |> Option.defaultValue ""
+        let expected = Configuration.isEnabledIn Map.empty code name
+
+        Assert.True(
+            (enabled = expected),
+            $"{code} ({name}): Rules.md says enabled={enabled}, Configuration says {expected}"
+        )

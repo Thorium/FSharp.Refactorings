@@ -29,6 +29,8 @@
 module FSharp.Refactor.RecGroup
 
 open System.Text.RegularExpressions
+open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Refactor.Text
@@ -89,7 +91,125 @@ let rec private declsOf (decls: SynModuleDecl list) : SynModuleDecl list =
         | SynModuleDecl.NestedModule(decls = nested) -> d :: declsOf nested
         | _ -> [ d ])
 
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+/// Does the binding build or update a record? Inside the group a record
+/// expression's type is pinned by the member's callers, all inferred
+/// together; standing alone it has only its labels, and a label shared
+/// between two records (`PendingConfirmation` in fedit's Model and
+/// PickerState) no longer determines the type.
+let private buildsRecord (index: AstIndex.Index) (bindingRange: range) =
+    index.Exprs
+    |> Seq.exists (fun (_, e) ->
+        match e with
+        | SynExpr.Record _ -> Range.rangeContainsRange bindingRange e.Range
+        | _ -> false)
+
+/// The member's header line with every plain parameter annotated with the
+/// type the group's inference found for it, and its return type added, so
+/// the body's record expressions keep an expected type once the member
+/// stands alone. None when a type cannot be written down (a generic), a
+/// parameter is not a plain name or a unit, or the header spans lines.
+let private annotatedHeaderLine
+    (check: FSharpCheckFileResults)
+    (source: ISourceText)
+    (binding: SynBinding)
+    (keywordRange: range)
+    : string option =
+    match binding with
+    | SynBinding(
+        headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ]); argPats = SynArgPats.Pats pats)
+        returnInfo = returnInfo) when
+        not pats.IsEmpty
+        && pats
+           |> List.forall (fun p ->
+               p.Range.StartLine = keywordRange.StartLine
+               && p.Range.EndLine = keywordRange.StartLine)
+        ->
+        let line = keywordRange.StartLine
+        let lineText = source.GetLineString(line - 1)
+
+        match check.GetSymbolUseAtLocation(id.idRange.EndLine, id.idRange.EndColumn, lineText, [ id.idText ]) with
+        | Some symbolUse ->
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as v ->
+                (try
+                    let groups = v.CurriedParameterGroups
+                    let writable (t: FSharpType) = t.Format symbolUse.DisplayContext
+
+                    let isUnitPat (p: SynPat) =
+                        match p with
+                        | SynPat.Const(SynConst.Unit, _)
+                        | SynPat.Paren(pat = SynPat.Const(SynConst.Unit, _)) -> true
+                        | _ -> false
+
+                    // one edit per parameter: (start column, end column, text)
+                    let edits =
+                        if groups.Count <> pats.Length then
+                            None
+                        else
+                            List.zip pats (List.ofSeq groups)
+                            |> List.map (fun (p, group) ->
+                                match p with
+                                | _ when isUnitPat p -> Some None
+                                | SynPat.Paren(pat = SynPat.Typed _) -> Some None
+                                | SynPat.Named(ident = SynIdent(ident = name)) when group.Count = 1 ->
+                                    let t = writable group.[0].Type
+
+                                    // the parameter as WRITTEN — a
+                                    // backticked name keeps its backticks
+                                    let written = textOfRange source p.Range
+
+                                    if t.Contains '\'' || written.Trim() = "" then
+                                        None
+                                    else
+                                        Some(Some(p.Range.StartColumn, p.Range.EndColumn, $"({written}: {t})"))
+                                | _ -> None)
+                            |> List.fold
+                                (fun acc e ->
+                                    match acc, e with
+                                    | Some acc, Some(Some edit) -> Some(edit :: acc)
+                                    | Some acc, Some None -> Some acc
+                                    | _ -> None)
+                                (Some [])
+
+                    let returnEdit =
+                        match returnInfo with
+                        | Some _ -> Some None
+                        | None ->
+                            let t = writable v.ReturnParameter.Type
+
+                            if t.Contains '\'' then
+                                None
+                            else
+                                let last = List.last pats
+                                Some(Some(last.Range.EndColumn, last.Range.EndColumn, $" : {t}"))
+
+                    match edits, returnEdit with
+                    | Some edits, Some returnEdit ->
+                        let all =
+                            (Option.toList returnEdit @ edits) |> List.sortByDescending (fun (s, _, _) -> s)
+
+                        let rewritten =
+                            all
+                            |> List.fold
+                                (fun (text: string) (s, e, replacement) ->
+                                    text.Substring(0, s) + replacement + text.Substring e)
+                                lineText
+
+                        Some(rewritten.Substring keywordRange.StartColumn)
+                    | _ -> None
+                 with _ -> // fsharpanalyzer: ignore-line FR0055
+                     None)
+            | _ -> None
+        | None -> None
+    | _ -> None
+
+/// `check` is the typed tree when the host has one: a member that builds
+/// a record leaves the group with its parameter and return types written
+/// out (see `annotatedHeaderLine`), and without the typed tree such a
+/// member stays where it is.
+let find (check: FSharpCheckFileResults option) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+    let index = lazy (AstIndex.ofTree parseTree)
+
     let decls =
         match parseTree with
         | ParsedInput.ImplFile(ParsedImplFileInput(contents = modules)) ->
@@ -145,7 +265,29 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                           first
 
                       let plainBlock = blockOf i
-                      let bindingText = textOfRange source plainBlock
+                      let binding = List.item i bindings
+
+                      let rawText = textOfRange source plainBlock
+
+                      // a record-building member leaves with its types
+                      // written out, or not at all
+                      let movableText =
+                          if buildsRecord index.Value binding.RangeOfBindingWithRhs then
+                              match check with
+                              | Some check ->
+                                  annotatedHeaderLine check source binding (List.item i keywordStarts)
+                                  |> Option.map (fun header ->
+                                      let firstBreak = rawText.IndexOf '\n'
+
+                                      if firstBreak < 0 then
+                                          header
+                                      else
+                                          header + rawText.Substring firstBreak)
+                              | None -> None
+                          else
+                              Some rawText
+
+                      let bindingText = defaultArg movableText rawText
 
                       let companionComments =
                           [ for l in commentStartLine .. keywordLine - 1 -> source.GetLineString(l - 1) ]
@@ -186,6 +328,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 
                       if
                           attrs.IsEmpty
+                          && movableText.IsSome
                           && not referencesGroup
                           && not (spansDirective source block)
                           // the binding must start with its `and`, on its own
@@ -237,11 +380,15 @@ let private letRecKeywordRegex = Regex @"^let\s+rec$"
 /// head already sits above the rest — so the fix is two keyword
 /// rewrites: `let rec` → `let` on the head, `and` → `let rec` on the
 /// next binding. Comments and attributes never enter into it.
-let findHeadRecrowns (parseTree: ParsedInput) (source: ISourceText) : HeadSuggestion list =
+let findHeadRecrowns
+    (check: FSharpCheckFileResults option)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    : HeadSuggestion list =
     // an `and` extraction in the same group would overlap these keyword
     // edits; let it go first — the multi-pass loop revisits the group
     let takenGroups =
-        find parseTree source |> List.map (fun s -> s.RemoveRange.StartLine)
+        find check parseTree source |> List.map (fun s -> s.RemoveRange.StartLine)
 
     let decls =
         match parseTree with

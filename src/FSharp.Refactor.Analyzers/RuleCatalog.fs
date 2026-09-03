@@ -179,6 +179,7 @@ let private categories =
       "FR0139", Category.Performance // Seq.* on a proven array goes through IEnumerable
       "FR0140", Category.Idiom // constructor then property sets is named-property construction spelled out
       "FR0141", Category.Idiom // a state-carrying while loop is tail recursion written inside out
+      "FR0142", Category.Performance // a test that blocks on async work returns the work as a Task instead
       "FR0073", Category.Idiom
       "FR0074", Category.Idiom
       "FR0078", Category.Idiom

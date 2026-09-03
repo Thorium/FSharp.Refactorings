@@ -184,6 +184,28 @@ let find
     let structs = ResizeArray<StructTypeSuggestion>()
     let structTuples = ResizeArray<StructTupleFieldSuggestion>()
 
+    // quotations in this file: `<@ @>`, `<@@ @@>` and `query { }` blocks.
+    // A struct local captured inside one cannot have a field read — that
+    // takes its address, which a quotation may not do — so a record whose
+    // fields are read in a quotation stays a class (Linq.Expression.
+    // Optimizer's `query { ... fun sl -> sl.x = j.x ... }`)
+    let quotationRanges = AstIndex.quotationRanges parseTree
+
+    let fieldsReadInQuotation (fieldNames: Set<string>) =
+        not quotationRanges.IsEmpty
+        && index.Exprs
+           |> Seq.exists (fun (_, e) ->
+               quotationRanges |> List.exists (fun q -> Range.rangeContainsRange q e.Range)
+               && (match e with
+                   | SynExpr.DotGet(longDotId = SynLongIdent(id = ids))
+                   | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) ->
+                       ids.Length >= 2 && fieldNames.Contains (List.last ids).idText
+                   | SynExpr.Record(recordFields = recordFields) ->
+                       recordFields
+                       |> List.exists (fun (SynExprRecordField(fieldName = (SynLongIdent(id = ids), _))) ->
+                           not ids.IsEmpty && fieldNames.Contains (List.last ids).idText)
+                   | _ -> false))
+
     for path, decl in index.Decls do
         match decl with
         | SynModuleDecl.Types(typeDefns = defns) ->
@@ -256,10 +278,16 @@ let find
                         // are semantically invisible; an `and`-position
                         // definition or existing attributes (CLIMutable
                         // would conflict outright) keep it advice
+                        let fieldNames =
+                            fields
+                            |> List.choose (fun (SynField(idOpt = idOpt)) -> idOpt |> Option.map (fun i -> i.idText))
+                            |> Set.ofList
+
                         let attributeFix =
                             match defnTrivia.LeadingKeyword with
                             | SynTypeDefnLeadingKeyword.Type kwRange when
                                 attrs.IsEmpty
+                                && not (fieldsReadInQuotation fieldNames)
                                 && (source.GetLineString(kwRange.StartLine - 1))
                                     .Substring(0, kwRange.StartColumn)
                                     .Trim() = ""

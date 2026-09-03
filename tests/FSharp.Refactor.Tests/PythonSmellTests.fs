@@ -275,3 +275,14 @@ let ``chained member access off the index - F#6 spelling`` () =
     match suggestions with
     | [ s ] -> Assert.Equal("xs", s.CollectionText)
     | other -> failwithf "Expected exactly one list-indexing note, got %A" other
+
+[<Fact>]
+let ``an indexed loop that takes the element's address keeps its index`` () =
+    // Nu's Renderer2d: `let sprite = &sprites[index]` wants an inref into
+    // the array; a `for sprite in sprites` element is a copy, and every
+    // `&sprite.Field` after it mismatches ByRefKinds.In
+    let tree, sourceText =
+        parse
+            "module Test\n[<Struct>]\ntype S = { mutable V: int }\nlet bump (v: inref<int>) = v + 1\nlet f (sprites: S[]) =\n    for index in 0 .. sprites.Length - 1 do\n        let sprite = &sprites[index]\n        bump &sprite.V |> ignore"
+
+    Assert.Empty(IndexedLoop.find tree sourceText)

@@ -152,6 +152,26 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                 | SynExpr.Sequential(expr1 = a; expr2 = b) ->
                     acc.Add a.Range
                     walk b
+                // control flow whose branches are statement positions of
+                // the same CE: a `let!` is as legal in a match arm, an if
+                // branch, a try body or a loop body as at the top of the
+                // block. CarmelNet's `match res with | Choice2Of2 e -> ...
+                // let err = reader.ReadToEnd()` sat two arms deep and was
+                // never seen. A `with` handler and a `finally` stay out —
+                // the bind gate below excludes them on purpose
+                | SynExpr.Match(clauses = clauses)
+                | SynExpr.MatchBang(clauses = clauses) ->
+                    for SynMatchClause(resultExpr = result) in clauses do
+                        walk result
+                | SynExpr.IfThenElse(thenExpr = thenExpr; elseExpr = elseExpr) ->
+                    walk thenExpr
+                    elseExpr |> Option.iter walk
+                | SynExpr.TryWith(tryExpr = body)
+                | SynExpr.TryFinally(tryExpr = body)
+                | SynExpr.ForEach(bodyExpr = body)
+                | SynExpr.For(doBody = body)
+                | SynExpr.While(doExpr = body)
+                | SynExpr.Paren(expr = body) -> walk body
                 | _ -> ()
 
             for _, e in index.Exprs do

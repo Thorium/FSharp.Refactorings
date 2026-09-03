@@ -233,7 +233,7 @@ let ``pipelined form of an application rule is normalized and matched`` () =
     // `lhs |> rhs` unifies with application-shaped rules as `rhs lhs`
     assertSingleSuggestion
         "module Test\nlet f (g: int -> int) xs = xs |> List.map g |> List.map string"
-        "List.map (g >> string) xs"
+        "xs |> List.map (g >> string)"
 
 [<Fact>]
 let ``pipe normalization also simplifies inner pipeline stages`` () =
@@ -275,5 +275,16 @@ let ``a single-overload projection still collapses`` () =
     match
         findIn "module Test\nlet f (paths: string[]) =\n    paths |> Array.sortByDescending String.length |> Array.head"
     with
-    | [ s ] -> Assert.Equal("Array.maxBy String.length paths", s.ReplacementText)
+    | [ s ] -> Assert.Equal("paths |> Array.maxBy String.length", s.ReplacementText)
     | other -> failwithf "Expected the maxBy collapse, got %A" other
+
+[<Fact>]
+let ``a pipelined collect rewrite keeps the pipeline so the lambda sees its type`` () =
+    // rendered as `Seq.collect (fun x -> x.Items) xs` the lambda is checked
+    // before `xs`, and `x.Items` meets an indeterminate type — Fable's
+    // UnionTests, Nu's WorldModuleEntity and PethostBackup's Util all rolled
+    // back on exactly this; `xs |> Seq.collect (fun x -> x.Items)` types
+    // `xs` first
+    assertSingleSuggestion
+        "module Test\ntype Box = { Items: int list }\nlet f (xs: Box list) = xs |> Seq.map (fun x -> x.Items) |> Seq.concat"
+        "xs |> Seq.collect (fun x -> x.Items)"

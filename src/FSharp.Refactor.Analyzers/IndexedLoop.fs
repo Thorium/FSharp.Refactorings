@@ -172,7 +172,22 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                         | SynPat.Named(ident = SynIdent(ident = id)) -> id.idText = i.idText || id.idText = collRoot
                         | _ -> false))
 
-            let disqualified = mutates || rebinds
+            // ...nor may the body take the ADDRESS of the element: `let
+            // sprite = &sprites[index]` wants an inref into the array, and a
+            // `for sprite in sprites` element is a copy, so every
+            // `&sprite.Field` after it reads "ByRefKinds.InOut does not match
+            // ByRefKinds.In" (Nu's Renderer2d)
+            let addressTaken =
+                index.Exprs
+                |> Array.exists (fun (_, e) ->
+                    match e with
+                    | SynExpr.AddressOf(expr = inner) ->
+                        inBody e.Range
+                        && indexedUses
+                           |> Array.exists (fun (useRange, _) -> Range.equals useRange (stripParens inner).Range)
+                    | _ -> false)
+
+            let disqualified = mutates || rebinds || addressTaken
 
             if onlyIndexes && not disqualified then
                 let loopText = textOfRange source expr.Range

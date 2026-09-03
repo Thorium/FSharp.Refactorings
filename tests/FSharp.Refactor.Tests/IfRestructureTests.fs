@@ -278,7 +278,7 @@ let ``a simple guard is not noted`` () =
 
 let private recGroupsIn (source: string) =
     let tree, sourceText = parse source
-    RecGroup.find tree sourceText
+    RecGroup.find None tree sourceText
 
 [<Fact>]
 let ``a member referencing no sibling leaves the group`` () =
@@ -351,7 +351,7 @@ let ``a self-recursive member leaves as its own let rec`` () =
 
 let private headRecrownsIn (source: string) =
     let tree, sourceText = parse source
-    RecGroup.findHeadRecrowns tree sourceText
+    RecGroup.findHeadRecrowns None tree sourceText
 
 [<Fact>]
 let ``a head referencing no member is re-crowned in place`` () =
@@ -721,3 +721,63 @@ let ``a comment inside the body is not hoisted as well as spliced`` () =
     match armMergesIn source with
     | [ s ] -> Assert.Equal("| 1\n    | 2 -> 1 (* why *) + 1", s.NewText)
     | other -> failwithf "Expected one merge, got %A" other
+
+// ---- FR0116: a record-building member leaves with its types written out ----
+
+/// Two records share the label `Pending`: inside the group `p`'s type comes
+/// from the caller, alone `{ p with Pending = None }` has only the label.
+[<Literal>]
+let private sharedLabels =
+    "module Test\ntype Model = { Pending: int option; Name: string }\ntype Picker = { Pending: int option; Index: int }\n"
+
+let private recGroupsTyped (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    RecGroup.find (Some checkResults) tree sourceText
+
+[<Fact>]
+let ``a record-updating member leaves the group with its parameter and return types`` () =
+    let source =
+        sharedLabels
+        + "let rec run (m: Model) (p: Picker) : int =\n    if m.Name = \"\" then 0 else (clear 1 p).Index\nand clear register p =\n    let next = { p with Pending = None }\n    { next with Index = register }"
+
+    match recGroupsTyped source with
+    | [ s ] ->
+        Assert.Equal("clear", s.MemberName)
+        Assert.StartsWith("let clear (register: int) (p: Picker) : Picker =", s.InsertText)
+        // remove first (later range), then insert at the group's start
+        let patched = applyEdit source s.RemoveRange ""
+        let patched = applyEdit patched s.InsertRange s.InsertText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a record-updating member stays put without the typed tree`` () =
+    let source =
+        sharedLabels
+        + "let rec run (m: Model) (p: Picker) : int =\n    if m.Name = \"\" then 0 else (clear 1 p).Index\nand clear register p =\n    { p with Index = register }"
+
+    Assert.Empty(recGroupsIn source)
+
+[<Fact>]
+let ``a member that builds no record leaves without annotations`` () =
+    let source =
+        sharedLabels
+        + "let rec run (m: Model) (p: Picker) : int =\n    if m.Name = \"\" then 0 else (bump 1 p)\nand bump register p =\n    p.Index + register"
+
+    match recGroupsTyped source with
+    | [ s ] -> Assert.StartsWith("let bump register p =", s.InsertText)
+    | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a backticked parameter keeps its backticks when annotated`` () =
+    let source =
+        sharedLabels
+        + "let rec run (m: Model) (p: Picker) : int =\n    if m.Name = \"\" then 0 else (clear 1 p).Index\nand clear ``the register`` p =\n    { p with Index = ``the register`` }"
+
+    match recGroupsTyped source with
+    | [ s ] ->
+        Assert.StartsWith("let clear (``the register``: int) (p: Picker) : Picker =", s.InsertText)
+        let patched = applyEdit source s.RemoveRange ""
+        let patched = applyEdit patched s.InsertRange s.InsertText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one extraction, got %A" other

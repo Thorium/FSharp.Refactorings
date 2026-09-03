@@ -485,7 +485,7 @@ let private parseArgs (argv: string[]) =
 /// console that may not even be attached. And a child that simply never
 /// finishes takes us with it, silently, which is the worst of the three
 /// because there is nothing on screen to explain it.
-let private runProcess (timeout: TimeSpan) (fileName: string) (arguments: string) =
+let private runProcessIn (workingDirectory: string option) (timeout: TimeSpan) (fileName: string) (arguments: string) =
     let psi =
         ProcessStartInfo(
             FileName = fileName,
@@ -495,6 +495,8 @@ let private runProcess (timeout: TimeSpan) (fileName: string) (arguments: string
             RedirectStandardError = true,
             UseShellExecute = false
         )
+
+    workingDirectory |> Option.iter (fun dir -> psi.WorkingDirectory <- dir)
 
     use p = Process.Start psi
 
@@ -540,6 +542,60 @@ let private runProcess (timeout: TimeSpan) (fileName: string) (arguments: string
 /// Long enough for a real build of a large project, short enough that a
 /// stuck one is reported rather than waited on forever.
 let private processTimeout = TimeSpan.FromMinutes 15.0
+
+let private runProcess (timeout: TimeSpan) (fileName: string) (arguments: string) =
+    runProcessIn None timeout fileName arguments
+
+/// Where a project's builds run from, decided once per project.
+///
+/// `dotnet` resolves global.json from its CURRENT directory upward, never
+/// from the project's own folder — so a build launched from wherever the
+/// user happened to stand ignored the repository's SDK pin, and a build
+/// launched from a different place could verify a fix against a different
+/// SDK. Builds now run from the project's directory, as the repository's
+/// own build would.
+///
+/// Where the pinned SDK is not installed at all — Fable pins 10.0.100 with
+/// latestPatch on a machine carrying only 10.0.302 — that build cannot run,
+/// and the pass would analyse nothing. The build then falls back to a
+/// neutral directory, outside any global.json, and says so: analysed with
+/// the SDK `dotnet` resolves there, which is what a hand-run from above the
+/// repository has always done, but now out loud rather than by accident.
+let private buildDirectories =
+    System.Collections.Generic.Dictionary<string, string option>()
+
+let private sdkPinUnsatisfied (stdout: string) (stderr: string) =
+    let text = stdout + stderr
+
+    text.Contains "A compatible .NET SDK was not found"
+    || text.Contains "compatible installed .NET SDK for global.json"
+
+let private runForProject (project: string) (timeout: TimeSpan) (fileName: string) (arguments: string) =
+    let key = Path.GetFullPath(project).ToLowerInvariant()
+
+    match buildDirectories.TryGetValue key with
+    | true, dir -> runProcessIn dir timeout fileName arguments
+    | _ ->
+        let projectDir = Path.GetDirectoryName(Path.GetFullPath project)
+        let exit, stdout, stderr = runProcessIn (Some projectDir) timeout fileName arguments
+
+        if exit <> 0 && sdkPinUnsatisfied stdout stderr then
+            let neutral = Path.GetTempPath()
+
+            let pin =
+                let m =
+                    Text.RegularExpressions.Regex.Match(stdout + stderr, @"Requested SDK version: ([^\r\n]+)")
+
+                if m.Success then m.Groups.[1].Value.Trim() else "an SDK"
+
+            Out.skip
+                $"  (global.json pins {pin}, which is not installed — analysed with the SDK dotnet resolves outside the repository; install it or relax rollForward to verify against the pin)"
+
+            buildDirectories.[key] <- Some neutral
+            runProcessIn (Some neutral) timeout fileName arguments
+        else
+            buildDirectories.[key] <- Some projectDir
+            exit, stdout, stderr
 
 /// Visual Studio's MSBuild.exe, for old-style (non-SDK) projects whose
 /// imports only evaluate under it. Located via vswhere.
@@ -779,7 +835,7 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
                 else
                     arguments
 
-            runProcess processTimeout runner finalArgs
+            runForProject projectPath processTimeout runner finalArgs
 
         // a REAL build first: project references must exist on disk for the
         // args-only pass below (SkipCompilerExecution skips them too), and a
@@ -2865,7 +2921,7 @@ let private frameworksOf (target: Target) =
 /// broken netstandard2.0 was re-applied on the strength of it.
 let private buildAllFrameworks (project: string) =
     let exitCode, stdout, stderr =
-        runProcess processTimeout "dotnet" $"build \"{project}\" --nologo -v q"
+        runForProject project processTimeout "dotnet" $"build \"{project}\" --nologo -v q"
 
     if exitCode = 0 then
         Ok()
@@ -3055,10 +3111,32 @@ let private verifyPass
     (changedFiles: AppliedFile list)
     : bool =
     checker.InvalidateConfiguration options
-    let errors = projectErrors checker options
 
     // measured against the baseline, not zero: a --parse-only run starts
-    // with hundreds of unresolved-reference errors that are nobody's fault
+    // with hundreds of unresolved-reference errors that are nobody's fault.
+    //
+    // And measured TWICE before blame: a type provider that loses its
+    // database connection between two checks turns every provided type
+    // into "not defined" for that one check and is back for the next.
+    // welendus lost 493 fixes and CarenioBackup 165 to exactly that — a
+    // clean baseline, then an SQLProvider SSL error mid-run, then a pass
+    // rolled back for errors it never caused. A second check costs one
+    // project typecheck, only on the failing path.
+    let errors =
+        let first = projectErrors checker options
+
+        if first.Length <= baselineErrors then
+            first
+        else
+            checker.InvalidateConfiguration options
+            let second = projectErrors checker options
+
+            if second.Length <= baselineErrors then
+                Out.dim
+                    "  (the check reported errors once and was clean on a second look — a transient failure, not this pass)"
+
+            second
+
     if errors.Length <= baselineErrors then
         true
     else

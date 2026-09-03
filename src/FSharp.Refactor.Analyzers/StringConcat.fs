@@ -143,7 +143,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               | SynExpr.Const(SynConst.String(_, SynStringKind.Verbatim, _), _) ->
                                   spliceableLiteral true (textOfRange source operand.Range)
                                   |> Option.map (fun t -> Lit(t, true))
-                              | SynExpr.Ident id when resolvesToString check source id -> Some(Hole id.idText)
+                              | SynExpr.Ident id when resolvesToString check source id ->
+                                  Some(Hole(textOfRange source operand.Range))
                               | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
                                   not ids.IsEmpty && resolvesToString check source (List.last ids)
                                   ->

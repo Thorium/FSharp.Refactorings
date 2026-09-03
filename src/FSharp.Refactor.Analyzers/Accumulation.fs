@@ -279,7 +279,21 @@ let find
                                     | SynExpr.Const(SynConst.String("", _, _), _) -> concatenated
                                     | _ -> $"{atomicText source init} + ({concatenated})"
                                 | _ ->
-                                    $"{srcText} |> {m}.fold (fun {acc.idText} {patText} -> {textOfRange source rhs.Range}) {atomicText source init}"
+                                    let body = textOfRange source rhs.Range
+
+                                    // `xs |> M.fold (fun acc x -> acc.Add x) init` checks the
+                                    // lambda BEFORE `init`, so a member lookup on the
+                                    // accumulator meets an indeterminate type — "Lookup on
+                                    // object of indeterminate type based on information
+                                    // prior to this program point" (Fable's fable-library
+                                    // List.fs, `node <- node.AppendConsNoTail x`). The
+                                    // double-pipe form hands the tuple over first, so both
+                                    // types are known inside the lambda; the mutable loop
+                                    // it replaces knew them from `let mutable acc = init`
+                                    if body.Contains($"{acc.idText}.") then
+                                        $"({atomicText source init}, {srcText}) ||> {m}.fold (fun {acc.idText} {patText} -> {body})"
+                                    else
+                                        $"{srcText} |> {m}.fold (fun {acc.idText} {patText} -> {body}) {atomicText source init}"
 
                             // cover the whole `let mutable` binding + loop
                             let editRange = Range.mkRange expr.Range.FileName expr.Range.Start forEach.Range.End

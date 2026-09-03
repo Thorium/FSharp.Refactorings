@@ -93,9 +93,43 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                   Kind = Kind.AttributeParens }
         | _ -> ()
 
+    // Is a FormattableString (or IFormattable) EXPECTED here? An interpolated
+    // string converts to one when the context asks for it — a type
+    // annotation, or a method parameter — and a plain string never does:
+    // `let s3: FormattableString = $"""I have no holes"""` lost its `$` and
+    // stopped compiling (Fable's StringTests). A method argument is
+    // treated as expecting one whenever the callee looks like a method,
+    // since only the typed tree could say otherwise and this rule is
+    // syntactic.
+    let expectsFormattable (path: SyntaxNode list) =
+        let namesFormattable (t: SynType) =
+            let text = textOfRange source t.Range
+            text.Contains "FormattableString" || text.Contains "IFormattable"
+
+        // ANY application: Ionide's `Log.setMessageI $"..."` is an F#
+        // function whose parameter is a FormattableString, and nothing in
+        // its spelling says so (FsAutoComplete's AdaptiveServerState)
+        let rec inArguments (nodes: SyntaxNode list) =
+            match nodes with
+            | SyntaxNode.SynExpr(SynExpr.Paren _) :: rest
+            | SyntaxNode.SynExpr(SynExpr.Tuple _) :: rest -> inArguments rest
+            | SyntaxNode.SynExpr(SynExpr.App _) :: _ -> true
+            | SyntaxNode.SynExpr(SynExpr.New _) :: _ -> true
+            | _ -> false
+
+        inArguments path
+        || path
+           |> List.exists (fun node ->
+               match node with
+               | SyntaxNode.SynExpr(SynExpr.Typed(targetType = t)) -> namesFormattable t
+               | SyntaxNode.SynBinding(SynBinding(returnInfo = Some(SynBindingReturnInfo(typeName = t)))) ->
+                   namesFormattable t
+               | SyntaxNode.SynBinding(SynBinding(headPat = SynPat.Typed(targetType = t))) -> namesFormattable t
+               | _ -> false)
+
     // FR0084: redundant backticks at use sites and binder sites — each
     // strip is independently valid, backticks are optional quoting
-    for _, e in index.Exprs do
+    for path, e in index.Exprs do
         match e with
         | SynExpr.Ident ident when redundantBackticks source ident ->
             suggestions.Add
@@ -118,6 +152,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
             if
                 not (text.Contains '{' || text.Contains '}' || text.Contains '%')
                 && text.Contains '$'
+                && not (expectsFormattable path)
             then
                 suggestions.Add
                     { Range = e.Range

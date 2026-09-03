@@ -28,6 +28,10 @@
 /// and control flow are untouched. It does put argument VALUES into the
 /// message, so the hint says so: on a parameter holding a secret or
 /// personal data that is a logging decision, not a mechanical one.
+///
+/// The text is still observable behaviour — tests assert on messages, and
+/// callers match on them — so the fix is offered only under
+/// `--api-changes`; a plain sweep reports it as an advisory note.
 module FSharp.Refactor.FailwithContext
 
 open FSharp.Compiler.CodeAnalysis
@@ -123,11 +127,22 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           ->
                           let literalText = textOfRange source literalRange
 
+                          // the same text elsewhere in the file is somebody
+                          // reading it back — a test's `should equal "..."`
+                          // (Fuuga), a caller matching on the message
+                          let quotedElsewhere =
+                              let all = source.GetSubTextString(0, source.Length)
+                              let first = all.IndexOf(literalText, System.StringComparison.Ordinal)
+
+                              first >= 0
+                              && all.IndexOf(literalText, first + 1, System.StringComparison.Ordinal) >= 0
+
                           if
                               literalText.StartsWith '"'
                               && literalText.EndsWith '"'
                               && not (literalText.StartsWith "\"\"\"")
                               && literalText.Length >= 2
+                              && not quotedElsewhere
                           then
                               let reported =
                                   paramNames |> List.map (fun p -> p + ": {" + p + "}") |> String.concat ", "

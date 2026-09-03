@@ -17,6 +17,7 @@
     <Compile Include="SeqOnArrayTests.fs" />
     <Compile Include="ObjectInitializerTests.fs" />
     <Compile Include="GenerativeLoopTests.fs" />
+    <Compile Include="TestReturnsTaskTests.fs" />
     <Compile Include="StringEmptinessTests.fs" />
     <Compile Include="CeStripTests.fs" />
     <Compile Include="ActivePatternTests.fs" />

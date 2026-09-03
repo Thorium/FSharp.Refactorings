@@ -221,3 +221,14 @@ let ``same-named fields of one type still take the attribute`` () : unit =
     match StructDu.find false tree sourceText with
     | [ s ] -> Assert.Equal("Same", s.TypeName)
     | other -> failwithf "Expected exactly one struct suggestion, got %A" other
+
+[<Fact>]
+let ``FR0008: an active pattern's tuple input is not curried`` () : unit =
+    // `(|Both|One|) (xs, names)` takes ONE input, matched as `Both pairs` on
+    // a tuple; curried it would expect an expression argument
+    // (FsAutoComplete's ConvertPositionalDUToNamed)
+    let source =
+        "module Test\nlet private (|Both|One|) (xs: int list, names: string list) =\n    if xs.Length = names.Length then Both(List.zip xs names) else One xs\nlet f (xs: int list) (names: string list) =\n    match (xs, names) with\n    | Both pairs -> pairs.Length\n    | One rest -> rest.Length"
+
+    let tree, sourceText, check = parseAndCheck source
+    Assert.Empty(TupleParams.find tree sourceText check)

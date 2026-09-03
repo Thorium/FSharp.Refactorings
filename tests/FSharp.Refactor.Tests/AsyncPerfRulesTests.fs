@@ -1,3 +1,4 @@
+[<Xunit.Collection("ProjectSources")>]
 module FSharp.Refactor.Tests.AsyncPerfRulesTests
 
 open Xunit
@@ -1153,3 +1154,63 @@ let ``an internal drain without api-changes stays a note`` () =
         parseAndCheckPair sourceA sourceB
 
     Assert.Empty(Taskify.find treeA sourceTextA checkA (Some projectResults))
+
+[<Fact>]
+let ``a fold whose body looks up a member on the accumulator hands the tuple over first`` () =
+    // `xs |> List.fold (fun node x -> node.Append x) init` checks the lambda
+    // before `init`, so `node.Append` meets an indeterminate type (Fable's
+    // fable-library List.fs); `(init, xs) ||> List.fold ...` is checked
+    // tuple-first and both types are known inside the lambda
+    let source =
+        "let f (xs: int list) =\n    let mutable node = System.Text.StringBuilder()\n    for x in xs do\n        node <- node.Append x\n    node.ToString()"
+
+    match accumulationIn source with
+    | [ s ], _ ->
+        Assert.Contains("||> List.fold (fun node x -> node.Append x)", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one fold suggestion, got %A" other
+
+[<Fact>]
+let ``a blocking call in a match arm of an async body, after use bindings, still gets its twin`` () =
+    // CarmelNet's shape: `async { let! res = ... |> Async.Catch; match res with ... }`
+    // with the blocking ReadToEnd two `use` bindings deep in an arm
+    let source =
+        "module Test\nopen System\nopen System.IO\nopen System.Net\nlet f (client: Net.Http.HttpClient) =\n    async {\n        let! res = async { return 1 } |> Async.Catch\n        match res with\n        | Choice1Of2 x -> return string x, None\n        | Choice2Of2 e when not (String.IsNullOrEmpty e.Message) -> return e.Message, Some e\n        | Choice2Of2 e ->\n            match e with\n            | :? WebException as wex when not (isNull wex.Response) ->\n                use stream = wex.Response.GetResponseStream()\n                use reader = new StreamReader(stream)\n                let err = reader.ReadToEnd()\n                return err, Some e\n            | _ -> return \"\", Some e\n    }"
+
+    match awaitableIn source with
+    | [] -> failwith "Expected the ReadToEnd twin to be offered"
+    | suggestions ->
+        Assert.Contains(suggestions, fun s -> s.Fixes |> List.exists (fun (_, _, r) -> r = "ReadToEndAsync"))
+
+let private variantHasTwin (source: string) =
+    awaitableIn source
+    |> List.exists (fun s -> s.Fixes |> List.exists (fun (_, _, r) -> r = "ReadToEndAsync"))
+
+[<Fact>]
+let ``variant A: plain let, no use, no match`` () =
+    Assert.True(
+        variantHasTwin
+            "module Test\nopen System.IO\nlet f (reader: StreamReader) =\n    async {\n        let err = reader.ReadToEnd()\n        return err\n    }"
+    )
+
+[<Fact>]
+let ``variant B: after use bindings`` () =
+    Assert.True(
+        variantHasTwin
+            "module Test\nopen System.IO\nlet f (stream: Stream) =\n    async {\n        use reader = new StreamReader(stream)\n        let err = reader.ReadToEnd()\n        return err\n    }"
+    )
+
+[<Fact>]
+let ``variant C: inside a match arm`` () =
+    Assert.True(
+        variantHasTwin
+            "module Test\nopen System.IO\nlet f (reader: StreamReader) (x: int option) =\n    async {\n        match x with\n        | Some _ ->\n            let err = reader.ReadToEnd()\n            return err\n        | None -> return \"\"\n    }"
+    )
+
+[<Fact>]
+let ``variant D: after a let-bang`` () =
+    Assert.True(
+        variantHasTwin
+            "module Test\nopen System.IO\nlet f (reader: StreamReader) =\n    async {\n        let! res = async { return 1 } |> Async.Catch\n        let err = reader.ReadToEnd()\n        return err\n    }"
+    )

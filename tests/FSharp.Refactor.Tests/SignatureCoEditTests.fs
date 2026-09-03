@@ -2,6 +2,7 @@
 /// FR0130's [<Literal>] (attribute plus the value the .fsi must then spell
 /// out), FR0016's [<Struct>], FR0133's rename — all through SignatureFile,
 /// the mechanism FR0022 introduced for union-case field names.
+[<Xunit.Collection("ProjectSources")>]
 module FSharp.Refactor.Tests.SignatureCoEditTests
 
 open System.IO

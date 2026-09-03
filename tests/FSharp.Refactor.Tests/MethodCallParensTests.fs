@@ -134,3 +134,10 @@ let ``the same method call outside a tuple still sheds them`` () =
             "module Test
 let f (s: string) = s.Trim(' ')"
     )
+
+[<Fact>]
+let ``a parenthesised unit argument keeps its parens`` () =
+    // `x.log (())` passes unit as a value to a generic parameter; bare,
+    // `x.log ()` is a call with no arguments — a different thing
+    assertNoSuggestion
+        "module Test\ntype T() =\n    member x.log<'t> (v: 't, tag: string) = ()\n    member x.Exit() = x.log (())"

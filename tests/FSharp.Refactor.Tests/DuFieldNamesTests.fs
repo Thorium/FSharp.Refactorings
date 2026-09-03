@@ -1,3 +1,4 @@
+[<Xunit.Collection("ProjectSources")>]
 module FSharp.Refactor.Tests.DuFieldNamesTests
 
 open Xunit

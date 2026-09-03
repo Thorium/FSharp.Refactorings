@@ -104,3 +104,13 @@ let ``a STEPPED range source is handled or left alone, never mis-emitted`` () =
 
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected at most one suggestion, got %A" other
+
+[<Fact>]
+let ``a receiver chosen per element keeps its loop`` () =
+    // Nu's Twenty 48: `columns[tile.Position.X].Add tile` picks a list PER
+    // element; `columns[tile.Position.X].AddRange tiles` has no `tile`
+    let tree, sourceText, checkResults =
+        parseAndCheck
+            "module Test\ntype Tile = { X: int }\nlet f (tiles: Tile list) =\n    let columns = List.init 4 (fun _ -> ResizeArray<Tile>())\n    for tile in tiles do columns[tile.X].Add tile\n    columns"
+
+    Assert.Empty(AddRange.find tree sourceText checkResults)

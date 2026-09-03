@@ -27,7 +27,12 @@ let private disposableNames =
 
 let private isDisposableEntity (entity: FSharpEntity) =
     try
-        (entity.TryFullName |> Option.exists disposableNames.Contains)
+        // a PROVIDED type's disposability lives in what it erases to —
+        // FSharp.Data's CsvProvider erases to a CsvFile that implements
+        // IDisposable, and the provided entity itself reports no interface;
+        // unknown, so the `new` stays
+        entity.IsProvided
+        || (entity.TryFullName |> Option.exists disposableNames.Contains)
         || entity.AllInterfaces
            |> Seq.exists (fun i ->
                i.HasTypeDefinition
@@ -241,10 +246,24 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         [ for _, expr in index.Exprs do
               match expr with
               | SynExpr.New(targetType = targetType) ->
+                  // a type application carrying STATIC arguments — a type
+                  // provider's `CsvProvider<"Data/GDP.csv", SkipRows=3>()` —
+                  // needs `new`: in expression position the bare form parses
+                  // `CsvProvider < "Data/GDP.csv"` as a comparison, "Invalid
+                  // module/expression/type" (FSharp.Data's tests)
+                  let staticArgument (t: SynType) =
+                      match t with
+                      | SynType.StaticConstant _
+                      | SynType.StaticConstantExpr _
+                      | SynType.StaticConstantNamed _ -> true
+                      | _ -> false
+
                   let typeIdent =
                       match targetType with
                       | SynType.LongIdent(SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
-                      | SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = ids))) when not ids.IsEmpty ->
+                      | SynType.App(typeName = SynType.LongIdent(SynLongIdent(id = ids)); typeArgs = args) when
+                          not ids.IsEmpty && not (args |> List.exists staticArgument)
+                          ->
                           Some(List.last ids)
                       | _ -> None
 

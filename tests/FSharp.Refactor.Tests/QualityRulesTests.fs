@@ -1,5 +1,5 @@
+[<Xunit.Collection("ProjectSources")>]
 module FSharp.Refactor.Tests.QualityRulesTests
-
 // the FR0125 fixtures below carry REAL invisible characters on purpose
 // fsharpanalyzer: ignore-file FR0125
 
@@ -2308,3 +2308,27 @@ let ``FR0130 withholds where a signature declares the value and cannot be read``
         Assert.NotEmpty(LiteralConst.find false loneTree loneText)
     finally
         System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``FR0070 keeps a record a class when its fields are read inside a quotation`` () =
+    // a struct local captured in a quotation lambda cannot have a field
+    // read — that takes its address, which quotations forbid
+    // (Linq.Expression.Optimizer's query tests)
+    let source =
+        "module Test\ntype private Itm = { x: int }\nlet q (items: Itm list) = <@ items |> List.filter (fun i -> i.x = 3) @>"
+
+    let _, structs, _ = structHintsIn source
+
+    match structs with
+    | [ s ] ->
+        Assert.Equal("Itm", s.TypeName)
+        Assert.True(s.Fix.IsNone, "a quoted field read must leave the struct fix out")
+    | other -> failwithf "Expected one struct hint, got %A" other
+
+[<Fact>]
+let ``FR0070 still offers the struct fix when the quotation reads other fields`` () =
+    let source =
+        "module Test\ntype private Itm = { x: int }\ntype private Other = { y: int }\nlet q (items: Other list) = <@ items |> List.filter (fun i -> i.y = 3) @>"
+
+    let _, structs, _ = structHintsIn source
+    Assert.Contains(structs, fun s -> s.TypeName = "Itm" && s.Fix.IsSome)

@@ -106,6 +106,7 @@
     <Compile Include="..\FSharp.Refactor.Analyzers\DateTimeOffsetMigration.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\CancellationOverload.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\AwaitableOverload.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\TestReturnsTask.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\CatchLogException.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\DateTimeRules.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\MonitorLock.fs" />
