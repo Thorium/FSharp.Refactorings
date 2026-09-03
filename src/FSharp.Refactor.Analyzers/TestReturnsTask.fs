@@ -98,7 +98,7 @@ let private hasTestAttribute (check: FSharpCheckFileResults) (source: ISourceTex
                     | _ -> None
 
                 declared
-                |> Option.exists (fun full -> awaitingFrameworks |> List.exists (fun ns -> full.StartsWith ns)))
+                |> Option.exists (fun full -> awaitingFrameworks |> List.exists full.StartsWith))
         | _ -> false)
 
 /// The value, function or member an identifier resolves to, if any.
@@ -134,6 +134,7 @@ let private isTaskType (t: FSharpType) =
 
 /// The identifier that decides a receiver's type: `t` in `t`, `x.T` in
 /// `x.T`, `M` in `M()` / `x.M(a)`.
+[<TailCall>]
 let rec private receiverIdent (e: SynExpr) =
     match e with
     | SynExpr.Ident id -> Some id
@@ -189,7 +190,7 @@ let private taskResultIsUnit check source id =
 /// Is this computation provably an `Async<unit>`? Only what the typed tree
 /// can name: a value, a call. An `async { }` literal is not, and gets the
 /// `Async.Ignore` a `do!` needs regardless.
-let private asyncResultIsUnit check source (comp: SynExpr) =
+let private computationResultIsUnit check source (comp: SynExpr) =
     receiverIdent comp
     |> Option.bind (valueTypeOf check source)
     |> Option.exists (fun t ->
@@ -287,7 +288,7 @@ let private blockingOf (check: FSharpCheckFileResults) (source: ISourceText) (e:
 
             Some
                 { blocking e.Range $"{upToOperand}Async.StartImmediateAsTask" with
-                    UnitResult = asyncResultIsUnit check source comp }
+                    UnitResult = computationResultIsUnit check source comp }
     // `Async.RunSynchronously comp` / `Async.RunSynchronously(comp)` — a
     // timeout or cancellation argument is a different contract, left alone
     | SynExpr.App(isInfix = false; funcExpr = AsyncModule f; argExpr = arg) when
@@ -299,7 +300,7 @@ let private blockingOf (check: FSharpCheckFileResults) (source: ISourceText) (e:
         | comp ->
             Some
                 { blocking e.Range $"{atomicText source comp} |> Async.StartImmediateAsTask" with
-                    UnitResult = asyncResultIsUnit check source comp }
+                    UnitResult = computationResultIsUnit check source comp }
     // `t.Wait()` — unit by construction — and `t.GetAwaiter().GetResult()`
     | UnitCall f ->
         match dotMember source f with
@@ -455,7 +456,7 @@ let private threadBound (source: ISourceText) (body: SynExpr) =
     |> List.exists text.Contains
 
 /// Does the body already run as a computation, or return a Task?
-let private alreadyAsync (body: SynExpr) =
+let private alreadyComputation (body: SynExpr) =
     match stripParens body with
     | SynExpr.App(funcExpr = SynExpr.Ident b; argExpr = SynExpr.ComputationExpr _) ->
         b.idText = "task" || b.idText = "async" || b.idText = "backgroundTask"
@@ -555,7 +556,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
               match binding with
               | SynBinding(attributes = attributes; headPat = headPat; returnInfo = None; expr = body) when
                   hasTestAttribute check source attributes
-                  && not (alreadyAsync body)
+                  && not (alreadyComputation body)
                   && not (threadBound source body)
                   ->
                   let nameIdent =

@@ -751,6 +751,10 @@ let private parseOnlyArgs (projectPath: string) =
         Ok(Array.append defines sources)
 
 let private fscArgs (chosenFramework: string) (projectPath: string) =
+    // msbuild runs from the project's own directory (its global.json), so a
+    // path given relative to the caller's directory must become absolute
+    let projectPath = Path.GetFullPath projectPath
+
     let projectText =
         try
             File.ReadAllText projectPath
@@ -2920,6 +2924,10 @@ let private frameworksOf (target: Target) =
 /// left it broken, the rebuild failed again, and every fix that had
 /// broken netstandard2.0 was re-applied on the strength of it.
 let private buildAllFrameworks (project: string) =
+    // the build runs from the project's own directory (its global.json), so
+    // a path given relative to the caller's directory must become absolute
+    let project = Path.GetFullPath project
+
     let exitCode, stdout, stderr =
         runForProject project processTimeout "dotnet" $"build \"{project}\" --nologo -v q"
 

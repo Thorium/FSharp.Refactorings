@@ -260,3 +260,84 @@ let ``a continuation aligned with the bound expression follows the bang`` () =
         (scaffold
          + "[<Fact>]\nlet ``aligned`` () =\n    let res = load ()\n              |> Async.RunSynchronously\n    if res.X <> 1 then failwith \"wrong\"")
         "task {\n        let! res = load ()\n                   |> Async.StartImmediateAsTask\n        if res.X <> 1 then failwith \"wrong\"\n    } :> System.Threading.Tasks.Task"
+
+// ---- placement shapes: namespaces, nested modules, fixture classes ----
+
+/// The attribute in a real `Xunit` namespace, the tests in another
+/// namespace, so nested modules and classes can be laid out as projects do.
+[<Literal>]
+let private namespaced =
+    "namespace Xunit\ntype FactAttribute() =\n    inherit System.Attribute()\nnamespace Tests\nopen Xunit\ntype R = { X: int }\nmodule Support =\n    let load () = async { return { X = 1 } }\n"
+
+[<Fact>]
+let ``a test two modules deep inside a namespace is rewritten`` () =
+    assertRewrite
+        (namespaced
+         + "module Outer =\n    module Inner =\n        open Support\n        [<Fact>]\n        let ``reads`` () =\n            let res = load () |> Async.RunSynchronously\n            if res.X <> 1 then failwith \"wrong\"")
+        "task {\n                let! res = load () |> Async.StartImmediateAsTask\n                if res.X <> 1 then failwith \"wrong\"\n            } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``a fixture class member with a constructor argument is rewritten`` () =
+    assertRewrite
+        (namespaced
+         + "open Support\ntype ``Compress internals fixture``(tag: string) =\n    [<Fact>]\n    member test.``Compress file test`` () =\n        let res = load () |> Async.RunSynchronously\n        if res.X <> 1 then failwith tag")
+        "task {\n            let! res = load () |> Async.StartImmediateAsTask\n            if res.X <> 1 then failwith tag\n        } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``a fixture class inside a nested module is rewritten`` () =
+    assertRewrite
+        (namespaced
+         + "module Suite =\n    open Support\n    type Fixture() =\n        [<Fact>]\n        member _.``reads`` () =\n            let res = load () |> Async.RunSynchronously\n            if res.X <> 1 then failwith \"wrong\"")
+        "task {\n                let! res = load () |> Async.StartImmediateAsTask\n                if res.X <> 1 then failwith \"wrong\"\n            } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``a static member test and a whole-body member are rewritten`` () =
+    assertRewrite
+        (namespaced
+         + "open Support\ntype Fixture() =\n    [<Fact>]\n    static member ``whole`` () =\n        async {\n            let! r = load ()\n            if r.X <> 1 then failwith \"wrong\"\n        } |> Async.RunSynchronously")
+        "async {\n            let! r = load ()\n            if r.X <> 1 then failwith \"wrong\"\n        } |> Async.StartImmediateAsTask :> System.Threading.Tasks.Task"
+
+// ---- attribute variants across the three frameworks ----
+
+/// The attribute types the rule trusts, each in its real namespace.
+[<Literal>]
+let private frameworks =
+    "namespace Xunit\ntype FactAttribute() =\n    inherit System.Attribute()\n    member val Skip = \"\" with get, set\ntype TheoryAttribute() =\n    inherit System.Attribute()\ntype InlineDataAttribute(n: int) =\n    inherit System.Attribute()\nnamespace NUnit.Framework\ntype TestAttribute() =\n    inherit System.Attribute()\ntype TestCaseAttribute(n: int) =\n    inherit System.Attribute()\nnamespace Microsoft.VisualStudio.TestTools.UnitTesting\ntype TestClassAttribute() =\n    inherit System.Attribute()\ntype TestMethodAttribute() =\n    inherit System.Attribute()\nnamespace Tests\ntype R = { X: int }\nmodule Support =\n    let load () = async { return { X = 1 } }\n"
+
+let private body =
+    "\n        let res = load () |> Async.RunSynchronously\n        if res.X <> 1 then failwith \"wrong\""
+
+let private expectedMember =
+    "task {\n            let! res = load () |> Async.StartImmediateAsTask\n            if res.X <> 1 then failwith \"wrong\"\n        } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``a qualified Fact with a Skip argument is a test`` () =
+    assertRewrite
+        (frameworks
+         + "module T =\n    open Support\n    [<Xunit.Fact(Skip = \"slow\")>]\n    let ``reads`` () ="
+         + body)
+        expectedMember
+
+[<Fact>]
+let ``a Theory with InlineData and a parameter is a test`` () =
+    assertRewrite
+        (frameworks
+         + "module T =\n    open Support\n    open Xunit\n    [<Theory>]\n    [<InlineData(1)>]\n    let ``reads`` (n: int) ="
+         + body)
+        expectedMember
+
+[<Fact>]
+let ``an NUnit Test and TestCase member in a fixture is a test`` () =
+    assertRewrite
+        (frameworks
+         + "open Support\nopen NUnit.Framework\ntype Fixture() =\n    [<Test; TestCase(2)>]\n    member _.``reads`` () ="
+         + body)
+        expectedMember
+
+[<Fact>]
+let ``an MSTest TestMethod in a TestClass is a test`` () =
+    assertRewrite
+        (frameworks
+         + "open Support\nopen Microsoft.VisualStudio.TestTools.UnitTesting\n[<TestClass>]\ntype Fixture() =\n    [<TestMethod>]\n    member _.``reads`` () ="
+         + body)
+        expectedMember

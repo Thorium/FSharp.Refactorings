@@ -74,35 +74,112 @@ let recentLog () = log.ToArray()
 /// Tracing for the rendering modules, same sink as the client's own.
 let clientTrace (line: string) = trace line
 
-/// Locate fsautocomplete: the copy bundled beside this extension first,
-/// then the user's global dotnet tool.
+/// Settings without an options page: `%APPDATA%\FSharp.Refactor\vsix.json`
+///
+///     { "fsac": "C:\\tools\\fsautocomplete.dll",
+///       "analyzers": [ "C:\\my\\analyzers" ],
+///       "root": "C:\\src\\MySolution" }
+///
+/// and the environment variables FSHARP_REFACTOR_FSAC,
+/// FSHARP_REFACTOR_ANALYZERS (a `;` list) and FSHARP_REFACTOR_ROOT, which
+/// win over the file. Read once per session; edit, restart Visual Studio.
+let settingsFile =
+    Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.ApplicationData, "FSharp.Refactor", "vsix.json")
+
+let private settings =
+    lazy
+        (try
+            if File.Exists settingsFile then
+                let parsed = JObject.Parse(File.ReadAllText settingsFile)
+                trace $"settings read from {settingsFile}"
+                parsed
+            else
+                JObject()
+         with ex -> // a broken settings file must not take the editor down; fsharpanalyzer: ignore-line FR0055
+             trace $"settings file {settingsFile} ignored: {ex.Message}"
+             JObject())
+
+let private setting (name: string) (variable: string) : string option =
+    match Environment.GetEnvironmentVariable variable with
+    | v when not (String.IsNullOrWhiteSpace v) -> Some(v.Trim())
+    | _ ->
+        match settings.Force().[name] with
+        | null -> None
+        | token ->
+            match token.Type with
+            | JTokenType.String when not (String.IsNullOrWhiteSpace(token.Value<string>())) ->
+                Some(token.Value<string>().Trim())
+            | _ -> None
+
+let private settingList (name: string) (variable: string) : string list =
+    match Environment.GetEnvironmentVariable variable with
+    | v when not (String.IsNullOrWhiteSpace v) ->
+        v.Split([| ';' |], StringSplitOptions.RemoveEmptyEntries)
+        |> Array.map (fun s -> s.Trim())
+        |> List.ofArray
+    | _ ->
+        match settings.Force().[name] with
+        | :? JArray as items -> [ for i in items -> i.Value<string>() ]
+        | null -> []
+        | token -> [ token.Value<string>() ]
+
+/// A workspace root the user pinned, when it exists.
+let configuredRoot () =
+    setting "root" "FSHARP_REFACTOR_ROOT" |> Option.filter Directory.Exists
+
+/// Locate fsautocomplete: the configured one, then the copy bundled
+/// beside this extension, then the user's global dotnet tool. A `.dll`
+/// runs under `dotnet`, anything else is launched as it is.
 let private findFsac () =
+    let launch (path: string) =
+        if path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) then
+            "dotnet", $"\"%s{path}\""
+        else
+            path, ""
+
     let bundled =
         Path.Combine(Path.GetDirectoryName(typeof<Diag>.Assembly.Location), "fsac", "fsautocomplete.dll")
 
-    if File.Exists bundled then
-        ValueSome("dotnet", $"\"%s{bundled}\"")
-    else
-        let toolExe =
-            Path.Combine(
-                Environment.GetFolderPath Environment.SpecialFolder.UserProfile,
-                ".dotnet",
-                "tools",
-                "fsautocomplete.exe"
-            )
+    let toolExe =
+        Path.Combine(
+            Environment.GetFolderPath Environment.SpecialFolder.UserProfile,
+            ".dotnet",
+            "tools",
+            "fsautocomplete.exe"
+        )
 
-        if File.Exists toolExe then
-            ValueSome(toolExe, "")
+    match setting "fsac" "FSHARP_REFACTOR_FSAC" with
+    | Some configured when File.Exists configured ->
+        trace $"fsac: configured {configured}"
+        ValueSome(launch configured)
+    | Some configured ->
+        trace $"fsac: configured {configured} does not exist, falling back"
+
+        if File.Exists bundled then ValueSome(launch bundled)
+        elif File.Exists toolExe then ValueSome(launch toolExe)
+        else ValueNone
+    | None ->
+        if File.Exists bundled then
+            trace "fsac: bundled"
+            ValueSome(launch bundled)
+        elif File.Exists toolExe then
+            trace "fsac: global tool"
+            ValueSome(launch toolExe)
         else
             ValueNone
 
-/// Directories to hand FSAC as analyzer paths: the analyzers bundled with
-/// this extension (built against the same SDK its FSAC pairs with).
+/// Directories to hand FSAC as analyzer paths: any the user configured,
+/// then the analyzers bundled with this extension (built against the same
+/// SDK its FSAC pairs with).
 let private analyzerPaths () =
     let beside =
         Path.Combine(Path.GetDirectoryName(typeof<Diag>.Assembly.Location), "analyzers")
 
-    if Directory.Exists beside then [ beside ] else []
+    let configured =
+        settingList "analyzers" "FSHARP_REFACTOR_ANALYZERS"
+        |> List.filter Directory.Exists
+
+    configured @ (if Directory.Exists beside then [ beside ] else [])
 
 type Session =
     { Proc: Process

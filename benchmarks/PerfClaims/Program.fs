@@ -1240,6 +1240,7 @@ let notApplicable =
       "FR0114", "branch reorder: identical branches, swapped positions"
       "FR0115", "advice on match arm order: no fix to measure"
       "FR0116", "rec-group membership: same compiled calls either way"
+      "FR0142", "test returns Task: the claim is thread occupancy while the work is in flight, not throughput"
       "FR0117", "or-pattern fold: identical decision tree after compilation"
       "FR0118", "cancellation plumbing: correctness of propagation, not speed"
       "FR0119", "sync-to-async twin: thread-pool behavior, scheduler-bound in-process"

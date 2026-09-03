@@ -52,18 +52,41 @@ fixes applied). The marketplace listing text lives in
 handle publishing on version tags (needs the `VS_MARKETPLACE_PAT`
 secret).
 
+Installing into the experimental instance with
+`VSIXInstaller /quiet /rootSuffix:Exp artifacts\FSharp.Refactor.vsix`
+copies the files but stamps the REAL instance's
+`Extensions\extensions.configurationchanged`, so the Exp instance never
+rescans and composes nothing (an empty-handed start, no log at all).
+Create that marker file under
+`%LOCALAPPDATA%\Microsoft\VisualStudio\18.0_*Exp\Extensions\` before
+launching `devenv /rootSuffix Exp <file.fs>`; the log then shows
+`fsac: bundled`, `fsac started for <solution dir>` and `diagnostics for`
+within seconds.
+
 Fast dev loop, no reinstall: build, then copy
 `bin\Release\net48\FSharp.Refactor.Vsix.dll` over the installed copy
 under `%LOCALAPPDATA%\Microsoft\VisualStudio\18.0_*Exp\Extensions\<random>\`
 and delete that instance's `ComponentModelCache` (required when MEF
 exports changed). Everything traces to `%TEMP%\FSharpRefactor.Vsix.log`.
 
-Polish backlog (deliberately V1):
+How the V1 shortcuts were closed:
 
-- `GetSuggestedActions` blocks the UI thread on the sidecar (5s cap)
-  instead of prefetching on caret moves.
-- The sidecar roots at the nearest directory with a sln/slnx/fsproj above
-  the first opened file, and relies on FSAC's `AutomaticWorkspaceInit`.
-- Fix edits apply to the buffer without a preview pane.
-- No options page: analyzer path and FSAC location are convention-only;
-  FSAC is located as the global dotnet tool, not yet bundled.
+- Code actions are fetched from the sidecar in `HasSuggestedActionsAsync`
+  (off the UI thread) and cached per snapshot version and span;
+  `GetSuggestedActions` answers from the cache and only waits on the
+  sidecar (5s cap) when the two calls disagree.
+- The sidecar roots at the TOPMOST solution above the first opened file,
+  so FSAC sees every project; failing a solution, the nearest project.
+- Every fix has a preview pane: what it removes and what it inserts.
+- FsAutoComplete is bundled (`CreateVsix.ps1` copies the newest payload
+  from the global tool store, or installs one into `obj\fsac-tool`;
+  `-NoFsac` skips it) and preferred over the global tool.
+- Settings without an options page: `%APPDATA%\FSharp.Refactor\vsix.json`
+  with `fsac` (a `.dll` runs under `dotnet`, anything else as it is),
+  `analyzers` (a list of directories) and `root`; the environment
+  variables `FSHARP_REFACTOR_FSAC`, `FSHARP_REFACTOR_ANALYZERS` (`;`
+  separated) and `FSHARP_REFACTOR_ROOT` win over the file. Read once per
+  Visual Studio session.
+
+Still open: a Tools > Options page needs a VSPackage registration
+(pkgdef) this hand-rolled packaging does not produce.

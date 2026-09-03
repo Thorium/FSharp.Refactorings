@@ -147,7 +147,7 @@ let private tailAfterFlag (flag: string) (body: SynExpr) =
 let private asyncBuilders =
     set [ "task"; "vtask"; "valueTask"; "backgroundTask"; "async" ]
 
-let private asyncBuilderRanges (index: AstIndex.Index) =
+let private computationBuilderRanges (index: AstIndex.Index) =
     index.Exprs
     |> Array.choose (fun (_, e) ->
         match e with
@@ -169,7 +169,7 @@ let private isCounterBump (name: string) (rhs: SynExpr) =
 
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree
-    let inAsyncBuilder = asyncBuilderRanges index
+    let inAsyncBuilder = computationBuilderRanges index
 
     [ for _, expr in index.Exprs do
           match expr with

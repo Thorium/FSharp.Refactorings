@@ -83,7 +83,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     // a bare name: its own type is Async. An application: the head must be
     // FULLY applied (partial application ignores a function, a different
     // mistake) and its final return type Async.
-    let ignoredAsync (operand: SynExpr) =
+    let ignoredComputation (operand: SynExpr) =
         match operand with
         | SynExpr.Ident ident ->
             match resolve ident with
@@ -118,7 +118,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             override _.WalkExpr(_path, expr) =
                 match expr with
                 | Ignored operand ->
-                    match ignoredAsync operand with
+                    match ignoredComputation operand with
                     | ValueSome ident ->
                         suggestions.Add
                             { Range = expr.Range

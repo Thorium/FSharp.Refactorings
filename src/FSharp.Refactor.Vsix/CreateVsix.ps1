@@ -6,7 +6,7 @@
 #     powershell -File CreateVsix.ps1
 #     VSIXInstaller /rootSuffix:Exp artifacts\FSharp.Refactor.vsix   # test instance
 #     VSIXInstaller artifacts\FSharp.Refactor.vsix                   # real VS
-param([string]$Configuration = "Release")
+param([string]$Configuration = "Release", [switch]$NoFsac)
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -38,6 +38,40 @@ Copy-Item (Join-Path $repo "src\FSharp.Refactor.Analyzers.Ionide\bin\$Configurat
 
 Copy-Item (Join-Path $repo "LICENSE") $staging
 Copy-Item (Join-Path $repo "icon.png") $staging
+
+# FsAutoComplete itself, so the extension works on a machine without the
+# global tool: the newest payload in the global tool store, or one
+# installed into obj\fsac-tool for the purpose. FsacClient looks for
+# fsac\fsautocomplete.dll beside the extension before the global tool.
+if (-not $NoFsac) {
+    function Find-FsacPayload([string]$storeRoot) {
+        if (-not (Test-Path $storeRoot)) { return $null }
+        $version = Get-ChildItem -Path $storeRoot -Directory |
+            Sort-Object { [version]$_.Name } | Select-Object -Last 1
+        if (-not $version) { return $null }
+        $tools = Join-Path $version.FullName "fsautocomplete\$($version.Name)\tools"
+        if (-not (Test-Path $tools)) { return $null }
+        $tfm = Get-ChildItem -Path $tools -Directory |
+            Sort-Object { [double]($_.Name -replace '^net', '') } | Select-Object -Last 1
+        if (-not $tfm) { return $null }
+        $any = Join-Path $tfm.FullName "any"
+        if (Test-Path (Join-Path $any "fsautocomplete.dll")) { return $any } else { return $null }
+    }
+
+    $payload = Find-FsacPayload (Join-Path $env:USERPROFILE ".dotnet\tools\.store\fsautocomplete")
+    if (-not $payload) {
+        $toolDir = Join-Path $here "obj\fsac-tool"
+        if (-not (Test-Path (Join-Path $toolDir ".store\fsautocomplete"))) {
+            dotnet tool install fsautocomplete --tool-path $toolDir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+        $payload = Find-FsacPayload (Join-Path $toolDir ".store\fsautocomplete")
+    }
+    if (-not $payload) { throw "fsautocomplete payload not found; pass -NoFsac to package without it" }
+
+    Copy-Item -Recurse -LiteralPath $payload (Join-Path $staging "fsac")
+    Write-Host "Bundled FsAutoComplete from $payload"
+}
 
 # the packaged manifest is the PROCESSED form: VS's own build strips the
 # design-time d: namespace before packaging, and the installer's reader
@@ -89,18 +123,29 @@ $displayName + '","description":"' + $displayName + '"}]},{"id":"' + $vsixId + '
 '","extensionDir":"[installdir]\\Common7\\IDE\\Extensions\\fsrefact.vs","installSizes":{"targetDrive":' + $totalSize + '}}]}'
 [IO.File]::WriteAllText((Join-Path $staging "catalog.json"), $catalogJson)
 
-# OPC forbids empty-Extension Defaults; the extensionless LICENSE gets an
-# Override part entry instead
-@'
+# every extension in the payload needs a Default (the FSAC payload brings
+# dozens), and OPC forbids empty-Extension Defaults, so each extensionless
+# file gets an Override part entry instead
+$known = @{ "vsixmanifest" = "text/xml"; "json" = "application/json" }
+$extensions = $payloadFiles |
+    ForEach-Object { $_.Extension.TrimStart('.').ToLowerInvariant() } |
+    Where-Object { $_ } | Sort-Object -Unique
+$defaults = ($extensions | ForEach-Object {
+        $type = if ($known.ContainsKey($_)) { $known[$_] } else { "application/octet-stream" }
+        "  <Default Extension=`"$_`" ContentType=`"$type`" />"
+    }) -join "`n"
+$overrides = ($payloadFiles | Where-Object { -not $_.Extension } | ForEach-Object {
+        $rel = '/' + $_.FullName.Substring($staging.Length + 1).Replace('\', '/')
+        "  <Override PartName=`"$rel`" ContentType=`"text/plain`" />"
+    }) -join "`n"
+$contentTypes = @"
 <?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="dll" ContentType="application/octet-stream" />
-  <Default Extension="vsixmanifest" ContentType="text/xml" />
-  <Default Extension="json" ContentType="application/json" />
-  <Default Extension="png" ContentType="application/octet-stream" />
-  <Override PartName="/LICENSE" ContentType="text/plain" />
+$defaults
+$overrides
 </Types>
-'@ | Out-File -Encoding utf8 -LiteralPath (Join-Path $staging "[Content_Types].xml")
+"@
+[IO.File]::WriteAllText((Join-Path $staging "[Content_Types].xml"), $contentTypes, (New-Object System.Text.UTF8Encoding $false))
 
 $artifacts = Join-Path $here "artifacts"
 New-Item -ItemType Directory -Force $artifacts | Out-Null

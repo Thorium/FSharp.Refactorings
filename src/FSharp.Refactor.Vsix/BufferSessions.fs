@@ -14,21 +14,37 @@ type BufferSession(buffer: ITextBuffer, filePath: string) =
     let mutable pendingTimer: Timer option = None
 
     let rootDir =
-        // FSAC discovers the workspace itself (AutomaticWorkspaceInit);
-        // rooting at the directory that holds a sln/fsproj above the file
-        // gives it the right place to look
-        let rec findRoot (dir: DirectoryInfo) =
-            if isNull dir then
-                Path.GetDirectoryName filePath
-            elif
-                Directory.EnumerateFiles(dir.FullName)
-                |> Seq.exists (fun f -> f.EndsWith ".sln" || f.EndsWith ".slnx" || f.EndsWith ".fsproj")
-            then
-                dir.FullName
-            else
-                findRoot dir.Parent
+        // FSAC discovers the workspace itself (AutomaticWorkspaceInit)
+        // from the root it is given. The TOPMOST solution above the file
+        // wins — rooted at the nearest project, FSAC saw one project and
+        // none of its siblings, and a file's references into them stayed
+        // unresolved. Failing a solution, the nearest project; failing
+        // that, the file's own directory. A configured root overrides all
+        // of it.
+        match FsacClient.configuredRoot () with
+        | Some root -> root
+        | None ->
+            let ancestors =
+                DirectoryInfo(Path.GetDirectoryName filePath)
+                |> Seq.unfold (fun (d: DirectoryInfo) -> if isNull d then None else Some(d, d.Parent))
+                |> Seq.truncate 12
+                |> List.ofSeq
 
-        findRoot (DirectoryInfo(Path.GetDirectoryName filePath))
+            let holds (extensions: string list) (d: DirectoryInfo) =
+                try
+                    Directory.EnumerateFiles d.FullName
+                    |> Seq.exists (fun f ->
+                        extensions
+                        |> List.exists (fun e -> f.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
+                with _ -> // an unreadable ancestor is not a root; fsharpanalyzer: ignore-line FR0055
+                    false
+
+            match ancestors |> List.filter (holds [ ".sln"; ".slnx" ]) |> List.tryLast with
+            | Some solutionDir -> solutionDir.FullName
+            | None ->
+                match ancestors |> List.tryFind (holds [ ".fsproj" ]) with
+                | Some projectDir -> projectDir.FullName
+                | None -> Path.GetDirectoryName filePath
 
     let sendChange () =
         version <- version + 1

@@ -66,11 +66,49 @@ async function unwire(context: vscode.ExtensionContext): Promise<void> {
     await promptReload('FSharp.Refactor analyzers removed from Ionide settings. Reload to apply?');
 }
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
-    context.subscriptions.push(
-        vscode.commands.registerCommand('fsharpRefactor.enable', () => wire(context, true)),
-        vscode.commands.registerCommand('fsharpRefactor.disable', () => unwire(context))
+// the extension shipped under this id before it moved publishers; both
+// installed side by side register the same commands, and the second one
+// to activate threw in registerCommand — before it could re-point the
+// analyzers setting, which is how a machine kept running the old build
+const PREVIOUS_ID = 'thorium.fsharp-refactor';
+
+async function retirePrevious(): Promise<void> {
+    const previous = vscode.extensions.getExtension(PREVIOUS_ID);
+    if (!previous) {
+        return;
+    }
+
+    const pick = await vscode.window.showWarningMessage(
+        `FSharp.Refactor: an older copy (${PREVIOUS_ID}) is installed beside this one and competes for the same settings. Uninstall it?`,
+        'Uninstall old copy',
+        'Keep both'
     );
+
+    if (pick === 'Uninstall old copy') {
+        try {
+            await vscode.commands.executeCommand('workbench.extensions.uninstallExtension', PREVIOUS_ID);
+            await promptReload('Old FSharp.Refactor copy removed. Reload to finish?');
+        } catch (error) {
+            vscode.window.showErrorMessage(`FSharp.Refactor: could not uninstall ${PREVIOUS_ID}: ${String(error)}`);
+        }
+    }
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    // the older copy may already hold these command ids: registration is
+    // best effort, and never stops the wiring below
+    for (const [id, handler] of [
+        ['fsharpRefactor.enable', () => wire(context, true)],
+        ['fsharpRefactor.disable', () => unwire(context)],
+    ] as const) {
+        try {
+            context.subscriptions.push(vscode.commands.registerCommand(id, handler));
+        } catch {
+            // already registered by the older copy; its handler serves both
+        }
+    }
+
+    void retirePrevious();
 
     const config = vscode.workspace.getConfiguration(SECTION);
     const current = config.get<string[]>('analyzersPath') ?? [];
@@ -93,7 +131,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // settings are the user's — ask before touching them
     const pick = await vscode.window.showInformationMessage(
-        'FSharp.Refactor: wire 137 refactoring analyzers into Ionide? (updates the global FSharp.analyzersPath setting)',
+        'FSharp.Refactor: wire its refactoring analyzers into Ionide? (updates the global FSharp.analyzersPath setting)',
         'Wire it up',
         'Not now'
     );

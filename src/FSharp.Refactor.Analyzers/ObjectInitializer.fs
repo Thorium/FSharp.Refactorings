@@ -212,7 +212,7 @@ let private hasParenthesisedArguments (e: SynExpr) =
 /// properties spliced onto one line made a 380-character line on the
 /// sample this rule was written for — correct, compiling, and unreadable.
 [<Literal>]
-let private wrapColumn = 110
+let private WrapColumn = 110
 
 /// Splice the named properties into the constructor call's argument list.
 /// `T()` has a unit argument to replace; `T(a)` gets them appended. The
@@ -261,7 +261,7 @@ let private withNamedArgs (ctorText: string) (startColumn: int) (args: string li
 
     let oneLine = splice (String.concat ", " args)
 
-    if startColumn + oneLine.Length <= wrapColumn then
+    if startColumn + oneLine.Length <= WrapColumn then
         oneLine
     else
         let inner = System.String(' ', startColumn + 4)
