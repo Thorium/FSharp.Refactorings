@@ -37,6 +37,7 @@
     <Compile Include="NewAnalyzerTests.fs" />
     <Compile Include="ObjectRulesTests.fs" />
     <Compile Include="DuFieldNamesTests.fs" />
+    <Compile Include="SignatureCoEditTests.fs" />
     <Compile Include="ParamOrderTests.fs" />
     <Compile Include="RaiseFailwithTests.fs" />
     <Compile Include="AutoPropertyTests.fs" />

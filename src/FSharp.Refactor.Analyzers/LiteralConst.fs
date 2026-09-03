@@ -1,13 +1,13 @@
-/// FR0130 (fix, OFF by default): a module-level constant binding gains
+/// FR0130 (fix): a module-level constant binding gains
 /// [<Literal>]:
 ///
 ///     let ConnectionName = "orders"      [<Literal>]
 ///                                    →   let ConnectionName = "orders"
 ///
 /// A literal can be used in patterns and attribute arguments and is
-/// const-folded at use sites. OFF by default because blanket-annotating
-/// every constant is churn — turn it on per repository when magic-string
-/// hygiene is the goal. Contained (private/internal) bindings only
+/// const-folded at use sites. On by default: a sweep that leaves every
+/// constant annotated is what its users came to expect, and a repository
+/// that finds it churn turns it off in fsharprefactor.json. Contained (private/internal) bindings only
 /// unless --api-changes: [<Literal>] compiles a public field to a CONST,
 /// which is a binary-compatibility change.
 module FSharp.Refactor.LiteralConst
@@ -23,6 +23,9 @@ type Suggestion =
         /// Zero-width insert point (line start of the `let`) and the
         /// attribute line.
         Fix: range * string
+        /// The companion signature's half: the attribute above its `val`
+        /// and the literal value it must then spell out (see SignatureFile).
+        SignatureEdits: SignatureFile.Edit list
     }
 
 let private isConstant (e: SynExpr) =
@@ -54,10 +57,15 @@ let private valueBinder (p: SynPat) =
     | _ -> ValueNone
 
 let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
-    if hasSignatureFile parseTree.FileName then
-        []
-    else
+    // the companion signature is carried along, not a reason to stand down:
+    // its `val` gains the attribute and the literal value in the same edit
+    // set, or — where it cannot be read — the fix is withheld
+    let signature = SignatureFile.read parseTree.FileName
 
+    match signature with
+    | SignatureFile.Unreadable -> []
+    | SignatureFile.Absent
+    | SignatureFile.Read _ ->
         let index = AstIndex.ofTree parseTree
 
         // Names that appear as a bare identifier PATTERN anywhere in the file.
@@ -93,7 +101,7 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                       trivia = trivia) when isConstant rhs ->
                       match valueBinder pat with
                       | ValueSome(id, patAccess) when
-                          Visibility.isInScope allowApiChanges path [ access; patAccess ]
+                          Visibility.isInScopeWithSignatureEdits allowApiChanges path [ access; patAccess ]
                           && not (vetoed id)
                           ->
                           let kw = trivia.LeadingKeyword.Range
@@ -106,9 +114,21 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                               let indent = String.replicate kw.StartColumn " "
                               let at = Position.mkPos kw.StartLine 0
 
-                              { Range = id.idRange
-                                Name = id.idText
-                                Fix = Range.mkRange decl.Range.FileName at at, $"{indent}[<Literal>]\n" }
+                              let declaredPrivately = Visibility.isPrivate path [ access; patAccess ]
+
+                              match
+                                  SignatureFile.literalEdits
+                                      declaredPrivately
+                                      signature
+                                      id.idText
+                                      (textOfRange source rhs.Range)
+                              with
+                              | ValueSome signatureEdits ->
+                                  { Range = id.idRange
+                                    Name = id.idText
+                                    Fix = Range.mkRange decl.Range.FileName at at, $"{indent}[<Literal>]\n"
+                                    SignatureEdits = signatureEdits }
+                              | ValueNone -> ()
                       | _ -> ()
                   | _ -> ()
               | _ -> () ]

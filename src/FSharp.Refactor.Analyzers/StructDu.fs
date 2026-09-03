@@ -42,6 +42,9 @@ type Suggestion =
         InsertRange: range
         /// The attribute line plus re-indentation.
         InsertText: string
+        /// The companion signature's half: the same attribute above the
+        /// `type` it declares (see SignatureFile).
+        SignatureEdits: SignatureFile.Edit list
     }
 
 let private smallValueTypes =
@@ -81,6 +84,11 @@ let private isSmallValueType (t: SynType) =
 let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
 
+    // the companion signature is carried along: its `type` gains the same
+    // attribute in the same edit set, or — where it cannot be read — every
+    // fix in the file is withheld
+    let signature = SignatureFile.read parseTree.FileName
+
     let collector =
         { new SyntaxCollectorBase() with
             override _.WalkSynModuleDecl(path, decl) =
@@ -97,7 +105,7 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                     // only the TYPE's own visibility counts: a private
                     // representation still leaves a public class-vs-struct
                     // type visible to consumers
-                    && Visibility.isInScope allowApiChanges path [ typeAccess ]
+                    && Visibility.isInScopeWithSignatureEdits allowApiChanges path [ typeAccess ]
                     ->
                     let caseFields =
                         cases
@@ -143,10 +151,16 @@ let find (allowApiChanges: bool) (parseTree: ParsedInput) (source: ISourceText) 
                             let insertPos = attributeInsertPos source decl.Range
                             let indent = String(' ', insertPos.Column)
 
-                            suggestions.Add
-                                { TypeName = typeName.idText
-                                  InsertRange = Range.mkRange decl.Range.FileName insertPos insertPos
-                                  InsertText = "[<Struct>]\n" + indent }
+                            let declaredPrivately = Visibility.isPrivate path [ typeAccess ]
+
+                            match SignatureFile.structEdits declaredPrivately signature typeName.idText with
+                            | ValueSome signatureEdits ->
+                                suggestions.Add
+                                    { TypeName = typeName.idText
+                                      InsertRange = Range.mkRange decl.Range.FileName insertPos insertPos
+                                      InsertText = "[<Struct>]\n" + indent
+                                      SignatureEdits = signatureEdits }
+                            | ValueNone -> ()
                 | _ -> () }
 
     AstIndex.replay collector parseTree

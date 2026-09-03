@@ -1,4 +1,4 @@
-/// FR0133 (fix, OFF by default): a long camel- or snake-case name — five
+/// FR0133 (fix): a long camel- or snake-case name — five
 /// words or more — becomes a double-backtick name, everywhere it is used:
 ///
 ///     let thisIsMyVeryComplexMethod x =        let ``this is my very complex method`` x =
@@ -74,9 +74,16 @@ let find
     (check: FSharpCheckFileResults)
     (projectCheck: FSharpCheckProjectResults option)
     : Suggestion list =
-    if OptionModule.hasErrors check then
-        []
-    else
+    // a companion .fsi declares the binding under its OLD name, and only the
+    // implementation side of a rename compiles to "the names differ" — so
+    // the signature's `val` is renamed in the same edit set, or, where the
+    // signature cannot be read, every rename in the file is withheld
+    let signature = SignatureFile.read parseTree.FileName
+
+    match signature with
+    | SignatureFile.Unreadable -> []
+    | _ when OptionModule.hasErrors check -> []
+    | _ ->
         let index = AstIndex.ofTree parseTree
 
         // a name mentioned inside ANY string literal may be a reflection or
@@ -142,9 +149,9 @@ let find
                                          | _ -> false)
 
                               if isTest then
-                                  yield id, quoted, not filePrivate
+                                  yield id, quoted, not filePrivate, filePrivate
                               elif filePrivate && includeLocals then
-                                  yield id, quoted, false
+                                  yield id, quoted, false, true
                           | None -> ()
                       | None -> ()
                   | _ -> ()
@@ -157,12 +164,12 @@ let find
                           match binderOf pat with
                           | Some(id, _) ->
                               match quotedForm id.idText with
-                              | Some quoted -> yield id, quoted, false
+                              | Some quoted -> yield id, quoted, false, true
                               | None -> ()
                           | None -> ()
                   | _ -> () ]
 
-        [ for id, quoted, mustProveInFile in candidates do
+        [ for id, quoted, mustProveInFile, declaredPrivately in candidates do
               let lineText = source.GetLineString(id.idRange.EndLine - 1)
 
               match check.GetSymbolUseAtLocation(id.idRange.EndLine, id.idRange.EndColumn, lineText, [ id.idText ]) with
@@ -191,10 +198,14 @@ let find
                               u.Range.StartLine = u.Range.EndLine && textOfRange source u.Range = id.idText)
 
                       if editable && uses.Length > 0 then
-                          { Range = id.idRange
-                            Name = id.idText
-                            Quoted = quoted
-                            Edits =
-                              [ for u in uses -> u.Range, id.idText, $"``{quoted}``" ]
-                              |> List.distinctBy (fun (r, _, _) -> r.StartLine, r.StartColumn) }
+                          match SignatureFile.renameEdits declaredPrivately signature id.idText $"``{quoted}``" with
+                          | ValueSome signatureEdits ->
+                              { Range = id.idRange
+                                Name = id.idText
+                                Quoted = quoted
+                                Edits =
+                                  ([ for u in uses -> u.Range, id.idText, $"``{quoted}``" ]
+                                   |> List.distinctBy (fun (r, _, _) -> r.StartLine, r.StartColumn))
+                                  @ signatureEdits }
+                          | ValueNone -> ()
               | None -> () ]

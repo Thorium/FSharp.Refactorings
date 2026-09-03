@@ -43,7 +43,7 @@ let isConfined (path: SyntaxNode list) (accessibilities: SynAccess option list) 
 
 /// Is the declaration private — by its own modifier, or a private module
 /// around it? Private is the one visibility a signature file never mentions.
-let private isPrivate (path: SyntaxNode list) (accessibilities: SynAccess option list) =
+let isPrivate (path: SyntaxNode list) (accessibilities: SynAccess option list) =
     let isPrivateModifier (accessibility: SynAccess option) =
         match accessibility with
         | Some(SynAccess.Private _) -> true
@@ -84,6 +84,16 @@ let isInScope (allowApiChanges: bool) (path: SyntaxNode list) (accessibilities: 
         isPrivate path accessibilities
     else
         allowApiChanges || isConfined path accessibilities
+
+/// The gate for a rule that edits the signature IN STEP (see
+/// SignatureFile): the signature is no reason to stand down, because the
+/// rule carries it along, so only the visibility question remains.
+let isInScopeWithSignatureEdits
+    (allowApiChanges: bool)
+    (path: SyntaxNode list)
+    (accessibilities: SynAccess option list)
+    =
+    allowApiChanges || isConfined path accessibilities
 
 /// Which DEFINITIONS a scan may touch, for the rules that rewrite a
 /// function's signature and every one of its call sites.

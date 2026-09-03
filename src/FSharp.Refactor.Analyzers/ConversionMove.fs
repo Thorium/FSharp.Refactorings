@@ -178,10 +178,11 @@ let rec private headModuleFunc (e: SynExpr) =
 /// fix that was available, never a rewrite that breaks at run time.
 let private mutatesSomething (text: string) = text.Contains "<-"
 
-/// Does the operation take anything that could RUN during the walk? `List.iter
-/// register` and `List.map (fun k -> ...)` do; `List.length`, `List.rev` and
-/// `List.take 3` cannot write to the collection they are reading.
-let private takesCallback (opStage: SynExpr) =
+/// The arguments of the operation that could RUN during the walk: the
+/// `register` of `List.iter register`, the lambda of `List.map (fun k ->
+/// ...)`. `List.length`, `List.rev` and `List.take 3` carry none, and cannot
+/// write to the collection they are reading.
+let private callbackArguments (opStage: SynExpr) =
     let rec arguments (e: SynExpr) =
         match e with
         | SynExpr.App(isInfix = false; funcExpr = funcExpr; argExpr = argExpr) -> argExpr :: arguments funcExpr
@@ -189,7 +190,7 @@ let private takesCallback (opStage: SynExpr) =
         | _ -> []
 
     arguments opStage
-    |> List.exists (fun arg ->
+    |> List.filter (fun arg ->
         match stripParens arg with
         | SynExpr.Const _ -> false
         | _ -> true)
@@ -243,19 +244,46 @@ let private sourceIsOwned (path: SyntaxNode list) (sourceExpr: SynExpr) =
                 | SyntaxNode.SynExpr(SynExpr.For(ident = ident)) -> ident.idText = name
                 | _ -> false)
 
-/// The text a callback could write from: the whole enclosing binding, so a
-/// local closure assigning into the collection is seen as well as the
-/// lambda in the operation itself.
-let private enclosingText (source: ISourceText) (path: SyntaxNode list) (opStage: SynExpr) =
-    // the path runs inward, so the OUTERMOST binding is the last on it
-    path
-    |> List.rev
-    |> List.tryPick (fun node ->
-        match node with
-        | SyntaxNode.SynBinding binding -> Some binding.RangeOfBindingWithRhs
-        | _ -> None)
-    |> Option.map (textOfRange source)
-    |> Option.defaultWith (fun () -> textOfRange source opStage.Range)
+/// Could this callback write to the OWNED collection while the walk reads?
+///
+/// Only what runs DURING the enumeration matters. A function that assigns
+/// into its array earlier and then filters it — FsRocket's checkTrooperHits
+/// writes `es[ti] <- ...` in a loop and ends with `es |> Array.toList |>
+/// List.filter (fun e -> ...)` — is the ordinary case, and reading the whole
+/// function for `<-` refused it. So the callback is what is read:
+///
+///   - a lambda: its own text must not assign, and must not call a LOCAL
+///     function that does (`let killTrooper ti = es[ti] <- ...` is exactly
+///     the closure that can reach the collection; a module-level function
+///     cannot, unless the collection is handed to it, which is the next
+///     case)
+///   - anything else — a named function, a partial application: it must
+///     not be a local that assigns, and must not mention the collection
+///     itself, since `List.iter (register es)` hands it over
+let private callbackMayWrite (source: ISourceText) (path: SyntaxNode list) (sourceName: string option) (arg: SynExpr) =
+    let text = textOfRange source arg.Range
+
+    let mentions (name: string) =
+        System.Text.RegularExpressions.Regex.IsMatch(text, $@"\b{System.Text.RegularExpressions.Regex.Escape name}\b")
+
+    // local bindings on the path whose body assigns: the closures that can
+    // reach a collection this function owns
+    let assigningLocals =
+        path
+        |> List.collect (fun node ->
+            match node with
+            | SyntaxNode.SynExpr(LetOrUseE lou) ->
+                lou.Bindings
+                |> List.filter (fun binding -> mutatesSomething (textOfRange source binding.RangeOfBindingWithRhs))
+                |> List.collect (fun (SynBinding(headPat = headPat)) -> patNames headPat)
+            | _ -> [])
+
+    mutatesSomething text
+    || assigningLocals |> List.exists mentions
+    || (match stripParens arg with
+        | SynExpr.Lambda _
+        | SynExpr.MatchLambda _ -> false
+        | _ -> sourceName |> Option.exists mentions)
 
 /// Find pipeline segments `conv |> Module.op args` that can be rewritten.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
@@ -282,9 +310,16 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                             // the collection must be the function's own,
                             // and nothing in the function may assign
                             let safeUnderCallback =
-                                not (takesCallback opStage)
-                                || (sourceIsOwned path sourceExpr
-                                    && not (mutatesSomething (enclosingText source path opStage)))
+                                match callbackArguments opStage with
+                                | [] -> true
+                                | callbacks ->
+                                    sourceIsOwned path sourceExpr
+                                    && (let sourceName =
+                                            match sourceRoot sourceExpr with
+                                            | ValueSome name -> Some name
+                                            | ValueNone -> None
+
+                                        callbacks |> List.forall (callbackMayWrite source path sourceName >> not))
 
                             if
                                 (movable || consuming)

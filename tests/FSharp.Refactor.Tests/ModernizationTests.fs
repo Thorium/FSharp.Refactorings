@@ -133,6 +133,22 @@ let ``a cross-record inner copy stays`` () =
             "module Test\ntype Inner = { Y: int; Z: int }\ntype Outer = { X: Inner; N: int }\nlet f (r: Outer) (q: Inner) (v: int) = { r with X = { q with Y = v } }"
     )
 
+[<Fact>]
+let ``a field named after the module holding its type keeps the nested form`` () =
+    // Nu's Kasino: `Settings: Settings.GameSettings` — the field shares its
+    // name with the MODULE its type lives in. `{ menu with Settings.X = v }`
+    // resolves Settings as the module and the record as GameSettings: "This
+    // expression was expected to have type 'Menu' but here has type
+    // 'Settings.GameSettings'", rolled back five times over
+    Assert.Empty(
+        nestedIn
+            "module Test
+module Settings =
+    type GameSettings = { RandomCardBacks: bool }
+type Menu = { Settings: Settings.GameSettings; N: int }
+let f (menu: Menu) = { menu with Settings = { menu.Settings with RandomCardBacks = true } }"
+    )
+
 // ---- FR0075 UseBinding ----
 
 let private useBindingsIn (source: string) =

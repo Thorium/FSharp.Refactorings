@@ -1038,7 +1038,9 @@ let private structDuMessages (parseTree: ParsedInput) (source: ISourceText) : Me
                 "Union '%s' holds only small value types; [<Struct>] avoids a heap allocation per value."
                 s.TypeName)
             s.InsertRange
-            [ fix s.InsertRange "" s.InsertText ])
+            (fix s.InsertRange "" s.InsertText
+             :: (s.SignatureEdits
+                 |> List.map (fun (r, original, replacement) -> fix r original replacement))))
 
 [<EditorAnalyzer("StructDu", "Mark small discriminated unions with Struct", HelpBase)>]
 let structDuEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
@@ -2632,7 +2634,9 @@ let private literalConstMessages (parseTree: ParsedInput) (source: ISourceText) 
             "FR0130"
             $"'{s.Name}' is a compile-time constant; [<Literal>] lets it serve in patterns and attribute arguments and const-folds at use sites."
             s.Range
-            [ fix insertRange "" text ])
+            (fix insertRange "" text
+             :: (s.SignatureEdits
+                 |> List.map (fun (r, original, replacement) -> fix r original replacement))))
 
 [<EditorAnalyzer("LiteralConst", "Module-level constants gain [<Literal>]", HelpBase)>]
 let literalConstEditorAnalyzer (ctx: EditorContext) : Async<Message list> =

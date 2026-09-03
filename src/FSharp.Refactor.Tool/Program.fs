@@ -783,8 +783,27 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
 
         // a REAL build first: project references must exist on disk for the
         // args-only pass below (SkipCompilerExecution skips them too), and a
-        // project that does not build has no business being rewritten
-        let buildExit, buildOut, buildErr = run $"build \"{projectPath}\"{tfmArg}"
+        // project that does not build has no business being rewritten.
+        //
+        // Restore SEPARATELY, and without the framework: a restore that
+        // carries -p:TargetFramework writes an assets file for that one
+        // framework only, and everything that later builds another — the
+        // all-frameworks verification, a sibling project's inner MSBuild of
+        // this one — fails with NETSDK1005 "doesn't have a target for
+        // net10.0", or with a half-resolved reference set ("The type
+        // referenced through 'System.Array' is defined in an assembly that
+        // is not referenced"). SwaggerProvider, whose Runtime project builds
+        // DesignTime through an <MSBuild> task, had both, run after run, and
+        // the verification put good fixes back on the strength of them.
+        // `dotnet build` restores implicitly; `msbuild -t:Build` does not.
+        let restoreExit, restoreOut, restoreErr =
+            run $"msbuild \"{projectPath}\" -t:Restore"
+
+        let buildExit, buildOut, buildErr =
+            if restoreExit <> 0 then
+                restoreExit, restoreOut, restoreErr
+            else
+                run $"msbuild \"{projectPath}\" -t:Build{tfmArg}"
 
         if buildExit <> 0 then
             // the raw MSBuild transcript buries the compile errors under
@@ -811,7 +830,7 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
             // args (no dll to copy) — judge by the JSON, not the exit code.
             let exit, stdout, stderr =
                 run
-                    $"msbuild \"{projectPath}\" -t:Rebuild -p:BuildProjectReferences=false -p:ProvideCommandLineArgs=true -p:SkipCompilerExecution=true --getItem:FscCommandLineArgs{tfmArg}"
+                    $"msbuild \"{projectPath}\" -t:Rebuild -p:BuildProjectReferences=false -p:ProvideCommandLineArgs=true -p:SkipCompilerExecution=true --getItem:FscCommandLineArgs --getProperty:DotnetFscCompilerPath{tfmArg}"
 
             try
                 use doc = JsonDocument.Parse stdout
@@ -820,6 +839,53 @@ let private fscArgs (chosenFramework: string) (projectPath: string) =
                     doc.RootElement.GetProperty("Items").GetProperty("FscCommandLineArgs").EnumerateArray()
                     |> Seq.map (fun item -> item.GetProperty("Identity").GetString())
                     |> Array.ofSeq
+
+                // The FSharp.Core fsc would use when the project names none.
+                //
+                // A project with DisableImplicitFSharpCoreReference (paket's
+                // convention) passes no -r: for FSharp.Core, and fsc quietly
+                // takes the one bundled beside it in the SDK — the
+                // netstandard2.0 build. FCS, handed the same arguments, takes
+                // the FSharp.Core loaded in THIS process instead: the
+                // netstandard2.1 build, whose task builder names
+                // System.IAsyncDisposable through netstandard 2.1. Checked
+                // against a netstandard2.0 project that resolves as "The
+                // module/namespace 'System' from compilation unit
+                // 'netstandard' did not contain ... 'IAsyncDisposable'" —
+                // three errors on SwaggerProvider's DesignTime that its own
+                // build never had, refusing the project run after run. So
+                // when the arguments carry no FSharp.Core, the compiler's own
+                // is added: the same assembly fsc resolves, and nothing else.
+                let bundledFSharpCore =
+                    try
+                        let mutable properties = Unchecked.defaultof<JsonElement>
+
+                        if doc.RootElement.TryGetProperty("Properties", &properties) then
+                            let mutable fsc = Unchecked.defaultof<JsonElement>
+
+                            if properties.TryGetProperty("DotnetFscCompilerPath", &fsc) then
+                                let fscPath = (fsc.GetString()).Trim().Trim '"'
+                                let core = Path.Combine(Path.GetDirectoryName fscPath, "FSharp.Core.dll")
+                                if File.Exists core then Some core else None
+                            else
+                                None
+                        else
+                            None
+                    with _ -> // an SDK that does not report the path simply gets no addition; fsharpanalyzer: ignore-line FR0055
+                        None
+
+                let referencesFSharpCore =
+                    args
+                    |> Array.exists (fun a ->
+                        a.StartsWith("-r:", StringComparison.OrdinalIgnoreCase)
+                        && Path
+                            .GetFileName(a.Substring 3)
+                            .Equals("FSharp.Core.dll", StringComparison.OrdinalIgnoreCase))
+
+                let args =
+                    match bundledFSharpCore with
+                    | Some core when not referencesFSharpCore -> Array.append args [| $"-r:{core}" |]
+                    | _ -> args
 
                 if args.Length = 0 then
                     Error "MSBuild produced no FscCommandLineArgs (is this an SDK-style F# project?)"
@@ -2811,6 +2877,64 @@ let private buildAllFrameworks (project: string) =
             |> Array.distinct
         )
 
+/// An error line with its position taken out, so the same pre-existing
+/// error reads the same after a fix above it has moved the line it sits
+/// on. Comparing SETS of these, rather than counts, is what separates "the
+/// breakage is not ours" from "the breakage is not ONLY ours": an error
+/// that appears with the fixes and never without them is ours.
+let private errorSignature (line: string) =
+    Text.RegularExpressions.Regex.Replace(line, @"\(\d+,\d+(?:,\d+,\d+)?\)", "")
+
+/// What a failed all-frameworks build says about this run's fixes, once
+/// the build is known to fail WITHOUT them too.
+type private Blame =
+    /// Every error was there before the fixes: theirs, not ours.
+    | PreExisting
+    /// The build fails differently from one run to the next, so an error
+    /// seen only with the fixes proves nothing either way.
+    | Unverifiable
+    /// Errors that appear with the fixes and never without them.
+    | Introduced of Set<string>
+
+/// Judge a build that fails with this run's fixes AND without them.
+///
+/// Only COMPILER errors can be ours: a source edit cannot make an assets
+/// file lose a framework (NETSDK1005) or a package fail to resolve (NU*),
+/// so those never count. SwaggerProvider's Runtime restores its DesignTime
+/// sibling from inside its own per-framework build, which leaves a
+/// one-framework assets file behind and fails on whichever framework built
+/// second — a different one after each sweep — and by count that read as
+/// "2 errors with the fixes, 1 without", putting good fixes back run after
+/// run.
+///
+/// Among compiler errors, one seen with the fixes and not in the first
+/// baseline gets a second baseline build: a build that is already broken
+/// is often broken DIFFERENTLY from run to run, and where the two baselines
+/// disagree the failure is not evidence of anything.
+let private judgeAgainstBaseline (withFixes: string array) (project: string) (firstBaseline: string array) =
+    let compilerErrors (errors: string array) =
+        errors
+        |> Array.filter (fun e -> Text.RegularExpressions.Regex.IsMatch(e, @"error FS\d+"))
+        |> Array.map errorSignature
+        |> Set.ofArray
+
+    let introduced =
+        Set.difference (compilerErrors withFixes) (compilerErrors firstBaseline)
+
+    if introduced.IsEmpty then
+        PreExisting
+    else
+        match buildAllFrameworks project with
+        | Ok() -> Unverifiable
+        | Error secondBaseline when compilerErrors secondBaseline <> compilerErrors firstBaseline -> Unverifiable
+        | Error secondBaseline ->
+            let remaining = Set.difference introduced (compilerErrors secondBaseline)
+
+            if remaining.IsEmpty then
+                PreExisting
+            else
+                Introduced remaining
+
 /// The source files as they stand, so one framework's pass can be undone
 /// if it turns out to have broken another's.
 let private takeSnapshot (files: string array) =
@@ -3498,34 +3622,61 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
                             let report (errors: string array) =
                                 errors |> Array.truncate 5 |> String.concat "\n"
 
-                            match buildAllFrameworks project with
-                            // Still broken without the fixes — but "still
-                            // broken" is not "not our fault". Comparing the
-                            // COUNT separates the two: fewer errors without
-                            // our changes means they were adding some, and
-                            // putting them back would hand over a project
-                            // broken in ways this run caused.
-                            | Error withoutFixes when withoutFixes.Length >= output.Length ->
+                            let keepFixes (why: string) =
                                 for path, text in currentTexts do
                                     writeSource path text
 
-                                eprintfn
-                                    "A target framework fails to build, but it fails WITHOUT this run's fixes too — pre-existing breakage, fixes kept:"
-
+                                eprintfn $"{why}"
                                 eprintfn $"{report output}"
                                 1
+
+                            match buildAllFrameworks project with
+                            // Still broken without the fixes — but "still
+                            // broken" is not "not our fault". Comparing the
+                            // errors themselves separates the two: one that
+                            // appears only with our changes is ours, and
+                            // putting the files back would hand over a
+                            // project broken in ways this run caused.
                             | Error withoutFixes ->
-                                eprintfn
-                                    $"A target framework was ALREADY broken, but applying broke it further ({output.Length} error(s) with this run's fixes, {withoutFixes.Length} without), so the {restored} file(s) it changed were put back:"
+                                match judgeAgainstBaseline output project withoutFixes with
+                                | PreExisting ->
+                                    keepFixes
+                                        "A target framework fails to build, but it fails WITHOUT this run's fixes too — pre-existing breakage, fixes kept:"
+                                | Unverifiable ->
+                                    keepFixes
+                                        "A target framework fails to build, and fails DIFFERENTLY from one build to the next without this run's fixes — this build cannot verify them; fixes kept (each passed the typecheck of the framework analysed), review the diff:"
+                                | Introduced introduced ->
+                                    eprintfn
+                                        $"A target framework was ALREADY broken, but applying broke it further ({introduced.Count} error(s) seen only with this run's fixes), so the {restored} file(s) it changed were put back:"
 
-                                eprintfn $"{report output}"
-                                1
+                                    eprintfn $"{report (Array.ofSeq introduced)}"
+                                    1
                             | Ok() ->
-                                eprintfn
-                                    $"Applying broke a target framework this run did not analyze, so the {restored} file(s) it changed were put back:"
+                                // the baseline builds — so the failure is
+                                // ours, or a build that only fails
+                                // sometimes. One more build with the fixes
+                                // back in place tells which: a project that
+                                // restores from inside its own build
+                                // (SwaggerProvider) fails on one sample
+                                // and passes on the next
+                                for path, text in currentTexts do
+                                    writeSource path text
 
-                                eprintfn $"{report output}"
-                                1
+                                match buildAllFrameworks project with
+                                | Ok() ->
+                                    printfn
+                                        "done; every target framework still builds (the first verification build failed and the second passed — a build that only fails sometimes)"
+
+                                    markSwept options
+                                    0
+                                | Error again ->
+                                    let restored = restoreSnapshot snapshot
+
+                                    eprintfn
+                                        $"Applying broke a target framework this run did not analyze, so the {restored} file(s) it changed were put back:"
+
+                                    eprintfn $"{report again}"
+                                    1
                     | Target.Script _ ->
                         printfn "done; project still checks clean"
                         markSwept options

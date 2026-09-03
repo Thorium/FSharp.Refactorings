@@ -2279,11 +2279,13 @@ let ``FR0013 leaves parens alone inside a shorthand lambda`` () =
     Assert.Empty(RedundantParens.find tree sourceText)
 
 [<Fact>]
-let ``FR0130 stands down where a signature file declares the value`` () =
+let ``FR0130 withholds where a signature declares the value and cannot be read`` () =
     // `[<Literal>]` is part of what a signature must agree on, so annotating
     // only the implementation gives "The literal constant values and/or
-    // attributes differ" and the project stops compiling. Found on Fable's
-    // fcs-fable, which carries 176 signature files
+    // attributes differ" (found on Fable's fcs-fable, 176 signature files).
+    // With the cross-file parser installed the signature is edited in step
+    // (SignatureCoEditTests); without one, as in an editor, the fix for a
+    // non-private value is withheld rather than offered half-done
     let dir =
         System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsref-fsi-" + System.Guid.NewGuid().ToString "N")
 
@@ -2295,6 +2297,7 @@ let ``FR0130 stands down where a signature file declares the value`` () =
         let source = "module M\n\nlet internal version = \"1.0\"\n"
         System.IO.File.WriteAllText(impl, source)
 
+        ProjectSources.configure None
         let tree, sourceText = parseNamed impl source
         Assert.Empty(LiteralConst.find false tree sourceText)
 

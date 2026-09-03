@@ -23,6 +23,7 @@
 module FSharp.Refactor.NestedRecordUpdate
 
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.EditorServices
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
@@ -93,9 +94,71 @@ let private fieldTypeName (check: FSharpCheckFileResults) (source: ISourceText) 
         | _ -> None
     | None -> None
 
+/// Does the path head name a MODULE, NAMESPACE or TYPE in scope at the
+/// record expression — anything F# would resolve ahead of the field?
+///
+/// `{ menu with Settings.RandomCardBacks = v }` is fine while `Settings` is
+/// only a field. Nu's Kasino declares the field as `Settings:
+/// Settings.GameSettings` — named after the module holding its type, which
+/// lives in another file — and the flattened path resolved as the module's
+/// qualification of a GameSettings field: "This expression was expected to
+/// have type 'Menu' but here has type 'Settings.GameSettings'", five times,
+/// rolled back. The type names declared in this file and the field's own
+/// type cannot see that; the names in scope at the expression can. Read
+/// from the completion list at the copy source, where the context is a
+/// plain expression rather than a field list.
+///
+/// The completion list is the expensive part — it cost this rule 735ms
+/// over a 19-file sweep, more than any other analyzer — and within one
+/// module-level declaration nothing can change which modules and types
+/// are in scope, so the answer is memoised per (name, declaration): Nu's
+/// five sites in one `update` function are one lookup.
+let private headIsEntityInScope
+    (check: FSharpCheckFileResults)
+    (source: ISourceText)
+    (memo: System.Collections.Generic.Dictionary<string * pos, bool>)
+    (path: SyntaxNode list)
+    (outerBase: SynExpr)
+    (head: string)
+    =
+    let declaration =
+        path
+        |> List.tryPick (fun node ->
+            match node with
+            | SyntaxNode.SynModule decl -> Some decl.Range.Start
+            | _ -> None)
+        |> Option.defaultValue outerBase.Range.Start
+
+    match memo.TryGetValue((head, declaration)) with
+    | true, known -> known
+    | _ ->
+        let collides =
+            try
+                let at = outerBase.Range.End
+                let lineText = source.GetLineString(at.Line - 1)
+
+                check.GetDeclarationListSymbols(
+                    None,
+                    at.Line,
+                    lineText,
+                    PartialLongName.Empty at.Column,
+                    (fun () -> [])
+                )
+                |> List.exists (fun group ->
+                    group
+                    |> List.exists (fun symbolUse ->
+                        match symbolUse.Symbol with
+                        | :? FSharpEntity as entity -> entity.DisplayName = head
+                        | _ -> false))
+            with _ -> // a scope we cannot read is one we do not rewrite in; fsharpanalyzer: ignore-line FR0055
+                true
+
+        memo.[(head, declaration)] <- collides
+        collides
+
 /// Find flattenable nested copy-and-updates. Requires typed check results
-/// for the type-name collision gate; the language version gate lives in
-/// the registration.
+/// for the name collision gate; the language version gate lives in the
+/// registration.
 let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
     let index = AstIndex.ofTree parseTree
 
@@ -113,7 +176,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
             | _ -> [||])
         |> Set.ofArray
 
-    [ for _, expr in index.Exprs do
+    let scopeMemo = System.Collections.Generic.Dictionary<string * pos, bool>()
+
+    [ for path, expr in index.Exprs do
           match expr with
           | SynExpr.Record(copyInfo = Some(outerBase, _); recordFields = fields) ->
               match identPath outerBase with
@@ -132,11 +197,12 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               not leaves.IsEmpty
                               && leaves |> List.exists (fun (p, _) -> p.Contains '.')
                               // collision gate: the path head must not name
-                              // a type
+                              // a type, module or namespace
                               && (let head = (List.head fieldIds).idText
 
                                   not (fileTypeNames.Contains head)
-                                  && fieldTypeName check source (List.head fieldIds) <> Some head)
+                                  && fieldTypeName check source (List.head fieldIds) <> Some head
+                                  && not (headIsEntityInScope check source scopeMemo path outerBase head))
                               ->
                               let fieldStart = (List.head fieldIds).idRange.Start
 

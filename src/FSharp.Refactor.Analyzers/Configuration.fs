@@ -94,18 +94,14 @@ let private defaultOff =
           "fr0114"
           "pyramidflip"
           "fr0141"
-          "generativeloop"
-          // both of these have documented themselves as off by default since
-          // they were written, and neither was ever listed here — so they ran
-          // on every sweep. They are the two churniest rules in the
-          // catalogue: one annotates every constant in the codebase, the
-          // other renames every test. FR0130 is how fcs-fable ended up with
-          // [<Literal>] on values its signature files declare without one,
-          // which does not compile
-          "fr0130"
-          "literalconst"
-          "fr0133"
-          "namequoting" ]
+          "generativeloop" ]
+// FR0130 and FR0133 both once described themselves as off by default while
+// never being listed here, so every sweep ran them; aligning the code to
+// that text took away the [<Literal>]s and the backtick names sweeps had
+// always produced, and a user comparing versions asked where they went.
+// The behaviour a sweep has shown is the contract; the text was wrong. Both
+// stay on, and a repository that finds either churn turns it off in
+// fsharprefactor.json.
 
 /// Is the rule enabled in a parsed rule map? An explicit code entry wins
 /// over a name entry; absent rules are enabled unless default-off.

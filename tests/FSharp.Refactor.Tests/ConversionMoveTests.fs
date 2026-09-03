@@ -221,3 +221,20 @@ let ``a list literal source is already materialised`` () =
     assertPatched
         "module Test\nlet f g = [ 1; 2; 3 ] |> Seq.toArray |> Array.map g"
         "module Test\nlet f g = [ 1; 2; 3 ] |> Seq.map g |> Seq.toArray"
+
+[<Fact>]
+let ``writes BEFORE the pipeline do not stop a pure callback moving`` () =
+    // FsRocket's checkTrooperHits: the array is assigned into in a loop,
+    // then filtered with a lambda that reads only. Only what runs during
+    // the walk matters, and reading the whole function for `<-` refused
+    // this — the ordinary imperative shape
+    assertPatched
+        "module Test\ntype E = { Dead: bool }\nlet f (input: E[]) =\n    let es = Array.copy input\n    for i in 0 .. es.Length - 1 do\n        if es[i].Dead then\n            es[i] <- { Dead = true }\n    es |> Array.toList |> List.filter (fun e -> not e.Dead)"
+        "module Test\ntype E = { Dead: bool }\nlet f (input: E[]) =\n    let es = Array.copy input\n    for i in 0 .. es.Length - 1 do\n        if es[i].Dead then\n            es[i] <- { Dead = true }\n    es |> Array.filter (fun e -> not e.Dead) |> Array.toList"
+
+[<Fact>]
+let ``a callback handed the collection itself keeps the conversion`` () =
+    // `List.iter (register es)` gives an outside function the very
+    // collection being walked
+    assertNoSuggestion
+        "module Test\nlet register (xs: ResizeArray<int>) (x: int) = xs.Add x\nlet f () =\n    let es = ResizeArray<int>()\n    es |> Seq.toList |> List.iter (register es)"
