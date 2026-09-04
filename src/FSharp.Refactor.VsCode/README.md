@@ -21,6 +21,21 @@ After wiring and a window reload, open any F# file: suggestions appear as
 `Hint`-severity squiggles with `FR`-prefixed codes, each carrying a
 light-bulb quick fix (`Ctrl+.`).
 
+Two more commands:
+
+- `FSharp.Refactor: Status (versions and wiring)` — the extension and
+  analyzers versions, whether the analyzers directory is wired into
+  `FSharp.analyzersPath` (and any stale entry from an older version),
+  Ionide's version and the FsAutoComplete it runs, and whether the
+  `fsharp-refactor` dotnet tool is installed. The first thing to run when
+  no hints appear.
+- `FSharp.Refactor: Run the tool on this workspace` — the light bulbs fix
+  one finding at a time; this runs the sweep. Picks a solution or project
+  of the workspace, then `Report only` (`--dry-run`), `Apply fixes`, or
+  `Apply fixes with --api-changes`, in the integrated terminal. Every pass
+  the tool applies is build-verified and rolled back on error, as on the
+  command line; it offers to install the tool when it is missing.
+
 Alternative without this extension: reference the
 `FSharp.Refactor.Analyzers` NuGet package and point `FSharp.analyzersPath`
 at the restored package — per-project instead of global; see the

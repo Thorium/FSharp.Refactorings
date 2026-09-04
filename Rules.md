@@ -149,6 +149,9 @@ has a row, its category and its default state match the code.
 | FR0140 | Idiom | v | | `let h = Henkilo() in h.Id <- 1L; h.Etunimi <- "x"` | `let h = Henkilo(Id = 1L, Etunimi = "x")` |
 | FR0141 | Idiom | | | `let mutable stopped = false in while not stopped && n < limit do (if next = stop then stopped <- true)` | — |
 | FR0142 | Performance | v | | ``` [<Fact>] let ``reads`` () = let res = load () \|> Async.RunSynchronously in check res ``` | ``` [<Fact>] let ``reads`` () = task { let! res = load () \|> Async.StartImmediateAsTask in check res } :> Task ``` |
+| FR0143 | Correctness | v | | `#load "../src/Lib/Braiding.fs"` (Braiding.fs needs `FMatrix`, defined in the project's FMatrix.fs) | `#load "../src/Lib/FMatrix.fs"` inserted before it |
+| FR0144 | Correctness | v | | `#r @"../packages/Sql.1.2.3/lib/net451/Sql.dll"` (net451 gone, net461 present) | `#r @"../packages/Sql.1.2.3/lib/net461/Sql.dll"` |
+| FR0145 | Correctness | v | | `{ Name = "x"; Retries = 3 }` (Tags and Timeout unassigned) | `{ Name = "x"; Retries = 3; Tags = []; Timeout = None }` |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `fsharprefactor.json` turns it on (`"FR0099": true`) or a run asks for it

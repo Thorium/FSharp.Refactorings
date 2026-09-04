@@ -432,7 +432,7 @@ let ``plain text concatenation is not a path`` () =
 
 let private syntaxIn (source: string) =
     let tree, sourceText = parse source
-    RedundantSyntax.find tree sourceText
+    RedundantSyntax.find None tree sourceText
 
 let private assertSyntaxFix (kind: RedundantSyntax.Kind) (source: string) (expectedPatched: string) =
     match syntaxIn source |> List.filter (fun s -> s.Kind = kind) with
@@ -858,3 +858,53 @@ let ``FR0092 leaves a message the file reads back elsewhere`` () =
         failwithContextIn
             "module Test\nlet gen (prompt: string) =\n    failwith \"model inference failed\"\nlet check () =\n    try gen \"q\" with e -> e.Message = \"model inference failed\""
     )
+
+[<Fact>]
+let ``FR0086 strips the dollar from a printfn argument when the typed tree shows no FormattableString`` () =
+    let source = "module Test\nlet f () =\n    printfn $\"Status: Processing\""
+    let tree, sourceText, checkResults = parseAndCheck source
+
+    let holeFree =
+        RedundantSyntax.find (Some checkResults) tree sourceText
+        |> List.filter (fun s -> s.Kind = RedundantSyntax.Kind.HoleFreeInterpolation)
+
+    match holeFree with
+    | [ s ] -> Assert.Equal("\"Status: Processing\"", s.ReplacementText)
+    | other -> failwithf "Expected one hole-free interpolation, got %A" other
+
+[<Fact>]
+let ``FR0086 keeps the dollar for a callee taking a FormattableString`` () =
+    let source =
+        "module Test\nlet log (m: System.FormattableString) = m.Format\nlet f () =\n    log $\"Status: Processing\""
+
+    let tree, sourceText, checkResults = parseAndCheck source
+
+    Assert.Empty(
+        RedundantSyntax.find (Some checkResults) tree sourceText
+        |> List.filter (fun s -> s.Kind = RedundantSyntax.Kind.HoleFreeInterpolation)
+    )
+
+[<Fact>]
+let ``FR0086 keeps the dollar in an argument without the typed tree`` () =
+    let source = "module Test\nlet f () =\n    printfn $\"Status: Processing\""
+    let tree, sourceText = parse source
+
+    Assert.Empty(
+        RedundantSyntax.find None tree sourceText
+        |> List.filter (fun s -> s.Kind = RedundantSyntax.Kind.HoleFreeInterpolation)
+    )
+
+[<Fact>]
+let ``FR0077 also offers stubs returning the empty value of each member's type`` () =
+    let source =
+        "module Test\ntype IThing =\n    abstract member Go: unit -> int\n    abstract member Stop: string -> unit\n    abstract member Tags: string list\n    abstract member Name: string\n\nlet t =\n    { new IThing with\n        member _.Go() = 1 }"
+
+    match missingIn source with
+    | [ s ] ->
+        Assert.Contains("member _.Stop(arg0) = ()", s.EmptyInsertText)
+        Assert.Contains("member _.Tags = []", s.EmptyInsertText)
+        Assert.Contains("member _.Name = \"\"", s.EmptyInsertText)
+        Assert.DoesNotContain("NotImplementedException", s.EmptyInsertText)
+        let patched = applyEdit source s.Range s.EmptyInsertText
+        Assert.True(typechecksCleanly patched, $"Empty-value stubs do not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected exactly one implement-missing fix, got %A" other

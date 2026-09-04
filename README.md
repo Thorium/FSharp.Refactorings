@@ -1,8 +1,11 @@
 # FSharp.Refactor
 
-ReSharper-style **functional refactoring suggestions for F#** — light-bulb quick
-fixes in your editor, and a command-line tool that applies them in bulk. Built on
-[FSharp.Analyzers.SDK](https://github.com/ionide/FSharp.Analyzers.SDK).
+> Let's remove parentheses from the internet
+
+Functional refactoring suggestions for F#. 
+
+- light bulb quick fixes in your editor
+- command-line tool that applies them in bulk.
 
 Suggestions are `Hint` severity: they mark an opportunity, not a defect, and
 never gate your build.
@@ -111,7 +114,7 @@ it can use and no configuration choice is needed.
 
 **If no suggestions appear**, open Output → "F# Language Service": it
 names the analyzer dlls it scanned and how many analyzers loaded, and a
-version-pairing skip is spelled out there rather than surfacing in the
+version-pairing skip is spelt out there rather than surfacing in the
 editor.
 
 ### Visual Studio 2022–2026
@@ -135,7 +138,7 @@ install. This package is not a tool: it is a library of analyzer assemblies
 the host loads, so it is passed as a directory rather than installed. That
 directory sits in the NuGet cache because an analyzer package deliberately
 has no `lib/` folder and is marked a development dependency — a
-`PackageReference` therefore puts nothing in your `bin`, and after a restore
+`PackageReference` therefore puts nothing in your `bin`, and after a restore,
 the cache is where the assemblies live. `--analyzers-path` takes any folder
 holding them and searches it recursively.
 
@@ -265,7 +268,7 @@ Every rule is one of four kinds, shown in the last column of
 
 | Kind | | Count |
 |---|---|---|
-| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 42 |
+| `correctness` | The code does something other than what it looks like it does: a race, a swallowed exception, a disposable that leaks, a comparison that never holds | 45 |
 | `performance` | Correct, but doing work it need not: allocations that need not happen, repeated work, a scan where a lookup would do | 32 |
 | `idiom` | The same behaviour written the way F# writes it. Worth doing, and worth agreeing on first — it is a matter of house style as much as anything | 50 |
 | `cosmetic` | The punctuation and spelling of code. Real cleanups, and nobody's idea of a welcome pull request from a stranger | 17 |
@@ -475,6 +478,9 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0140 | A construction immediately followed by property assignments on the new object folds into F#'s named-property construction (fix): `let h = Henkilo()` + `h.Id <- 1L` + `h.Etunimi <- "x"` becomes `let h = Henkilo(Id = 1L, Etunimi = "x")`. Not a constructor overload and not faster — the same calls in the same order — but the object reads as constructed rather than assembled, and the half-built value stops being nameable. Only the UNINTERRUPTED run of assignments straight after the binding folds in; anything in between could observe the half-built object, so the fold stops there. Each property must be distinct and typed-settable, and no assigned value may mention the object itself | idiom |
 | FR0141 | A `while` loop that carries STATE forward by mutation and leaves through a boolean flag is a tail-recursive function written inside out (note, OFF BY DEFAULT): raising the flag is not a `break`, so the rest of that iteration still runs and the loop leaves only at the next condition check. A tail-recursive function would take the state as parameters and return where the decision is made. The note counts the statements that would still run, and says so only when there are any. Silent inside `async` and `task`: in a task recursion is not even available (a resumable state machine grows the stack on a recursive `return!`, as FSharp.Azure.Quantum's polling loop records in a comment), and in an async the recursive function must return `Async<_>`, so the change reaches the signature rather than the loop. Deliberately NOT the search loop either — a carried value whose every assignment is `x <- x + <literal>` is an index, and that shape already short-circuits and allocates nothing (measured 12x faster than `Array.exists` on an early hit, so a pipeline there would be a regression dressed as a cleanup). Note only: naming the function and its parameters is the author's | idiom |
 | FR0142 | A test (Fact, Theory, Test, TestCase, TestMethod) whose body blocks on async work - Async.RunSynchronously, .Result, .Wait(), GetAwaiter().GetResult() on a Task - returns the work instead: the body becomes a task block cast to System.Threading.Tasks.Task and each blocking statement a let!/do! bind (fix). xUnit, NUnit 3+ and MSTest await a Task-returning test, so the thread is free while the work is in flight; a test method shape is the framework business, not a consumer, so no API change. Only spine-level blocking sites move; FsCheck Property and Expecto builders stay out | performance |
+| FR0143 | A script whose `#load` chain misses a file of the project it loads from gets it loaded, in the project's order (fix): the compiler's FS0039 names what is missing, the `#load` paths name the project, and its fsproj lists the compile item that declares the name. A missing NAMESPACE from a ProjectReference gets a `#r` to that project's newest built assembly, or a note to build it first. Runs on scripts that do not typecheck — that is its input. | correctness |
+| FR0144 | A script `#r` or `#I` path the package no longer has is re-pointed at what it has now (fix): the first missing segment, when it is a target-framework folder (net451, netstandard1.6) or a `Name.1.2.3` version folder, is swapped for the sibling under which the rest of the path exists — a file for `#r`, a directory for `#I`. Ranked for the runtime the original implies: a net4x original wants the newest net4y, then netstandard2.0 and below, never 2.1 or netX.0; anything else wants the newest netX.0 not above the SDK the script is checked against, then netstandard 2.1, 2.0, older, and netcoreapp only as a last resort; a version folder takes the newest. Quoting and separators stay as written; other candidates are listed. `.fsx` only; runs without a typecheck. | correctness |
+| FR0145 | A record expression that leaves fields unassigned (FS0764) gets them (fix): read off the typed tree through the labels it does assign, each with the empty value its type makes obvious — `None`, `ValueNone`, `[]`, `[||]`, `Map.empty`, `Set.empty`, `Seq.empty`, `()` — and, where none is obvious, a `raise (System.NotImplementedException "Field")` placeholder that fails when the record is built; the editor also offers zero values (`false`, `0`, `""`, `Unchecked.defaultof<_>`). The apply tool takes only the all-obvious case. Runs on files with type errors, like FR0077. | correctness |
 | FR0129 | A when-guard that only equality-tests the clause's own binder against a literal IS the literal pattern (fix): `| x when x = "A" ->` becomes `| "A" ->`, per clause, on match/match!/`function` alike — gated on the body never mentioning the binder (it no longer exists after the rewrite) and the compared value being a constant the pattern language can spell | idiom |
 | FR0128 | The obsolete `*Managed`/`*CryptoServiceProvider` crypto constructors (SYSLIB0021) become the static factories (fix): `new SHA256Managed()` → `SHA256.Create()`, `new RNGCryptoServiceProvider()` → `RandomNumberGenerator.Create()` — the SAME algorithm, so behavior is preserved; weak algorithms keep their FR0065 note separately. Zero-argument constructors only | idiom |
 | FR0127 | A string literal matching a provider's DOCUMENTED credential format — `sk-ant-…` (Anthropic), `sk-…`/`sk-proj-…` (OpenAI), `AIza…` (Google), `ghp_`/`github_pat_` (GitHub), `AKIA…` (AWS), `xoxb-…` (Slack), PEM private-key headers — is a leaked key until proven otherwise (note): not entropy guessing, format anchoring | correctness |
@@ -514,7 +520,7 @@ Roadmap based on ["F# refactoring possibilities"](https://www.slideshare.net/Tho
 | FR0074 | Nested record copy-and-update flattens to F# 8 path syntax: `{ r with X = { r.X with Y = v } }` → `{ r with X.Y = v }` (LangVersion-gated; fields named after their type stay nested — the flattened path would resolve as the type) | idiom |
 | FR0075 | A locally constructed disposable bound with `let` is never disposed: fix to `use` when every mention stays in scope, advice when it escapes; manual `Dispose()` calls exempt | correctness |
 | FR0076 | `List/Array.map f \|> ignore` allocates a discarded list — fix to `iter (f >> ignore)`; `Seq.map f \|> ignore` is lazy and runs NOTHING (advice, the FR0017 family) | performance |
-| FR0077 | An object expression missing interface members (FS0366) gets `NotImplementedException` stubs for every missing method/property, inherited interfaces in their own `interface X with` sections — the only rule that runs on non-compiling code, which is its point | correctness |
+| FR0077 | An object expression missing interface members (FS0366) gets `NotImplementedException` stubs for every missing method/property, inherited interfaces in their own `interface X with` sections — the only rule that runs on non-compiling code, which is its point The editor also offers stubs that return the empty value of each member type (`()`, `None`, `[]`, zeros, `Unchecked.defaultof<_>`) instead of raising; the sweep applies only the raising form. | correctness |
 | FR0078 | The three-part mutable-condition loop idiom (`let! first` / `let mutable go` / rebind at loop end) collapses to F# 8 `while!` — a lone stale-bool `while` never matches, `while!` re-evaluates per iteration | idiom |
 | FR0079 | `Task.WhenAll [\| t \|]` / `Task.WaitAll` / `Async.Parallel [ c ]` over a single-element literal adds indirection for nothing (CA1842/CA1843, note — the direct form changes the result type, so the author picks the landing shape) | performance |
 | FR0080 | Leading TABs (FS1161 — pasted code often brings them) expand to four spaces per tab, every affected line in one fix; files with triple-quoted/verbatim strings are skipped (a tab could be string content) | correctness |
@@ -785,5 +791,5 @@ This project aims to be compatible with other products, so you won't end-up havi
 | [SonarQube](https://docs.sonarsource.com/sonarqube-cloud/standards/ai-code-assurance/quality-profiles-for-agentic-ai) | Minor | Most of SonarQube rules are opinionated enterprise development rules ported from Java. But we have some of the same .NET relevant rules. |
 | [G-Research FSharp Analyzers](https://g-research.github.io/fsharp-analyzers/) | Not really | Good rules to focus maintainability. Different focus. Should work well together. |
 | [Fantomas](https://fsprojects.github.io/fantomas/) | None | Different focus: Fantomas is a code layout tool. We are compatible so you can use both. |
-| [FSharp.Analyzers.SDK](https://ionide.io/FSharp.Analyzers.SDK/) | None | We use this tool under hood. |
+| [FSharp.Analyzers.SDK](https://ionide.io/FSharp.Analyzers.SDK/) | None | Our tool, fsharp-refactor, is built on FSharp.Analyzers.SDK |
 

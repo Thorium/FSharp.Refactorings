@@ -3690,6 +3690,107 @@ let testReturnsTaskCliAnalyzer (ctx: CliContext) : Async<Message list> =
         else
             [])
 
+// ---- FR0143 ScriptLoads ----
+
+let private scriptLoadsMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (projectDiagnostics: FSharp.Compiler.Diagnostics.FSharpDiagnostic[])
+    : Message list =
+    ScriptLoads.find fileName parseTree projectDiagnostics
+    |> List.map (fun s ->
+        hint
+            "FR0143"
+            s.Message
+            s.InsertRange
+            (match s.InsertText with
+             | Some text -> [ fix s.InsertRange "" text ]
+             | None -> []))
+
+// the one rule whose input IS a broken compilation: it reads the FS0039
+// diagnostics of the whole script compilation, so it needs project
+// results, and the apply tool admits it on scripts that do not typecheck
+[<EditorAnalyzer("ScriptLoads", "A script #load chain missing a file of the project it loads from", HelpBase)>]
+let scriptLoadsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0143" "ScriptLoads" (fun () ->
+        match ctx.CheckProjectResults with
+        | Some project -> scriptLoadsMessages ctx.FileName ctx.ParseFileResults.ParseTree project.Diagnostics
+        | None -> [])
+
+[<CliAnalyzer("ScriptLoads", "A script #load chain missing a file of the project it loads from", HelpBase)>]
+let scriptLoadsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0143" "ScriptLoads" (fun () ->
+        scriptLoadsMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.CheckProjectResults.Diagnostics)
+
+// ---- FR0144 ScriptReferences ----
+
+let private scriptReferencesMessages
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (options: AnalyzerProjectOptions)
+    : Message list =
+    ScriptReferences.find fileName parseTree source options.OtherOptions
+    |> List.map (fun s -> hint "FR0144" s.Message s.Range [ fix s.Range s.OriginalText s.ReplacementText ])
+
+// existence on disk is the input, so this runs on a script that does not
+// typecheck, like FR0143
+[<EditorAnalyzer("ScriptReferences", "A script #r or #I path the package no longer has", HelpBase)>]
+let scriptReferencesEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0144" "ScriptReferences" (fun () ->
+        scriptReferencesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.ProjectOptions)
+
+[<CliAnalyzer("ScriptReferences", "A script #r or #I path the package no longer has", HelpBase)>]
+let scriptReferencesCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0144" "ScriptReferences" (fun () ->
+        scriptReferencesMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText ctx.ProjectOptions)
+
+// ---- FR0145 RecordFields ----
+
+// deliberately NO hasErrors gate: like FR0077 this rule exists to fix a
+// compile error. `applyPlaceholders` is the editor's privilege: a
+// placeholder fires when the record is BUILT, so the apply tool takes only
+// the fixes whose every default is obvious
+let private recordFieldsMessages
+    (applyPlaceholders: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
+    RecordFields.find parseTree source checkResults
+    |> List.map (fun s ->
+        let missing = String.concat ", " s.Missing
+
+        let text =
+            if s.AllObvious then
+                $"This {s.TypeName} leaves {s.Missing.Length} field(s) unassigned ({missing}); the fix adds them with the empty value their types make obvious."
+            else
+                $"This {s.TypeName} leaves {s.Missing.Length} field(s) unassigned ({missing}); the fix adds them, with a NotImplementedException placeholder where no default is obvious — replace it before the record is built."
+
+        hint
+            "FR0145"
+            text
+            s.Range
+            (if s.AllObvious then
+                 [ fix s.Range "" s.InsertText ]
+             elif applyPlaceholders then
+                 // the editor's two offers: placeholders that report
+                 // themselves, or zero values (literal zeros, and
+                 // Unchecked.defaultof for the rest)
+                 [ fix s.Range "" s.InsertText; fix s.Range "" s.ZeroInsertText ]
+             else
+                 []))
+
+[<EditorAnalyzer("RecordFields", "Add the fields a record expression leaves unassigned", HelpBase)>]
+let recordFieldsEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0145" "RecordFields" (fun () ->
+        whenChecked ctx (recordFieldsMessages true ctx.ParseFileResults.ParseTree ctx.SourceText))
+
+[<CliAnalyzer("RecordFields", "Add the fields a record expression leaves unassigned", HelpBase)>]
+let recordFieldsCliAnalyzer (ctx: CliContext) : Async<Message list> =
+    whenEnabled ctx.FileName "FR0145" "RecordFields" (fun () ->
+        recordFieldsMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+
 // ---- FR0079 SingleAwaitable ----
 
 let private singleAwaitableMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
@@ -3719,7 +3820,15 @@ let singleAwaitableCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0077 ImplementMissing ----
 
-let private implementMissingMessages (parseTree: ParsedInput) (source: ISourceText) checkResults : Message list =
+// `offerEmpty`: the editor's second fix, stubs that return the empty value
+// of their types instead of raising — a choice for a person, never the
+// sweep's: a quiet stub hides the gap the raising one reports
+let private implementMissingMessages
+    (offerEmpty: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    checkResults
+    : Message list =
     // deliberately NO hasErrors gate: this rule exists to fix the
     // missing-members compile error
     ImplementMissing.find parseTree source checkResults
@@ -3730,17 +3839,20 @@ let private implementMissingMessages (parseTree: ParsedInput) (source: ISourceTe
             "FR0077"
             $"This object expression is missing %d{s.MissingNames.Length} member(s) of %s{s.InterfaceName} (%s{missing}); the fix stubs them with NotImplementedException so the code compiles and the TODOs are explicit."
             s.Range
-            [ fix s.Range "" s.InsertText ])
+            (if offerEmpty then
+                 [ fix s.Range "" s.InsertText; fix s.Range "" s.EmptyInsertText ]
+             else
+                 [ fix s.Range "" s.InsertText ]))
 
 [<EditorAnalyzer("ImplementMissing", "Stub missing interface members with NotImplementedException", HelpBase)>]
 let implementMissingEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0077" "ImplementMissing" (fun () ->
-        whenChecked ctx (implementMissingMessages ctx.ParseFileResults.ParseTree ctx.SourceText))
+        whenChecked ctx (implementMissingMessages true ctx.ParseFileResults.ParseTree ctx.SourceText))
 
 [<CliAnalyzer("ImplementMissing", "Stub missing interface members with NotImplementedException", HelpBase)>]
 let implementMissingCliAnalyzer (ctx: CliContext) : Async<Message list> =
     whenEnabled ctx.FileName "FR0077" "ImplementMissing" (fun () ->
-        implementMissingMessages ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
+        implementMissingMessages false ctx.ParseFileResults.ParseTree ctx.SourceText ctx.CheckFileResults)
 
 // ---- FR0080 TabIndentation ----
 
@@ -3788,7 +3900,12 @@ let pathSeparatorCliAnalyzer (ctx: CliContext) : Async<Message list> =
 
 // ---- FR0082 / FR0083 / FR0084 / FR0086 RedundantSyntax ----
 
-let private redundantSyntaxMessages (fileName: string) (parseTree: ParsedInput) (source: ISourceText) : Message list =
+let private redundantSyntaxMessages
+    check
+    (fileName: string)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    : Message list =
     let codeOf kind =
         match kind with
         | RedundantSyntax.Kind.AttributeSuffix -> "FR0082", "AttributeSuffix"
@@ -3805,7 +3922,7 @@ let private redundantSyntaxMessages (fileName: string) (parseTree: ParsedInput) 
         | RedundantSyntax.Kind.HoleFreeInterpolation ->
             "This interpolated string has no holes; a plain string literal says the same with less."
 
-    RedundantSyntax.find parseTree source
+    RedundantSyntax.find check parseTree source
     |> List.choose (fun s ->
         let code, name = codeOf s.Kind
 
@@ -3818,14 +3935,20 @@ let private redundantSyntaxMessages (fileName: string) (parseTree: ParsedInput) 
 let redundantSyntaxEditorAnalyzer (ctx: EditorContext) : Async<Message list> =
     async {
         return
-            DeepStack.run (fun () -> redundantSyntaxMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
+            DeepStack.run (fun () ->
+                redundantSyntaxMessages ctx.CheckFileResults ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
     }
 
 [<CliAnalyzer("RedundantSyntax", "Attribute suffix/parens, backticks, hole-free interpolation", HelpBase)>]
 let redundantSyntaxCliAnalyzer (ctx: CliContext) : Async<Message list> =
     async {
         return
-            DeepStack.run (fun () -> redundantSyntaxMessages ctx.FileName ctx.ParseFileResults.ParseTree ctx.SourceText)
+            DeepStack.run (fun () ->
+                redundantSyntaxMessages
+                    (Some ctx.CheckFileResults)
+                    ctx.FileName
+                    ctx.ParseFileResults.ParseTree
+                    ctx.SourceText)
     }
 
 // ---- FR0085 RedundantNew ----

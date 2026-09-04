@@ -129,7 +129,8 @@ let ``corpus fixes still parse`` () : unit =
                       for s in ConversionMove.find tree sourceText -> s.Range, s.ReplacementText, "FR0004"
                       for s in StructDu.find (Visibility.apiChangesAllowed ()) tree sourceText ->
                           s.InsertRange, s.InsertText, "FR0016"
-                      for s in RedundantSyntax.find tree sourceText -> s.Range, s.ReplacementText, $"FR008x/{s.Kind}"
+                      for s in RedundantSyntax.find None tree sourceText ->
+                          s.Range, s.ReplacementText, $"FR008x/{s.Kind}"
                       for s in MatchBangRule.find tree sourceText do
                           for range, _, replacement in s.Edits -> range, replacement, "FR0073"
                       for s in MatchBangRule.findWhileBang tree sourceText do

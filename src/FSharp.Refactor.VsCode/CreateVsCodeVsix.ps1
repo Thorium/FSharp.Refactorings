@@ -29,8 +29,13 @@ $repoVersion = [regex]::Match(
 $packageJsonPath = Join-Path $here "package.json"
 $packageJson = [IO.File]::ReadAllText($packageJsonPath)
 $packageJson = $packageJson -replace '("version":\s*")[^"]+(")', "`${1}$repoVersion`${2}"
+# what the Status command reports: the analyzers' version and when this
+# package was built, read back from package.json at runtime
+$built = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm") + " UTC"
+$packageJson = $packageJson -replace '("analyzers":\s*")[^"]*(")', "`${1}$repoVersion`${2}"
+$packageJson = $packageJson -replace '("built":\s*")[^"]*(")', "`${1}$built`${2}"
 [IO.File]::WriteAllText($packageJsonPath, $packageJson)
-Write-Host "Stamped VS Code extension version $repoVersion"
+Write-Host "Stamped VS Code extension version $repoVersion (built $built)"
 
 Push-Location $here
 try {

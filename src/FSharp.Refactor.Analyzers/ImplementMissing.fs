@@ -33,7 +33,13 @@ type Suggestion =
     {
         /// Insertion point (an empty range after the last member).
         Range: range
+        /// Every missing member stubbed with NotImplementedException.
         InsertText: string
+        /// The same members returning the empty value of their types —
+        /// `()`, `None`, `[]`, zeros, `Unchecked.defaultof<_>` — the
+        /// editor's second offer: a stub that stays quiet instead of one
+        /// that reports itself.
+        EmptyInsertText: string
         InterfaceName: string
         MissingNames: string list
     }
@@ -62,10 +68,11 @@ let private paramName (i: int) (p: FSharpParameter) =
     let name = p.Name |> Option.defaultValue $"arg{i}"
     if keywords.Contains name then $"``{name}``" else name
 
-/// One member's stub requirements, grouped per property.
+/// One member's stub requirements, grouped per property, with the type
+/// its body must produce — what the empty-value stub returns.
 type private Required =
-    | Method of name: string * paramNames: string list
-    | Property of name: string * hasGetter: bool * hasSetter: bool
+    | Method of name: string * paramNames: string list * returns: FSharpType option
+    | Property of name: string * hasGetter: bool * hasSetter: bool * propertyType: FSharpType option
 
 /// The abstract members an entity requires, or None when something we do
 /// not stub (an event, an indexer) is involved.
@@ -73,9 +80,16 @@ let private requiredMembers (entity: FSharpEntity) : (string * Required list) op
     try
         let methods = ResizeArray<Required>()
 
-        let properties = System.Collections.Generic.Dictionary<string, bool * bool>()
+        let properties =
+            System.Collections.Generic.Dictionary<string, bool * bool * FSharpType option>()
 
         let mutable bail = false
+
+        let returnType (m: FSharpMemberOrFunctionOrValue) =
+            try
+                Some m.ReturnParameter.Type
+            with _ -> // a type FCS cannot name: the empty stub falls back to defaultof; fsharpanalyzer: ignore-line FR0055
+                None
 
         for m in entity.MembersFunctionsAndValues do
             if m.IsDispatchSlot && not bail then
@@ -90,41 +104,61 @@ let private requiredMembers (entity: FSharpEntity) : (string * Required list) op
                     if hasParams then
                         bail <- true // an indexer
                     else
-                        let g, s =
+                        let g, s, t =
                             match properties.TryGetValue name with
-                            | true, (g, s) -> g, s
-                            | false, _ -> false, false
+                            | true, (g, s, t) -> g, s, t
+                            | false, _ -> false, false, None
 
-                        properties.[name] <- (g || m.IsPropertyGetterMethod, s || m.IsPropertySetterMethod)
+                        // the getter's return type is the property's type
+                        let t = if m.IsPropertyGetterMethod then returnType m else t
+
+                        properties.[name] <- (g || m.IsPropertyGetterMethod, s || m.IsPropertySetterMethod, t)
                 elif m.IsProperty then
                     () // covered by the accessor entries
                 else
                     let names =
                         m.CurriedParameterGroups |> Seq.collect id |> Seq.mapi paramName |> List.ofSeq
 
-                    methods.Add(Method(m.DisplayName, names))
+                    methods.Add(Method(m.DisplayName, names, returnType m))
 
         if bail then
             None
         else
-            let props = [ for kv in properties -> Property(kv.Key, fst kv.Value, snd kv.Value) ]
+            let props =
+                [ for kv in properties ->
+                      let g, s, t = kv.Value
+                      Property(kv.Key, g, s, t) ]
 
             Some(entity.DisplayName, List.ofSeq methods @ props)
     with OptionModule.FcsSymbolFailure ->
         None
 
-let private stubFor (niPrefix: string) (required: Required) =
+/// How a stub's body is spelled: a NotImplementedException, or the empty
+/// value of the member's type (`()` for a setter and a unit method).
+type private Body =
+    | Raise
+    | Empty
+
+let private stubFor (niPrefix: string) (body: Body) (required: Required) =
     let ni = $"raise ({niPrefix}NotImplementedException())"
 
+    let valueOf (t: FSharpType option) =
+        match body, t with
+        | Raise, _ -> ni
+        | Empty, Some t -> TypeDefaults.emptyValue t
+        | Empty, None -> "Unchecked.defaultof<_>"
+
+    let unit' = if body = Raise then ni else "()"
+
     match required with
-    | Method(name, []) -> $"member _.{name}() = {ni}"
-    | Method(name, names) ->
+    | Method(name, [], t) -> $"member _.{name}() = {valueOf t}"
+    | Method(name, names, t) ->
         let args = String.concat ", " names
-        $"member _.{name}({args}) = {ni}"
-    | Property(name, true, false) -> $"member _.{name} = {ni}"
-    | Property(name, false, true) -> $"member _.{name} with set _v = {ni}"
-    | Property(name, _, true) -> $"member _.{name} with get () = {ni} and set _v = {ni}"
-    | Property(name, _, _) -> $"member _.{name} = {ni}"
+        $"member _.{name}({args}) = {valueOf t}"
+    | Property(name, true, false, t) -> $"member _.{name} = {valueOf t}"
+    | Property(name, false, true, _) -> $"member _.{name} with set _v = {unit'}"
+    | Property(name, _, true, t) -> $"member _.{name} with get () = {valueOf t} and set _v = {unit'}"
+    | Property(name, _, _, t) -> $"member _.{name} = {valueOf t}"
 
 /// The member/property names a member-definition list implements.
 let private implementedNames (members: SynMemberDefn list) =
@@ -148,8 +182,8 @@ let private implementedNames (members: SynMemberDefn list) =
 
 let private nameOf (required: Required) =
     match required with
-    | Method(name, _) -> name
-    | Property(name, _, _) -> name
+    | Method(name, _, _) -> name
+    | Property(name, _, _, _) -> name
 
 /// Find object expressions with missing interface members. Runs on files
 /// WITH errors by design — and ONLY on files with errors: a file that
@@ -259,20 +293,21 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
                                   let niPrefix = if opensSystemNamespace source then "" else "System."
 
-                                  let insertText =
-                                      [ for m in mainMissing -> $"\n{memberIndent}{stubFor niPrefix m}"
+                                  let textWith (body: Body) =
+                                      [ for m in mainMissing -> $"\n{memberIndent}{stubFor niPrefix body m}"
                                         for baseName, missing in inherited do
                                             yield $"\n{interfaceIndent}interface {baseName} with"
 
                                             for m in missing do
-                                                yield $"\n{interfaceIndent}    {stubFor niPrefix m}" ]
+                                                yield $"\n{interfaceIndent}    {stubFor niPrefix body m}" ]
                                       |> String.concat ""
 
                                   let insertAt =
                                       Range.mkRange expr.Range.FileName lastMember.Range.End lastMember.Range.End
 
                                   { Range = insertAt
-                                    InsertText = insertText
+                                    InsertText = textWith Raise
+                                    EmptyInsertText = textWith Empty
                                     InterfaceName = entity.DisplayName
                                     MissingNames =
                                       (mainMissing |> List.map nameOf)

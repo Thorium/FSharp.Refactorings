@@ -4,6 +4,7 @@
 // FSharp.Refactor analyzer assemblies (BOTH SDK builds — FSAC loads the
 // one matching its own SDK version and skips the other) and, with the
 // user's consent, appends its own analyzers directory to that setting.
+import * as cp from 'child_process';
 import * as vscode from 'vscode';
 
 const SECTION = 'FSharp';
@@ -94,12 +95,163 @@ async function retirePrevious(): Promise<void> {
     }
 }
 
+// ---- the apply tool: fsharp-refactor as a dotnet global tool ----
+
+const TOOL = 'fsharp-refactor';
+
+/// The tool's version, or undefined when it is not on the PATH.
+function toolVersion(): Promise<string | undefined> {
+    return new Promise(resolve => {
+        cp.execFile(TOOL, ['--version'], { timeout: 15000, shell: true }, (error, stdout) => {
+            if (error) {
+                resolve(undefined);
+            } else {
+                resolve(String(stdout).trim());
+            }
+        });
+    });
+}
+
+async function exists(uri: vscode.Uri): Promise<boolean> {
+    try {
+        await vscode.workspace.fs.stat(uri);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+let terminal: vscode.Terminal | undefined;
+
+function toolTerminal(): vscode.Terminal {
+    if (!terminal || terminal.exitStatus) {
+        terminal = vscode.window.createTerminal(TOOL);
+    }
+    return terminal;
+}
+
+/// Everything a "why do I see no hints?" question needs, in one place:
+/// the extension, its analyzers, the wiring, Ionide and its FSAC, the tool.
+async function status(context: vscode.ExtensionContext): Promise<void> {
+    const pkg = context.extension.packageJSON as {
+        version?: string;
+        fsharpRefactorBuild?: { analyzers?: string; built?: string };
+    };
+    const config = vscode.workspace.getConfiguration(SECTION);
+    const dir = analyzersDir(context);
+    const paths = config.get<string[]>('analyzersPath') ?? [];
+    const enabled = config.get<boolean>('enableAnalyzers') ?? false;
+    const ionide = vscode.extensions.getExtension('ionide.ionide-fsharp');
+    const ionideVersion = (ionide?.packageJSON as { version?: string } | undefined)?.version;
+    const fsacSetting = config.get<string>('fsac.netCoreDllPath');
+    const fsacBundled = ionide ? vscode.Uri.joinPath(ionide.extensionUri, 'bin', 'fsautocomplete.dll') : undefined;
+    const fsacPath = fsacSetting && fsacSetting.length > 0
+        ? fsacSetting
+        : fsacBundled && (await exists(fsacBundled)) ? fsacBundled.fsPath : '(not found)';
+    const stale = paths.filter(p => p.includes(PATH_MARKER) && p !== dir);
+    const tool = await toolVersion();
+
+    const lines = [
+        `FSharp.Refactor extension ${pkg.version ?? '?'} (${context.extension.id})`,
+        `Analyzers ${pkg.fsharpRefactorBuild?.analyzers ?? '?'}, built ${pkg.fsharpRefactorBuild?.built || '?'}`,
+        `  ${dir} ${(await exists(vscode.Uri.file(dir))) ? '(present)' : '(MISSING)'}`,
+        `Wired into Ionide: ${paths.includes(dir) ? 'yes' : 'NO'}; FSharp.enableAnalyzers: ${enabled}`,
+        ...(stale.length > 0 ? [`  stale entries from older versions: ${stale.join(', ')}`] : []),
+        `Ionide ${ionideVersion ?? '(not installed)'}; FsAutoComplete: ${fsacPath}`,
+        `Apply tool (${TOOL}): ${tool ?? 'not installed — dotnet tool install -g fsharp-refactor'}`,
+        `Older copy (${PREVIOUS_ID}): ${vscode.extensions.getExtension(PREVIOUS_ID) ? 'STILL INSTALLED' : 'not installed'}`,
+    ];
+
+    const channel = vscode.window.createOutputChannel('FSharp.Refactor');
+    channel.clear();
+    for (const line of lines) {
+        channel.appendLine(line);
+    }
+    channel.show(true);
+
+    const problems = [
+        ...(paths.includes(dir) && enabled ? [] : ['analyzers not wired']),
+        ...(stale.length > 0 ? ['stale entries'] : []),
+        ...(tool ? [] : ['tool not installed']),
+    ];
+    vscode.window.showInformationMessage(
+        problems.length === 0
+            ? `FSharp.Refactor ${pkg.version ?? ''}: everything wired (details in the Output panel).`
+            : `FSharp.Refactor ${pkg.version ?? ''}: ${problems.join(', ')} (details in the Output panel).`
+    );
+}
+
+/// Run the apply tool on a solution or project of this workspace, in the
+/// integrated terminal: report only by default, the real thing on request.
+async function run(): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+        vscode.window.showWarningMessage('FSharp.Refactor: open a folder or workspace first.');
+        return;
+    }
+
+    const found = await vscode.workspace.findFiles(
+        '**/*.{sln,slnx,fsproj}',
+        '**/{node_modules,bin,obj,packages,paket-files,.git}/**',
+        100
+    );
+    if (found.length === 0) {
+        vscode.window.showWarningMessage('FSharp.Refactor: no .sln, .slnx or .fsproj in this workspace.');
+        return;
+    }
+
+    const rank = (u: vscode.Uri) => (u.fsPath.endsWith('.fsproj') ? 1 : 0);
+    const targets = found.sort((a, b) => rank(a) - rank(b) || a.fsPath.localeCompare(b.fsPath));
+    let target = targets[0];
+    if (targets.length > 1) {
+        const pick = await vscode.window.showQuickPick(
+            targets.map(u => ({ label: vscode.workspace.asRelativePath(u), uri: u })),
+            { placeHolder: 'Solution or project to run fsharp-refactor on' }
+        );
+        if (!pick) {
+            return;
+        }
+        target = pick.uri;
+    }
+
+    const mode = await vscode.window.showQuickPick(
+        [
+            { label: 'Report only', description: '--dry-run: list the fixes, change nothing', args: '--dry-run' },
+            { label: 'Apply fixes', description: 'rewrite the files; every pass is build-verified and rolled back on error', args: '' },
+            { label: 'Apply fixes with --api-changes', description: 'also public signatures, names and cross-file rewrites', args: '--api-changes' },
+        ],
+        { placeHolder: 'How to run fsharp-refactor' }
+    );
+    if (!mode) {
+        return;
+    }
+
+    if (!(await toolVersion())) {
+        const pick = await vscode.window.showWarningMessage(
+            'FSharp.Refactor: the fsharp-refactor dotnet tool is not installed.',
+            'Install it'
+        );
+        if (pick === 'Install it') {
+            const t = toolTerminal();
+            t.show();
+            t.sendText('dotnet tool install -g fsharp-refactor');
+        }
+        return;
+    }
+
+    const t = toolTerminal();
+    t.show();
+    t.sendText(`${TOOL} "${target.fsPath}" ${mode.args}`.trim());
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     // the older copy may already hold these command ids: registration is
     // best effort, and never stops the wiring below
     for (const [id, handler] of [
         ['fsharpRefactor.enable', () => wire(context, true)],
         ['fsharpRefactor.disable', () => unwire(context)],
+        ['fsharpRefactor.status', () => status(context)],
+        ['fsharpRefactor.run', () => run()],
     ] as const) {
         try {
             context.subscriptions.push(vscode.commands.registerCommand(id, handler));

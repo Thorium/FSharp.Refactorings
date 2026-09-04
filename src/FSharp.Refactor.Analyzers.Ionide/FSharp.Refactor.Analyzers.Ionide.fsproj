@@ -28,6 +28,7 @@
     <Compile Include="..\FSharp.Refactor.Analyzers\MatchToIf.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\BooleanSimplify.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\OptionModule.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\TypeDefaults.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\IfRestructure.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\MissingCases.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\RecGroup.fs" />
@@ -107,6 +108,9 @@
     <Compile Include="..\FSharp.Refactor.Analyzers\CancellationOverload.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\AwaitableOverload.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\TestReturnsTask.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\ScriptLoads.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\ScriptReferences.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\RecordFields.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\CatchLogException.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\DateTimeRules.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\MonitorLock.fs" />

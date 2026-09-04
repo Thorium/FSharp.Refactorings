@@ -13,6 +13,8 @@
 module FSharp.Refactor.RedundantSyntax
 
 open System.Text.RegularExpressions
+open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Refactor.Text
@@ -44,7 +46,10 @@ let private redundantBackticks (source: ISourceText) (ident: Ident) =
     && isSingleLine ident.idRange
     && textOfRange source ident.idRange = $"``{ident.idText}``"
 
-let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
+/// `check` is the typed tree when the host has one: FR0086 then reads a
+/// callee's signature instead of assuming every argument position may
+/// expect a FormattableString.
+let find (check: FSharpCheckFileResults option) (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     let index = AstIndex.ofTree parseTree
     let suggestions = ResizeArray<Suggestion>()
 
@@ -106,14 +111,50 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
             let text = textOfRange source t.Range
             text.Contains "FormattableString" || text.Contains "IFormattable"
 
-        // ANY application: Ionide's `Log.setMessageI $"..."` is an F#
-        // function whose parameter is a FormattableString, and nothing in
-        // its spelling says so (FsAutoComplete's AdaptiveServerState)
+        // the callee of the application this argument sits in: `f` in
+        // `f a $"..."`, `x.M` in `x.M($"...")`
+        let rec calleeIdent (e: SynExpr) =
+            match e with
+            | SynExpr.App(funcExpr = f) -> calleeIdent f
+            | SynExpr.TypeApp(expr = inner)
+            | SynExpr.Paren(expr = inner) -> calleeIdent inner
+            | SynExpr.Ident id -> Some id
+            | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
+            | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> Some(List.last ids)
+            | _ -> None
+
+        // does the resolved callee take a FormattableString anywhere? With
+        // the typed tree the answer is read off its signature — printfn's
+        // format parameter is not one, and the `$` goes. Without it, or
+        // when the callee does not resolve, ANY application keeps the `$`:
+        // Ionide's `Log.setMessageI $"..."` is an F# function whose
+        // parameter is a FormattableString, and nothing in its spelling
+        // says so (FsAutoComplete's AdaptiveServerState)
+        let calleeTakesFormattable (callee: SynExpr) =
+            match check, calleeIdent callee with
+            | Some(check: FSharpCheckFileResults), Some id ->
+                (try
+                    let r = id.idRange
+                    let lineText = source.GetLineString(r.EndLine - 1)
+
+                    match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ id.idText ]) with
+                    | Some symbolUse ->
+                        match symbolUse.Symbol with
+                        | :? FSharpMemberOrFunctionOrValue as v ->
+                            let signature = v.FullType.Format symbolUse.DisplayContext
+                            signature.Contains "FormattableString" || signature.Contains "IFormattable"
+                        | _ -> true
+                    | None -> true
+                 with _ -> // an unreadable callee keeps the `$`; fsharpanalyzer: ignore-line FR0055
+                     true)
+            | _ -> true
+
         let rec inArguments (nodes: SyntaxNode list) =
             match nodes with
             | SyntaxNode.SynExpr(SynExpr.Paren _) :: rest
             | SyntaxNode.SynExpr(SynExpr.Tuple _) :: rest -> inArguments rest
-            | SyntaxNode.SynExpr(SynExpr.App _) :: _ -> true
+            | SyntaxNode.SynExpr(SynExpr.App(funcExpr = callee)) :: _ -> calleeTakesFormattable callee
+            // a constructor's overloads are not read here: kept
             | SyntaxNode.SynExpr(SynExpr.New _) :: _ -> true
             | _ -> false
 

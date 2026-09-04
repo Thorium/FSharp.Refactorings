@@ -2,7 +2,7 @@
     "name": "fsharp-refactor-vscode",
     "displayName": "FSharp.Refactor",
     "description": "140 functional refactoring hints with one-click fixes for F# — wires the FSharp.Refactor analyzers into Ionide.",
-    "version": "0.8.1",
+    "version": "0.8.2",
     "publisher": "TuomasHietanen",
     "license": "Unlicense",
     "icon": "icon.png",
@@ -43,13 +43,26 @@
             {
                 "command": "fsharpRefactor.disable",
                 "title": "FSharp.Refactor: Remove analyzers from Ionide settings"
+            },
+            {
+                "command": "fsharpRefactor.status",
+                "title": "FSharp.Refactor: Status (versions and wiring)"
+            },
+            {
+                "command": "fsharpRefactor.run",
+                "title": "FSharp.Refactor: Run the tool on this workspace"
             }
         ]
+    },
+    "fsharpRefactorBuild": {
+        "analyzers": "0.8.2",
+        "built": "2026-09-04 02:29 UTC"
     },
     "scripts": {
         "compile": "tsc -p ."
     },
     "devDependencies": {
+        "@types/node": "^20.0.0",
         "@types/vscode": "^1.75.0",
         "@vscode/vsce": "^3.1.0",
         "typescript": "^5.4.0"

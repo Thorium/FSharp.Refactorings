@@ -1064,6 +1064,63 @@ let private writeSource (path: string) (text: string) =
 /// begin with).
 let mutable internal parseOnlyRun = false
 
+/// `fsi.CommandLineArgs` and friends live in
+/// FSharp.Compiler.Interactive.Settings.dll, which FCS references under
+/// useFsiAuxLib only when that assembly sits beside the compiler — this
+/// tool's own directory, which does not ship it. The SDK dotnet resolves
+/// for the script's directory does, so it is referenced from there;
+/// without it every script touching `fsi` read as "does not typecheck"
+/// (FSharp.Azure.Quantum's examples, all of them).
+let private fsiAuxLib =
+    let cache =
+        System.Collections.Concurrent.ConcurrentDictionary<string, string option>()
+
+    fun (scriptDir: string) ->
+        cache.GetOrAdd(
+            scriptDir,
+            fun dir ->
+                try
+                    let _, version, _ =
+                        runProcessIn (Some dir) (TimeSpan.FromSeconds 30.) "dotnet" "--version"
+
+                    let _, sdks, _ =
+                        runProcessIn (Some dir) (TimeSpan.FromSeconds 60.) "dotnet" "--list-sdks"
+
+                    let version = version.Trim()
+
+                    sdks.Split '\n'
+                    |> Array.tryPick (fun line ->
+                        let m = System.Text.RegularExpressions.Regex.Match(line.Trim(), @"^(\S+) \[(.+)\]$")
+
+                        if m.Success && m.Groups.[1].Value = version then
+                            Some(
+                                Path.Combine(
+                                    m.Groups.[2].Value,
+                                    version,
+                                    "FSharp",
+                                    "FSharp.Compiler.Interactive.Settings.dll"
+                                )
+                            )
+                        else
+                            None)
+                    |> Option.filter File.Exists
+                with _ -> // no SDK found: the script is read without fsi, as before; fsharpanalyzer: ignore-line FR0055
+                    None
+        )
+
+let private withFsiAuxLib (scriptPath: string) (options: FSharpProjectOptions) =
+    if
+        options.OtherOptions
+        |> Array.exists (fun o -> o.Contains "FSharp.Compiler.Interactive.Settings")
+    then
+        options
+    else
+        match fsiAuxLib (Path.GetDirectoryName(Path.GetFullPath scriptPath)) with
+        | Some dll ->
+            { options with
+                OtherOptions = Array.append options.OtherOptions [| $"-r:{dll}" |] }
+        | None -> options
+
 let private projectErrors (checker: FSharpChecker) (options: FSharpProjectOptions) =
     let results = checker.ParseAndCheckProject options |> Async.RunSynchronously
 
@@ -1272,6 +1329,9 @@ type private ScriptInfo =
         /// read, so nothing it #loads may be reshaped.
         Context: FileContext option
         Uses: FSharpSymbolUse[]
+        /// The first errors of a script that does not typecheck — the
+        /// reason beside the verdict.
+        Errors: string list
     }
 
 /// Keyed by script path; the write time is the invalidation, so a script
@@ -1363,6 +1423,7 @@ let private readScript (checker: FSharpChecker) (script: string) =
                     )
                     |> Async.RunSynchronously
 
+                let scriptOptions = withFsiAuxLib script scriptOptions
                 let results = checker.ParseAndCheckProject scriptOptions |> Async.RunSynchronously
 
                 let broken =
@@ -1374,7 +1435,15 @@ let private readScript (checker: FSharpChecker) (script: string) =
                 if broken then
                     { Loaded = loaded
                       Context = None
-                      Uses = [||] }
+                      Uses = [||]
+                      Errors =
+                        results.Diagnostics
+                        |> Array.filter (fun d ->
+                            d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+                        |> Array.truncate 2
+                        |> Array.map (fun d ->
+                            $"{Path.GetFileName d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}")
+                        |> List.ofArray }
                 else
                     let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions scriptOptions
 
@@ -1401,11 +1470,13 @@ let private readScript (checker: FSharpChecker) (script: string) =
                             { FileName = script
                               Source = sourceText
                               ParseTree = parsed.ParseTree }
-                      Uses = uses }
+                      Uses = uses
+                      Errors = [] }
             | _ ->
                 { Loaded = [||]
                   Context = None
-                  Uses = [||] }
+                  Uses = [||]
+                  Errors = [] }
 
         scriptCache.[script] <- (stamp, info)
         info
@@ -1488,6 +1559,9 @@ let private findScriptCallSites (checker: FSharpChecker) (root: string) (options
             | None ->
                 Out.skip
                     $"  ({Path.GetFileName script} does not typecheck, so its calls cannot be read; nothing it #loads will be reshaped)"
+
+                for e in info.Errors do
+                    Out.dim $"    {e}"
 
                 for f in loaded do
                     unverifiable.Add f |> ignore
@@ -2817,7 +2891,7 @@ let private optionsFor (checker: FSharpChecker) (parseOnly: bool) (chosenFramewo
         for d in diagnostics |> List.truncate 5 do
             eprintfn $"  (script reference: {d.Message})"
 
-        Ok options
+        Ok(withFsiAuxLib path options)
     | Target.Project(project, _) ->
         // announced BEFORE it starts: this step can take a minute, and a
         // line that only appears afterwards is no help while you are
@@ -3460,18 +3534,20 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
         let suppressed =
             System.Collections.Generic.HashSet<string * string * string * string>()
 
-        let baselineErrors =
+        let baselineErrorList =
             if skipCompilationCheck then
                 printfn "  (every source file already swept in an earlier compilation — project check skipped)"
-                0
+                [||]
             else
                 Out.dimPart "typechecking the project... "
                 Console.Out.Flush()
                 let baselineSw = Stopwatch.StartNew()
-                let n = errorCount checker options
+                let errors = projectErrors checker options
                 baselineSw.Stop()
                 Out.dim $"{baselineSw.ElapsedMilliseconds} ms"
-                n
+                errors
+
+        let baselineErrors = baselineErrorList.Length
 
         // a SCRIPT that does not resolve is not refused: scripts routinely
         // reference things fsi would supply at run time (or nothing at all —
@@ -3486,7 +3562,19 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
 
         let analyzers =
             if degradedScript then
-                analyzers |> List.filter (analyzerName >> parseOnlySafeAnalyzers.Contains)
+                // the syntactic rules, plus the one rule whose input IS the
+                // broken compilation: ScriptLoads reads the FS0039s and
+                // offers the #load or #r that would resolve them
+                analyzers
+                |> List.filter (fun m ->
+                    let name = analyzerName m
+
+                    parseOnlySafeAnalyzers.Contains name
+                    || name = "ScriptLoads"
+                    || name = "ScriptReferences"
+                    // a record expression's missing fields: a compile
+                    // error is its input too
+                    || name = "RecordFields")
             else
                 analyzers
 
@@ -3496,6 +3584,15 @@ let private runTarget (checker: FSharpChecker) (opts: Options) (showHeader: bool
             // RAISES it and is put back
             printfn
                 $"  ({baselineErrors} unresolved-reference error(s) ignored; syntactic rules only ({analyzers.Length}))"
+
+            // the first few, so "does not typecheck" has a reason next to
+            // it: a #load list missing a file, a reference to a dll not
+            // yet built, a package the script host could not resolve
+            for d in baselineErrorList |> Array.truncate 3 do
+                Out.dim $"    {Path.GetFileName d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}"
+
+            if baselineErrors > 3 then
+                Out.dim $"    ... and {baselineErrors - 3} more"
 
         if baselineErrors > 0 && not opts.ParseOnly && not degradedScript then
             Out.bad $"The project has {baselineErrors} error(s) before any fix; fix those first:"

@@ -18,6 +18,9 @@
     <Compile Include="ObjectInitializerTests.fs" />
     <Compile Include="GenerativeLoopTests.fs" />
     <Compile Include="TestReturnsTaskTests.fs" />
+    <Compile Include="ScriptLoadsTests.fs" />
+    <Compile Include="ScriptReferencesTests.fs" />
+    <Compile Include="RecordFieldsTests.fs" />
     <Compile Include="StringEmptinessTests.fs" />
     <Compile Include="CeStripTests.fs" />
     <Compile Include="ActivePatternTests.fs" />
