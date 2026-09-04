@@ -32,7 +32,11 @@ fsharp-refactor Your.fsproj
 ```
 
 It refuses a compilation that does not already build, and fails loudly if applying
-ever introduces an error. For light bulbs while you type, see
+ever introduces an error. 
+
+If you are ready to change public methods, add `--api-changes` to improve more.
+
+For light bulbs while you type, see
 [VS Code / Ionide](#vs-code--ionide) below.
 
 Point it at whatever you have — the kind is read off the path:
