@@ -30,6 +30,8 @@ type WildFieldsSuggestion =
 
 type TupleInListSuggestion =
     {
+        /// The editor's fix: the elements separated by `;`.
+        Fix: range * string * string
         Range: range
         /// Element count of the accidental tuple.
         Elements: int
@@ -124,8 +126,24 @@ let find
                    | SynExpr.Const(SynConst.Decimal _, _) -> true
                    | _ -> false)
             ->
+            // the editor's fix: the same elements separated by `;` — the
+            // list the author most likely meant
+            let original = textOfRange source e.Range
+
+            let opening, closing =
+                if original.StartsWith "[|" then
+                    "[| ", " |]"
+                else
+                    "[ ", " ]"
+
+            let separated =
+                opening
+                + (elems |> List.map (fun el -> textOfRange source el.Range) |> String.concat "; ")
+                + closing
+
             tuples.Add
-                { Range = e.Range
+                { Fix = (e.Range, original, separated)
+                  Range = e.Range
                   Elements = elems.Length }
         | _ -> ()
 

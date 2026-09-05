@@ -49,6 +49,42 @@ let private boundName (SynBinding(headPat = p)) =
     | SynPat.Named(ident = SynIdent(ident = f)) -> Some f.idText
     | _ -> None
 
+/// The ranges of the `yield!`s in tail position of a seq body: the last
+/// step of the body, reached through sequencing, bindings, `if` and
+/// `match` — the places the compiler turns a recursive `yield!` into a
+/// jump rather than a nested enumerator.
+let private tailYieldFroms (body: SynExpr) =
+    // the function position of `yield! f a b`: only a DIRECT self-call is
+    // redirected; `yield! Seq.collect walk xs` still nests an enumerator
+    // per level inside collect
+    let rec headOf (e: SynExpr) =
+        match e with
+        | SynExpr.App(isInfix = false; funcExpr = f) -> headOf f
+        | SynExpr.Paren(expr = inner)
+        | SynExpr.TypeApp(expr = inner) -> headOf inner
+        | SynExpr.Ident id -> Some id.idRange
+        | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty -> Some (List.last ids).idRange
+        | _ -> None
+
+    let rec loop (acc: range list) (pending: SynExpr list) =
+        match pending with
+        | [] -> acc
+        | e :: rest ->
+            match e with
+            | SynExpr.YieldOrReturnFrom(flags = (true, _); expr = target) ->
+                loop ((headOf target |> Option.toList) @ acc) rest
+            | SynExpr.Sequential(expr2 = e2) -> loop acc (e2 :: rest)
+            | LetOrUseE lou -> loop acc (lou.Body :: rest)
+            | SynExpr.IfThenElse(thenExpr = t; elseExpr = els) -> loop acc (t :: (Option.toList els) @ rest)
+            | SynExpr.Match(clauses = clauses)
+            | SynExpr.MatchBang(clauses = clauses) ->
+                loop acc ((clauses |> List.map (fun (SynMatchClause(resultExpr = r)) -> r)) @ rest)
+            | SynExpr.Paren(expr = inner)
+            | SynExpr.Typed(expr = inner) -> loop acc (inner :: rest)
+            | _ -> loop acc rest
+
+    loop [] [ body ]
+
 /// Find recursive self-entries inside sequence builders.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
     ignore source
@@ -65,7 +101,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
             | SynExpr.App(isInfix = false; funcExpr = IdentName builder; argExpr = SynExpr.ComputationExpr(expr = body)) when
                 seqBuilders.Contains builder
                 ->
-                Some(builder, body.Range)
+                Some(builder, body.Range, tailYieldFroms body)
             | _ -> None)
 
     if Array.isEmpty seqBodies then
@@ -157,13 +193,41 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               // when there are none, which is nearly every binding
               let ownSeqs =
                   seqBodies
-                  |> Array.filter (fun (_, seqRange) -> Range.rangeContainsRange bodyRange seqRange)
+                  |> Array.filter (fun (_, seqRange, _) -> Range.rangeContainsRange bodyRange seqRange)
+
+              // only a self-call whose RESULT is enumerated nests an
+              // enumerator: the target of a `yield!` (directly, or through
+              // Seq.collect and friends) or the source of a `for ... in`.
+              // `yield innerText' elem` calls itself for a plain value
+              let enumerated =
+                  index.Exprs
+                  |> Array.choose (fun (_, e) ->
+                      match e with
+                      | SynExpr.YieldOrReturnFrom(expr = target) when
+                          ownSeqs
+                          |> Array.exists (fun (_, s, _) -> Range.rangeContainsRange s target.Range)
+                          ->
+                          Some target.Range
+                      | SynExpr.ForEach(enumExpr = src) when
+                          ownSeqs |> Array.exists (fun (_, s, _) -> Range.rangeContainsRange s src.Range)
+                          ->
+                          Some src.Range
+                      | _ -> None)
 
               if not (Array.isEmpty ownSeqs) then
+                  // a self-call inside a tail-position `yield!` is not a
+                  // nested enumerator: the compiler turns it into a jump
+                  // (`yield! readLines (n + 1)` as the body's last step is a
+                  // loop), so only re-entries elsewhere — under a `for`, a
+                  // `while`, a `try`, or before further yields — count
                   let inOwnSeq (r: range) =
                       ownSeqs
-                      |> Array.tryPick (fun (builder, seqRange) ->
-                          if Range.rangeContainsRange seqRange r then
+                      |> Array.tryPick (fun (builder, seqRange, tails) ->
+                          if
+                              Range.rangeContainsRange seqRange r
+                              && enumerated |> Array.exists (fun en -> Range.rangeContainsRange en r)
+                              && not (tails |> List.exists (fun t -> Range.equals t r))
+                          then
                               Some(r, builder)
                           else
                               None)

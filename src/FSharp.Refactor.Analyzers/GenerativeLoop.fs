@@ -51,11 +51,27 @@ type Suggestion =
         TailAfterFlag: int
     }
 
-/// `not x` anywhere in the condition names a candidate flag.
+/// The bare identifiers of an `a || b || c` disjunction.
+let rec private orIdents (e: SynExpr) =
+    match e with
+    | SynExpr.Ident id -> [ id.idText ]
+    | SynExpr.Paren(expr = inner) -> orIdents inner
+    | SynExpr.App(funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = l); argExpr = r) when
+        op.idText = "op_BooleanOr"
+        ->
+        orIdents l @ orIdents r
+    | _ -> []
+
+/// `not x` anywhere in the condition names a candidate flag — and
+/// `not (terminated || eof)` names two.
 let rec private negatedIdents (e: SynExpr) =
     match e with
     | SynExpr.App(isInfix = false; funcExpr = SynExpr.Ident op; argExpr = SynExpr.Ident flag) when op.idText = "not" ->
         [ flag.idText ]
+    | SynExpr.App(isInfix = false; funcExpr = SynExpr.Ident op; argExpr = SynExpr.Paren(expr = inner)) when
+        op.idText = "not"
+        ->
+        orIdents inner
     | SynExpr.App(funcExpr = f; argExpr = a) -> negatedIdents f @ negatedIdents a
     | SynExpr.Paren(expr = inner) -> negatedIdents inner
     | _ -> []
@@ -158,13 +174,19 @@ let private computationBuilderRanges (index: AstIndex.Index) =
         | _ -> None)
 
 /// `x <- x + 1` and friends: an index walking a collection, not state.
+/// `x <- x + stride` and a binary search's `low <- mid + 1` are the same
+/// index arithmetic.
 let private isCounterBump (name: string) (rhs: SynExpr) =
     match rhs with
     | SynExpr.App(
         isInfix = false
         funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = SynExpr.Ident lhs)
-        argExpr = SynExpr.Const(SynConst.Int32 _, _)) ->
+        argExpr = (SynExpr.Const(SynConst.Int32 _, _) | SynExpr.Ident _)) ->
         (op.idText = "op_Addition" || op.idText = "op_Subtraction") && lhs.idText = name
+    | SynExpr.App(
+        isInfix = false
+        funcExpr = SynExpr.App(funcExpr = SingleIdent op; argExpr = SynExpr.Ident _)
+        argExpr = SynExpr.Const(SynConst.Int32 _, _)) -> op.idText = "op_Addition" || op.idText = "op_Subtraction"
     | _ -> false
 
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
@@ -180,6 +202,20 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               let sets = assignments body
               let bound = set (locallyBound body)
 
+              // a name only WRITTEN in the loop is a result being filled
+              // in, not state the next round depends on
+              let readInLoop =
+                  index.Exprs
+                  |> Array.choose (fun (_, e) ->
+                      match e with
+                      | SynExpr.Ident id when
+                          Range.rangeContainsRange cond.Range id.idRange
+                          || Range.rangeContainsRange body.Range id.idRange
+                          ->
+                          Some id.idText
+                      | _ -> None)
+                  |> Set.ofArray
+
               for flag in List.distinct flags do
                   // the flag has to be RAISED in the body, or the loop is
                   // waiting on something else entirely
@@ -187,7 +223,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                       let carried =
                           sets
                           |> List.filter (fun (n, rhs) ->
-                              n <> flag && not (bound.Contains n) && not (isCounterBump n rhs))
+                              n <> flag
+                              && not (bound.Contains n)
+                              && not (isCounterBump n rhs)
+                              && readInLoop.Contains n)
                           |> List.map fst
                           |> List.distinct
 

@@ -38,6 +38,10 @@ open System.IO
 open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
+open System.Text.RegularExpressions
+
+/// The name FS0039 complains about: "'X' is not defined".
+let private notDefined = Regex("'([^']+)' is not defined", RegexOptions.Compiled)
 
 type Suggestion =
     {
@@ -97,7 +101,7 @@ let private projectIn (dir: string) =
         None
 
 let private attributeValues (text: string) (element: string) (attribute: string) =
-    System.Text.RegularExpressions.Regex.Matches(text, $"<{element}\\s+[^>]*?{attribute}=\"([^\"]+)\"")
+    Regex.Matches(text, $"<{element}\\s+[^>]*?{attribute}=\"([^\"]+)\"")
     |> Seq.map (fun m -> m.Groups.[1].Value)
     |> List.ofSeq
 
@@ -124,8 +128,7 @@ let private projectReferences (fsproj: string) =
 
 let private assemblyName (fsproj: string) =
     try
-        let m =
-            System.Text.RegularExpressions.Regex.Match(File.ReadAllText fsproj, "<AssemblyName>([^<]+)</AssemblyName>")
+        let m = Regex.Match(File.ReadAllText fsproj, "<AssemblyName>([^<]+)</AssemblyName>")
 
         if m.Success then
             m.Groups.[1].Value.Trim()
@@ -140,11 +143,11 @@ let private declares (name: string) (file: string) =
     String.Equals(Path.GetFileNameWithoutExtension file, name, StringComparison.Ordinal)
     || (try
             let pattern =
-                $"^\\s*(module|namespace|type)\\s+(rec\\s+|internal\\s+|private\\s+|public\\s+)*([\\w.]+\\.)?{System.Text.RegularExpressions.Regex.Escape name}\\b"
+                $"^\\s*(module|namespace|type)\\s+(rec\\s+|internal\\s+|private\\s+|public\\s+)*([\\w.]+\\.)?{Regex.Escape name}\\b"
 
             File.ReadLines file
             |> Seq.truncate 80
-            |> Seq.exists (fun line -> System.Text.RegularExpressions.Regex.IsMatch(line, pattern))
+            |> Seq.exists (fun line -> Regex.IsMatch(line, pattern))
         with _ -> // fsharpanalyzer: ignore-line FR0055
             false)
 
@@ -177,8 +180,7 @@ let private relativeTo (scriptDir: string) (file: string) =
 let private missingNames (diagnostics: FSharpDiagnostic[]) =
     [ for d in diagnostics do
           if d.ErrorNumber = 39 then
-              let m =
-                  System.Text.RegularExpressions.Regex.Match(d.Message, "'([^']+)' is not defined")
+              let m = notDefined.Match d.Message
 
               // a module, namespace or type is what a #load can supply; a
               // value (`'x'`, `'fsi'`) is not, and a file that happens to

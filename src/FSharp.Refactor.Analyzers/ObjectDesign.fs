@@ -20,17 +20,30 @@ open FSharp.Compiler.Text
 open FSharp.Refactor.Text
 
 type DisposableFieldSuggestion =
-    { TypeName: string
-      FieldName: string
-      Range: range }
+    {
+        TypeName: string
+        FieldName: string
+        Range: range
+        /// The editor's fix, carried by the type's FIRST such field only:
+        /// an `interface System.IDisposable` appended to the type whose
+        /// Dispose disposes every created field. Deliberately the plain
+        /// form — no Dispose(bool), no finalizer, no GC.SuppressFinalize:
+        /// a type holding managed disposables needs none of that.
+        Fix: (range * string * string) option
+    }
 
 type StaticMemberSuggestion = { MemberName: string; Range: range }
 
 /// FR0047 (CA2213): a disposable field the type's Dispose never touches.
 type UndisposedFieldSuggestion =
-    { TypeName: string
-      FieldName: string
-      Range: range }
+    {
+        TypeName: string
+        FieldName: string
+        Range: range
+        /// The editor's fix: `field.Dispose()` as the first statement of
+        /// the type's Dispose body.
+        Fix: (range * string * string) option
+    }
 
 let private isDisposableName (name: string) = name = "System.IDisposable"
 
@@ -45,6 +58,17 @@ let private isDisposableType (t: FSharpType) =
                |> Seq.exists (fun i ->
                    i.HasTypeDefinition
                    && (i.TypeDefinition.TryFullName |> Option.exists isDisposableName)))
+    with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+        false
+
+/// Is the entity IDisposable or an implementation?
+let entityIsDisposable (entity: FSharpEntity) =
+    try
+        entity.TryFullName |> Option.exists isDisposableName
+        || entity.AllInterfaces
+           |> Seq.exists (fun i ->
+               i.HasTypeDefinition
+               && (i.TypeDefinition.TryFullName |> Option.exists isDisposableName))
     with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
         false
 
@@ -190,18 +214,106 @@ let find
                                     | SynMemberDefn.Member(
                                         memberDefn = SynBinding(
                                             headPat = SynPat.LongIdent(longDotId = SynLongIdent(id = ids))
-                                            expr = body)) when not ids.IsEmpty && (List.last ids).idText = "Dispose" ->
+                                            expr = body)) when
+                                        not ids.IsEmpty
+                                        && (let name = (List.last ids).idText in
+                                            name = "Dispose" || name = "DisposeAsync")
+                                        ->
+                                        // a Dispose that delegates to DisposeAsync
+                                        // (FsAutoComplete's progress reporter)
+                                        // disposes through the async body
                                         Some body.Range
                                     | _ -> None)
                             | _ -> [])
 
+                    // a member that calls `field.Dispose()` itself — a
+                    // Close/Unsubscribe/ref-count protocol — is manual
+                    // management, not an ownerless resource
+                    let manuallyDisposed (fieldName: string) =
+                        members
+                        |> List.exists (fun m ->
+                            match m with
+                            | SynMemberDefn.Member(memberDefn = SynBinding(expr = body)) ->
+                                (textOfRange source body.Range).Contains($"{fieldName}.Dispose")
+                            | _ -> false)
+
+                    // the members' indentation and the last member's end:
+                    // where an appended interface implementation goes
+                    let memberIndent =
+                        members
+                        |> List.tryFind (fun m ->
+                            match m with
+                            | SynMemberDefn.ImplicitCtor _ -> false
+                            | _ -> true)
+                        |> Option.map (fun m -> String.replicate m.Range.StartColumn " ")
+                        |> Option.defaultValue "    "
+
+                    let membersEnd = members |> List.tryLast |> Option.map (fun m -> m.Range.End)
+
                     if not implementsDisposable then
                         // FR0032: owns a disposable but is not disposable
-                        for fieldName, fieldRange in newDisposableFields do
+                        let leaked =
+                            newDisposableFields
+                            |> List.filter (fun (fieldName, _) -> not (manuallyDisposed fieldName))
+
+                        // a base class that is disposable already makes an
+                        // added `interface IDisposable` a duplicate; a base
+                        // that cannot be resolved is not worth the guess
+                        let baseAllowsInterface =
+                            members
+                            |> List.forall (fun m ->
+                                match m with
+                                | SynMemberDefn.Inherit(baseType = Some(SynType.LongIdent(SynLongIdent(id = ids))))
+                                | SynMemberDefn.ImplicitInherit(inheritType = SynType.LongIdent(SynLongIdent(id = ids))) when
+                                    not ids.IsEmpty
+                                    ->
+                                    let id = List.last ids
+                                    let r = id.idRange
+                                    let lineText = source.GetLineString(r.EndLine - 1)
+
+                                    (match
+                                        check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ id.idText ])
+                                     with
+                                     | Some symbolUse ->
+                                         match symbolUse.Symbol with
+                                         | :? FSharpEntity as e -> not (entityIsDisposable e)
+                                         | :? FSharpMemberOrFunctionOrValue as v ->
+                                             (try
+                                                 v.IsConstructor
+                                                 && (v.DeclaringEntity
+                                                     |> Option.map (entityIsDisposable >> not)
+                                                     |> Option.defaultValue false)
+                                              with _ -> // deliberate fail-safe probe; fsharpanalyzer: ignore-line FR0055
+                                                  false)
+                                         | _ -> false
+                                     | None -> false)
+                                | SynMemberDefn.Inherit _
+                                | SynMemberDefn.ImplicitInherit _ -> false
+                                | _ -> true)
+
+                        // one fix for the type, carried by its first field:
+                        // an IDisposable whose Dispose releases every one
+                        let typeFix =
+                            match membersEnd with
+                            | Some at when not leaked.IsEmpty && baseAllowsInterface ->
+                                let disposeLines =
+                                    leaked
+                                    |> List.map (fun (fieldName, _) -> $"{memberIndent}        {fieldName}.Dispose()")
+                                    |> String.concat "\n"
+
+                                let insertion =
+                                    $"\n\n{memberIndent}interface System.IDisposable with\n{memberIndent}    member _.Dispose() =\n{disposeLines}"
+
+                                Some(Range.mkRange typeDefn.Range.FileName at at, "", insertion)
+                            | _ -> None
+
+                        leaked
+                        |> List.iteri (fun i (fieldName, fieldRange) ->
                             disposables.Add
                                 { TypeName = typeName
                                   FieldName = fieldName
-                                  Range = fieldRange }
+                                  Range = fieldRange
+                                  Fix = if i = 0 then typeFix else None })
                     else
                         // FR0047 (CA2213): disposable, but the field is
                         // never touched by any Dispose body
@@ -211,10 +323,28 @@ let find
                                 |> List.exists (fun body -> mentions (Set.singleton fieldName) body)
 
                             if not (disposeBodies.IsEmpty || touched) then
+                                // `field.Dispose()` as the first statement of
+                                // the Dispose body — replacing a `()` body,
+                                // else a line above what is there, at its
+                                // column
+                                let fix =
+                                    disposeBodies
+                                    |> List.tryHead
+                                    |> Option.map (fun body ->
+                                        let bodyText = textOfRange source body
+
+                                        if bodyText.Trim() = "()" then
+                                            body, bodyText, $"{fieldName}.Dispose()"
+                                        else
+                                            let at = Range.mkRange body.FileName body.Start body.Start
+                                            let indent = String.replicate body.StartColumn " "
+                                            at, "", $"{fieldName}.Dispose()\n{indent}")
+
                                 undisposed.Add
                                     { TypeName = typeName
                                       FieldName = fieldName
-                                      Range = fieldRange }
+                                      Range = fieldRange
+                                      Fix = fix }
 
                     // FR0033: instance members touching no instance state —
                     // except where instance-ness is a contract (CE builders,

@@ -77,3 +77,50 @@ let ``chunkBySize in the callback pipeline still suppresses`` () =
         queriesIn
             "open System.Linq\ntype Db() =\n    member _.Orders = [ 1; 2 ].AsQueryable()\nlet f (db: Db) (xs: int list) =\n    xs |> List.chunkBySize 50 |> List.iter (fun batch ->\n        for o in db.Orders do\n            printfn \"%d %d\" batch.Length o)"
     )
+
+[<Fact>]
+let ``FR0028: a nested for inside a query expression is a join, not an N+1`` () =
+    // SQLProvider's navigation tests: `for order in customer.Orders do`
+    // under `query { }` becomes one SQL statement
+    Assert.Empty(
+        queriesIn
+            "open System.Linq\ntype Db() =\n    member _.People = [ 1; 2 ].AsQueryable()\n    member _.Orders = [ 3; 4 ].AsQueryable()\nlet f (db: Db) =\n    query {\n        for p in db.People do\n            for o in db.Orders do\n                where (o > p)\n                select (p, o)\n    }"
+    )
+
+[<Fact>]
+let ``FR0028: an in-memory outer loop over a queryable inside a query expression is still an N+1`` () =
+    // only a queryable OUTER source makes the nested for a translated join;
+    // a list outside the provider's reach runs the inner query per element
+    let suggestions =
+        queriesIn
+            "open System.Linq\ntype Db() =\n    member _.Orders = [ 3; 4 ].AsQueryable()\nlet f (db: Db) (ids: int list) =\n    query {\n        for i in ids do\n            for o in db.Orders do\n                where (o > i)\n                select (i, o)\n    }"
+
+    match suggestions with
+    | [ s ] -> Assert.Equal("db.Orders", s.SourceText)
+    | other -> failwithf "Expected exactly one N+1 note, got %A" other
+
+[<Fact>]
+let ``FR0028: a nested for over a sub-query inside a query expression is one statement`` () =
+    Assert.Empty(
+        queriesIn
+            "open System.Linq\ntype Db() =\n    member _.People = [ 1; 2 ].AsQueryable()\n    member _.Orders = [ 3; 4 ].AsQueryable()\nlet f (db: Db) =\n    query {\n        for p in (query { for x in db.People do select x }) do\n            for o in db.Orders do\n                where (o > p)\n                select (p, o)\n    }"
+    )
+
+[<Fact>]
+let ``a paging or batched query under a loop is one statement per batch, not N+1`` () =
+    // SQLProvider's pagination and batching tests: skip/take driven by the
+    // loop, or a where on the outer element's batch
+    let scaffold =
+        "module Test\nopen System.Linq\ntype Order = { OrderId: int }\nlet orders : IQueryable<Order> = ([] : Order list).AsQueryable()\n"
+
+    let paging =
+        scaffold
+        + "let pages () =\n    let mutable page = 0\n    while page < 3 do\n        let batch = query { for o in orders do\n                            skip (page * 10)\n                            take 10\n                            select o.OrderId }\n        page <- page + 1"
+
+    Assert.Empty(queriesIn paging)
+
+    let batched =
+        scaffold
+        + "let batches (ids: int[]) =\n    for chunk in Array.chunkBySize 5 ids do\n        let hits = query { for o in orders do\n                           where (chunk.Contains o.OrderId)\n                           select o.OrderId }\n        ignore hits"
+
+    Assert.Empty(queriesIn batched)

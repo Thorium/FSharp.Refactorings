@@ -32,6 +32,11 @@ type Suggestion =
         /// Present for the canonical shape: whole-region replacement.
         Fix: (range * string * string) option
         LockText: string
+        /// True when a try/finally with the matching Exit guards the Enter
+        /// — the lock cannot leak; only the `lock` rewrite is on offer, or
+        /// withheld when a gate (a computation bind, a foreign mutable, a
+        /// directive) blocks it. False for a bare Enter, the actual leak.
+        Guarded: bool
     }
 
 /// `Monitor.<method> arg` with the single argument expression.
@@ -177,7 +182,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       yield
                           { Range = enterExpr.Range
                             Fix = fix
-                            LockText = lockText }
+                            LockText = lockText
+                            Guarded = true }
                   | _ -> () ]
 
         // bare Enter with no guarding try at all: leaks on first exception
@@ -191,7 +197,8 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       ->
                       { Range = e.Range
                         Fix = None
-                        LockText = textOfRange source lockArg.Range }
+                        LockText = textOfRange source lockArg.Range
+                        Guarded = false }
                   | _ -> () ]
 
         canonical @ bare

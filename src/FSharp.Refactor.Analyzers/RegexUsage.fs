@@ -26,6 +26,7 @@ open FSharp.Compiler.Text
 open FSharp.Analyzers.SDK
 open FSharp.Analyzers.SDK.ASTCollecting
 open FSharp.Refactor.Text
+open System.Text.RegularExpressions
 
 [<RequireQualifiedAccess>]
 type RegexSuggestionKind =
@@ -269,15 +270,53 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
 let findInvalidPatterns (parseTree: ParsedInput) : (range * string * string) list =
     let index = AstIndex.ofTree parseTree
 
-    let check (patternExpr: SynExpr) =
+    // the bare `Regex(...)` spelling is a constructor only under the open;
+    // elsewhere it could be anything called Regex
+    let regexOpened =
+        index.Decls
+        |> Array.exists (fun (_, decl) ->
+            match decl with
+            | SynModuleDecl.Open(target = SynOpenDeclTarget.ModuleOrNamespace(longId = SynLongIdent(id = ids))) ->
+                (ids |> List.map (fun i -> i.idText) |> String.concat ".") = "System.Text.RegularExpressions"
+            | _ -> false)
+
+    // the options the call spells out, when they are literal flags: a
+    // pattern that is valid only under IgnorePatternWhitespace or
+    // ECMAScript must be compiled the way it will run
+    let optionsOf (args: SynExpr list) =
+        let rec names (e: SynExpr) =
+            match e with
+            | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
+                ids.Length >= 2 && ids.[ids.Length - 2].idText = "RegexOptions"
+                ->
+                [ (List.last ids).idText ]
+            | SynExpr.App(funcExpr = f; argExpr = a) -> names f @ names a
+            | SynExpr.Paren(expr = inner) -> names inner
+            | _ -> []
+
+        args
+        |> List.collect names
+        |> List.fold
+            (fun (acc: RegexOptions) name ->
+                match Enum.TryParse<RegexOptions> name with
+                | true, flag -> acc ||| flag
+                | _ -> acc)
+            RegexOptions.None
+
+    let check (options: RegexOptions) (patternExpr: SynExpr) =
         match patternExpr with
         | StringLiteral pattern ->
             try
-                System.Text.RegularExpressions.Regex pattern |> ignore
+                Regex(pattern, options) |> ignore
                 None
-            with :? System.ArgumentException as ex ->
+            with :? ArgumentException as ex ->
                 Some(patternExpr.Range, pattern, ex.Message)
         | _ -> None
+
+    let argsOf (arg: SynExpr) =
+        match stripParens arg with
+        | SynExpr.Tuple(exprs = es) -> es
+        | single -> [ single ]
 
     [ for _, expr in index.Exprs do
           match expr with
@@ -289,9 +328,9 @@ let findInvalidPatterns (parseTree: ParsedInput) : (range * string * string) lis
                || methodName = "Replace"
                || methodName = "Split")
               ->
-              match stripParens arg with
-              | SynExpr.Tuple(exprs = _ :: patternArg :: _) ->
-                  match check patternArg with
+              match argsOf arg with
+              | _ :: patternArg :: rest ->
+                  match check (optionsOf rest) patternArg with
                   | Some bad -> bad
                   | None -> ()
               | _ -> ()
@@ -299,23 +338,29 @@ let findInvalidPatterns (parseTree: ParsedInput) : (range * string * string) lis
           | SynExpr.New(targetType = SynType.LongIdent(SynLongIdent(id = tids)); expr = arg) when
               not tids.IsEmpty && (List.last tids).idText = "Regex"
               ->
-              let first =
-                  match stripParens arg with
-                  | SynExpr.Tuple(exprs = p :: _) -> p
-                  | single -> single
-
-              match check first with
-              | Some bad -> bad
-              | None -> ()
+              match argsOf arg with
+              | first :: rest ->
+                  match check (optionsOf rest) first with
+                  | Some bad -> bad
+                  | None -> ()
+              | [] -> ()
+          // the dotted spelling anywhere, the bare one under the open
           | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) when
               not ids.IsEmpty && (List.last ids).idText = "Regex"
               ->
-              let first =
-                  match stripParens arg with
-                  | SynExpr.Tuple(exprs = p :: _) -> p
-                  | single -> single
-
-              match check first with
-              | Some bad -> bad
-              | None -> ()
+              match argsOf arg with
+              | first :: rest ->
+                  match check (optionsOf rest) first with
+                  | Some bad -> bad
+                  | None -> ()
+              | [] -> ()
+          | SynExpr.App(isInfix = false; funcExpr = SynExpr.Ident ctor; argExpr = arg) when
+              ctor.idText = "Regex" && regexOpened
+              ->
+              match argsOf arg with
+              | first :: rest ->
+                  match check (optionsOf rest) first with
+                  | Some bad -> bad
+                  | None -> ()
+              | [] -> ()
           | _ -> () ]

@@ -235,6 +235,8 @@ type private Options =
         /// List fix-less advisory notes inline instead of the one-line
         /// per-category summary.
         Notes: bool
+        /// --notes only: report the fix-less findings alone; nothing is applied.
+        NotesOnly: bool
         /// Machine-readable stdout: prose moves to stderr, and the run's
         /// findings leave as one JSON document on stdout.
         Json: bool
@@ -291,8 +293,9 @@ OPTIONS
                         fixes on multi-targeted projects. The fixes stay
                         plain, and any that break a legacy framework are
                         simply put back by the final build check
-  --report <file>       write every finding as SARIF 2.1.0 — the format CI
-                        turns into inline annotations. Pairs with --dry-run
+  --report <file>       write every finding to a file: .sarif (SARIF 2.1.0,
+                        what CI turns into inline annotations), .html (a
+                        self-contained page) or .csv. Pairs with --dry-run
   --parse-only          no MSBuild, no reference resolution: sources come
                         straight from the fsproj and only the 55 of 113
                         analyzers that never consult the typechecker run.
@@ -313,10 +316,14 @@ OPTIONS
   --honor-suppressions  honor every suppression comment regardless of the
                         config's "suppressions" policy — the CI override
                         for a repo that wants comments inert locally
-  --notes               list fix-less advisory notes inline. By default a
+  --notes [on|off|only] on (the bare flag) lists fix-less advisory notes
+                        inline; only lists nothing but them. By default a
                         run prints its FIXES and ends with one per-category
                         note count; SARIF (--report) and --format json
                         always carry the notes in full
+  --notes only          a review pass: every rule runs, only the findings
+                        without a fix are listed (inline), nothing is
+                        written. Combine with --report for a notes file
   --format json         machine-readable stdout: progress prose moves to
                         stderr and the findings leave as one JSON document.
                         The default stays human-readable
@@ -391,6 +398,24 @@ let rec private parseArgsLoop opts args =
     | "--baseline" :: file :: rest -> parseArgsLoop { opts with Baseline = Some file } rest
     | "--fail-on-findings" :: rest -> parseArgsLoop { opts with FailOnFindings = true } rest
     | "--honor-suppressions" :: rest -> parseArgsLoop { opts with HonorSuppressions = true } rest
+    // --notes on|off|only: on lists the notes inline, only lists nothing
+    // but them, off is the default; a bare --notes is on
+    | "--notes" :: ("off" | "on" | "only" as mode) :: rest ->
+        match mode with
+        | "off" ->
+            parseArgsLoop
+                { opts with
+                    Notes = false
+                    NotesOnly = false }
+                rest
+        | "on" -> parseArgsLoop { opts with Notes = true } rest
+        | _ ->
+            parseArgsLoop
+                { opts with
+                    NotesOnly = true
+                    Notes = true
+                    DryRun = true }
+                rest
     | "--notes" :: rest -> parseArgsLoop { opts with Notes = true } rest
     | "--format" :: "json" :: rest -> parseArgsLoop { opts with Json = true } rest
     | "--format" :: other :: _ -> Error $"--format knows 'json' (the default output is human-readable); got '{other}'"
@@ -461,6 +486,7 @@ let private parseArgs (argv: string[]) =
           FailOnFindings = false
           HonorSuppressions = false
           Notes = false
+          NotesOnly = false
           Json = false
           ListRules = false
           Mcp = false
@@ -750,10 +776,64 @@ let private parseOnlyArgs (projectPath: string) =
 
         Ok(Array.append defines sources)
 
+/// A repository cloned and never built: paket declared, its restore targets
+/// missing, and every project failing with "Paket.Restore.targets was not
+/// found". Mended here, once per root, with the restores the repository
+/// itself documents (dotnet tool restore, dotnet paket restore) — unless a
+/// global.json pins an SDK this machine lacks, when those commands cannot
+/// run either and the person is told what to run after installing it.
+let private preparedRoots =
+    System.Collections.Concurrent.ConcurrentDictionary<string, bool>()
+
+let private ensureRestorable (projectPath: string) =
+    let rec findRoot (dir: DirectoryInfo) =
+        if isNull dir then
+            None
+        elif File.Exists(Path.Combine(dir.FullName, "paket.dependencies")) then
+            Some dir.FullName
+        else
+            findRoot dir.Parent
+
+    match findRoot (DirectoryInfo(Path.GetDirectoryName projectPath)) with
+    | Some root when not (File.Exists(Path.Combine(root, ".paket", "Paket.Restore.targets"))) ->
+        preparedRoots.GetOrAdd(
+            root,
+            fun _ ->
+                let sdkCode, sdkOut, sdkErr =
+                    runProcessIn (Some root) (TimeSpan.FromMinutes 1.) "dotnet" "--version"
+
+                if sdkCode <> 0 && sdkPinUnsatisfied sdkOut sdkErr then
+                    printfn
+                        $"  paket.dependencies without .paket/Paket.Restore.targets in {root}, and its global.json pins an SDK not installed here: after installing it, run `dotnet tool restore` and `dotnet paket restore` there"
+                else
+                    printfn
+                        $"  paket.dependencies without .paket/Paket.Restore.targets in {root} — running the restores the repository documents"
+
+                    let steps =
+                        [ if File.Exists(Path.Combine(root, ".config", "dotnet-tools.json")) then
+                              "tool restore"
+                          "paket restore" ]
+
+                    for step in steps do
+                        let code, out, err =
+                            runProcessIn (Some root) (TimeSpan.FromMinutes 10.) "dotnet" step
+
+                        if code <> 0 then
+                            let text = (err + out).Trim()
+                            eprintfn $"  (dotnet {step} failed: {text.Substring(0, min 300 text.Length)})"
+                        else
+                            printfn $"  dotnet {step}: done"
+
+                true
+        )
+        |> ignore
+    | _ -> ()
+
 let private fscArgs (chosenFramework: string) (projectPath: string) =
     // msbuild runs from the project's own directory (its global.json), so a
     // path given relative to the caller's directory must become absolute
     let projectPath = Path.GetFullPath projectPath
+    ensureRestorable projectPath
 
     let projectText =
         try
@@ -962,6 +1042,24 @@ let private cliAnalyzers () =
           for m in t.GetMethods(BindingFlags.Static ||| BindingFlags.Public) do
               if m.GetCustomAttributes(typeof<CliAnalyzerAttribute>, false).Length > 0 then
                   m ]
+
+/// FSREF_EDITOR_OFFERS=1: the [<EditorAnalyzer>] wrappers run too, and
+/// their editor-only offers apply like any fix — the way to put every
+/// offer through the build check on real code before an editor gets it.
+/// Alternatives of one finding are separate messages at one range; the
+/// overlap rule keeps the first. A verification switch, not a mode: the
+/// editor-only offers are editor-only because a person picks among them.
+let private editorOffers =
+    Environment.GetEnvironmentVariable "FSREF_EDITOR_OFFERS" = "1"
+
+let private editorAnalyzers =
+    lazy
+        (let assembly = typeof<FSharp.Refactor.RedundantParens.Suggestion>.Assembly
+
+         [ for t in assembly.GetTypes() do
+               for m in t.GetMethods(BindingFlags.Static ||| BindingFlags.Public) do
+                   if m.GetCustomAttributes(typeof<EditorAnalyzerAttribute>, false).Length > 0 then
+                       m ])
 
 /// Analyzers whose CLI wrappers never touch CheckFileResults — the set a
 /// --parse-only run may execute against an unresolvable compilation. The
@@ -2020,6 +2118,10 @@ type ReportedFinding =
         EndColumn: int
         /// Does a quick fix exist, or is this a note?
         Fixable: bool
+        /// The fix's edits — (startLine, startColumn, endLine, endColumn,
+        /// original, replacement) — so a report reader can render or apply
+        /// them.
+        Fixes: (int * int * int * int * string * string) list
         /// Stable identity across line shifts and sessions: a hash of the
         /// rule code, the file's NAME (not path — checkouts differ), and the
         /// whitespace-normalized source lines around the finding. Two
@@ -2028,6 +2130,10 @@ type ReportedFinding =
         Fingerprint: string
         /// The finding's own line(s) with one line of margin.
         Snippet: string
+        /// The 1-based first and last line the snippet covers.
+        SnippetLines: int * int
+        /// The text of the finding's range itself, as the source spells it.
+        RegionText: string
     }
 
 /// The fingerprint version key used in SARIF partialFingerprints.
@@ -2052,11 +2158,20 @@ let private fingerprintAndSnippet (source: ISourceText) (file: string) (code: st
 
         (sha.ComputeHash bytes)[..7] |> Array.map (sprintf "%02x") |> String.concat ""
 
+    let snippetFirst = clamp (r.StartLine - 2)
+    let snippetLast = clamp r.EndLine
+
     let snippet =
-        [ for l in clamp (r.StartLine - 2) .. clamp r.EndLine -> source.GetLineString l ]
+        [ for l in snippetFirst..snippetLast -> source.GetLineString l ]
         |> String.concat "\n"
 
-    hash, snippet
+    let regionText =
+        try
+            source.GetSubTextFromRange r
+        with _ -> // fsharpanalyzer: ignore-line FR0055
+            ""
+
+    hash, snippet, (snippetFirst + 1, snippetLast + 1), regionText
 
 /// Fingerprints an earlier run accepted (--baseline): findings matching
 /// them are neither reported nor fixed this run.
@@ -2079,6 +2194,10 @@ let mutable private honorAllSuppressions = false
 /// fixes are the product; held notes are counted per category and
 /// summarized at the end (SARIF/JSON always carry them in full).
 let mutable private showNotes = false
+
+/// --notes only: findings that carry a fix are dropped before they are
+/// reported or applied, so the run is the advisory notes alone.
+let mutable private notesOnly = false
 
 /// Category name -> held note count for the run summary.
 let private heldNoteCounts = System.Collections.Generic.Dictionary<string, int>()
@@ -2105,88 +2224,256 @@ let private commentsIn (parseTree: ParsedInput) (source: ISourceText) =
 
     ranges |> List.map (fun r -> r, textOfRange source r)
 
-/// Minimal SARIF 2.1.0, hand-built with System.Text.Json: enough for
-/// GitHub code scanning to render inline annotations, no Sarif.Sdk
-/// dependency. Paths are relativized against the working directory when
-/// they fall under it — that is what code-scanning matches blobs by.
-let private writeSarifReport (path: string) (findings: ReportedFinding seq) =
-    let root = Directory.GetCurrentDirectory().Replace('\\', '/').TrimEnd('/') + "/"
+/// The tool's version as Directory.Build.props set it: the informational
+/// version, minus any +sha suffix a source build carries.
+let private toolVersion =
+    lazy
+        (let asm = Reflection.Assembly.GetExecutingAssembly()
 
-    let uriOf (file: string) =
-        let full = Path.GetFullPath(file).Replace('\\', '/')
+         asm.GetCustomAttributes(typeof<Reflection.AssemblyInformationalVersionAttribute>, false)
+         |> Array.tryHead
+         |> Option.map (fun a -> (a :?> Reflection.AssemblyInformationalVersionAttribute).InformationalVersion)
+         |> Option.map (fun v -> v.Split('+').[0])
+         |> Option.defaultValue (string (asm.GetName().Version)))
 
-        if full.StartsWith(root, StringComparison.OrdinalIgnoreCase) then
-            full.Substring root.Length
+/// When this process started, for the report's invocation record.
+let private startedUtc = DateTime.UtcNow
+
+/// The source root every report location is relative to: the repository
+/// that holds the target (code scanning matches blobs from the repo root),
+/// else the target's own directory, else where the tool ran. Forward
+/// slashes, trailing slash.
+let private sourceRootOf (target: string) =
+    let targetDir =
+        try
+            let full = Path.GetFullPath target
+
+            if Directory.Exists full then
+                full
+            else
+                Path.GetDirectoryName full
+        with _ -> // fsharpanalyzer: ignore-line FR0055
+            Directory.GetCurrentDirectory()
+
+    let rec repoRoot (dir: string) depth =
+        if depth > 24 || String.IsNullOrEmpty dir then
+            None
+        elif
+            Directory.Exists(Path.Combine(dir, ".git"))
+            || File.Exists(Path.Combine(dir, ".git"))
+        then
+            Some dir
         else
-            // an absolute path is not a valid SARIF uri; a file outside the
-            // working directory gets the absolute scheme instead
-            Uri(Path.GetFullPath file).AbsoluteUri
+            repoRoot (Path.GetDirectoryName dir) (depth + 1)
 
-    // Every analyzer speaks at Hint severity — that is the SDK's editor
-    // channel, not a statement about how much the finding matters — so
-    // mapping severity alone stamped `note` on all of them and a
-    // swallowed exception rendered exactly like a redundant paren. The
-    // CATEGORY is the judgement the rules actually make, so it is what
-    // the report carries: correctness earns a warning, the rest stay
-    // notes. Nothing becomes an error — every finding here is advice
-    // about code that compiles.
-    let levelOf (code: string) severity =
-        match severity with
-        | Severity.Error -> "error"
-        | Severity.Warning -> "warning"
-        | Severity.Info
-        | Severity.Hint ->
+    let chosen =
+        repoRoot targetDir 0
+        |> Option.defaultValue (
+            if String.IsNullOrEmpty targetDir then
+                Directory.GetCurrentDirectory()
+            else
+                targetDir
+        )
+
+    chosen.Replace('\\', '/').TrimEnd('/') + "/"
+
+/// A file's path relative to the root when it sits under it, else the
+/// full path.
+let private relativeToRoot (root: string) (file: string) =
+    let full = Path.GetFullPath(file).Replace('\\', '/')
+
+    if full.StartsWith(root, StringComparison.OrdinalIgnoreCase) then
+        full.Substring root.Length
+    else
+        full
+
+// Every analyzer speaks at Hint severity — that is the SDK's editor
+// channel, not a statement about how much the finding matters — so
+// mapping severity alone stamped `note` on all of them and a swallowed
+// exception rendered exactly like a redundant paren. The CATEGORY is
+// the judgement the rules actually make, so it is what the reports
+// carry: correctness earns a warning, the rest stay notes. Nothing
+// becomes an error — every finding here is advice about code that
+// compiles.
+let private reportLevel (code: string) severity =
+    match severity with
+    | Severity.Error -> "error"
+    | Severity.Warning -> "warning"
+    | Severity.Info
+    | Severity.Hint ->
+        // a priority rule is a likely defect whatever its category
+        if RuleCatalog.isPriority code then
+            "warning"
+        else
             match RuleCatalog.categoryOf code with
             | RuleCatalog.Category.Correctness -> "warning"
             | _ -> "note"
 
-    let categoryOf (code: string) =
-        RuleCatalog.name (RuleCatalog.categoryOf code)
+let private reportCategory (code: string) =
+    RuleCatalog.name (RuleCatalog.categoryOf code)
 
-    // one entry per rule the run surfaced: code scanning groups and
-    // filters by these, and without them every finding is an opaque id
+/// The console message ends in its category tag; the reports carry the
+/// category as its own column, so the sentence stands alone there.
+let private plainMessage (f: ReportedFinding) =
+    let tag = $" [{reportCategory f.Code}]"
+
+    if f.Message.EndsWith tag then
+        f.Message.Substring(0, f.Message.Length - tag.Length)
+    else
+        f.Message
+
+/// SARIF 2.1.0, hand-built with System.Text.Json (no Sarif.Sdk dependency).
+/// The layout is the standard's; what makes the file read well is the
+/// optional content it allows, all of which is here: a tool.driver with a
+/// version and an information link, one rule entry per surfaced code with
+/// its description, help link and default level, results carrying
+/// ruleIndex, level, a fingerprint, the range's text plus a context
+/// region and — where a fix exists — the fix itself as artifactChanges
+/// (code scanning renders those as suggested changes), locations under a
+/// `%SRCROOT%` base id, an artifact table, an automation id per target,
+/// and an invocation record with times and the command line.
+let private writeSarifReport (path: string) (target: string) (findings: ReportedFinding seq) =
+    let root = sourceRootOf target
+
+    let fileUri (dir: string) =
+        Uri(dir.Replace('/', Path.DirectorySeparatorChar)).AbsoluteUri
+
+    let rootUri = fileUri root
+
+    // a location: relative to %SRCROOT% when the file sits under the root,
+    // absolute otherwise
+    let artifactLocation (file: string) =
+        let relative = relativeToRoot root file
+
+        if relative <> Path.GetFullPath(file).Replace('\\', '/') then
+            dict [ "uri", box relative; "uriBaseId", box "%SRCROOT%" ]
+        else
+            dict [ "uri", box (Uri(Path.GetFullPath file).AbsoluteUri) ]
+
+    let regionEntries (startLine, startColumn, endLine, endColumn) =
+        [ "startLine", box (max 1 startLine)
+          "startColumn", box (startColumn + 1)
+          "endLine", box (max 1 endLine)
+          "endColumn", box (endColumn + 1) ]
+
+    let region bounds = dict (regionEntries bounds)
+
+    // one entry per rule the run surfaced, in code order: code scanning
+    // groups and filters by these, and without them every finding is an
+    // opaque id. The description is the catalog's one line; help points at
+    // the rule table
+    let codes =
+        findings |> Seq.map (fun f -> f.Code) |> Seq.distinct |> Seq.sort |> List.ofSeq
+
+    let ruleIndex = codes |> List.mapi (fun i code -> code, i) |> Map.ofList
+
     let rulesMetadata =
-        findings
-        |> Seq.map (fun f -> f.Code)
-        |> Seq.distinct
-        |> Seq.sort
-        |> Seq.map (fun code ->
+        codes
+        |> List.map (fun code ->
+            let description = RuleCatalog.describe code
+            let category = reportCategory code
+
             dict
                 [ "id", box code
-                  "defaultConfiguration", box (dict [ "level", box (levelOf code Severity.Hint) ])
-                  "properties", box (dict [ "category", box (categoryOf code); "tags", box [ categoryOf code ] ]) ])
+                  "name", box code
+                  "shortDescription", box (dict [ "text", box description ])
+                  "fullDescription", box (dict [ "text", box $"{description} ({category} rule of fsharp-refactor)" ])
+                  "helpUri", box "https://github.com/Thorium/fsharp-refactor/blob/main/Rules.md"
+                  "help", box (dict [ "text", box $"See {code} in Rules.md and the README's rule table." ])
+                  "defaultConfiguration", box (dict [ "level", box (reportLevel code Severity.Hint) ])
+                  "properties",
+                  box (dict [ "category", box category; "tags", box [ category; "fsharp"; "refactoring" ] ]) ])
+
+    // every file a finding names, once, in path order: the run's artifact
+    // table, which results point into by relative uri
+    let artifacts =
+        findings
+        |> Seq.map (fun f -> Path.GetFullPath f.File)
+        |> Seq.distinct
+        |> Seq.sort
+        |> Seq.map (fun file -> dict [ "location", box (artifactLocation file); "roles", box [ "analysisTarget" ] ])
         |> List.ofSeq
 
     let results =
         [ for f in findings ->
-              dict
+              let snippetStart, snippetEnd = f.SnippetLines
+
+              let entries =
                   [ "ruleId", box f.Code
-                    "level", box (levelOf f.Code f.Severity)
-                    "message", box (dict [ "text", box f.Message ])
+                    "ruleIndex", box ruleIndex.[f.Code]
+                    "level", box (reportLevel f.Code f.Severity)
+                    "message", box (dict [ "text", box (plainMessage f) ])
                     // stable across line shifts and sessions; the baseline
                     // mechanism keys on this
                     "partialFingerprints", box (dict [ FingerprintKey, box f.Fingerprint ])
-                    "properties", box (dict [ "fixable", box f.Fixable; "category", box (categoryOf f.Code) ])
+                    "properties", box (dict [ "autoFixable", box f.Fixable; "category", box (reportCategory f.Code) ])
                     "locations",
                     box
                         [ dict
                               [ "physicalLocation",
                                 box (
                                     dict
-                                        [ "artifactLocation", box (dict [ "uri", box (uriOf f.File) ])
+                                        [ "artifactLocation", box (artifactLocation f.File)
+                                          // the range itself, with its text
                                           "region",
                                           box (
+                                              dict (
+                                                  regionEntries (f.StartLine, f.StartColumn, f.EndLine, f.EndColumn)
+                                                  @ [ "snippet", box (dict [ "text", box f.RegionText ]) ]
+                                              )
+                                          )
+                                          // the surrounding lines: saves the
+                                          // reader (human or agent) one
+                                          // file-open per finding
+                                          "contextRegion",
+                                          box (
                                               dict
-                                                  [ "startLine", box (max 1 f.StartLine)
-                                                    "startColumn", box (f.StartColumn + 1)
-                                                    "endLine", box (max 1 f.EndLine)
-                                                    "endColumn", box (f.EndColumn + 1)
-                                                    // saves the reader (human
-                                                    // or agent) one file-open
-                                                    // per finding
+                                                  [ "startLine", box snippetStart
+                                                    "endLine", box snippetEnd
                                                     "snippet", box (dict [ "text", box f.Snippet ]) ]
                                           ) ]
-                                ) ] ] ] ]
+                                ) ] ] ]
+
+              // the fix as SARIF spells it: code scanning shows it as a
+              // suggested change, and any consumer can apply it
+              let fixes =
+                  match f.Fixes with
+                  | [] -> []
+                  | edits ->
+                      [ "fixes",
+                        box
+                            [ dict
+                                  [ "description", box (dict [ "text", box $"{f.Code}: {RuleCatalog.describe f.Code}" ])
+                                    "artifactChanges",
+                                    box
+                                        [ dict
+                                              [ "artifactLocation", box (artifactLocation f.File)
+                                                "replacements",
+                                                box
+                                                    [ for (sl, sc, el, ec, _, text) in edits ->
+                                                          dict
+                                                              [ "deletedRegion", box (region (sl, sc, el, ec))
+                                                                "insertedContent", box (dict [ "text", box text ]) ] ] ] ] ] ] ]
+
+              dict (entries @ fixes) ]
+
+    let invocation =
+        dict
+            [ "executionSuccessful", box true
+              "startTimeUtc", box (startedUtc.ToString("o"))
+              "endTimeUtc", box (DateTime.UtcNow.ToString("o"))
+              "workingDirectory",
+              box (
+                  dict [ "uri", box (fileUri (Directory.GetCurrentDirectory().Replace('\\', '/').TrimEnd('/') + "/")) ]
+              )
+              "commandLine", box (Environment.CommandLine) ]
+
+    // the id code scanning files this run under: one per target, so a
+    // repository with several solutions keeps their reports apart
+    let automationId =
+        let name = Path.GetFileName(target.TrimEnd('\\', '/'))
+        let name = if String.IsNullOrEmpty name then "run" else name
+        $"fsharp-refactor/{name}/"
 
     let report =
         dict
@@ -2202,6 +2489,9 @@ let private writeSarifReport (path: string) (findings: ReportedFinding seq) =
                                     box (
                                         dict
                                             [ "name", box "fsharp-refactor"
+                                              "fullName", box "fsharp-refactor: F# refactoring analyzers and apply tool"
+                                              "version", box toolVersion.Value
+                                              "semanticVersion", box toolVersion.Value
                                               // the URL the package and --help both publish; this
                                               // one said FSharp.Refactorings, and it is the link
                                               // GitHub code scanning puts in front of users
@@ -2209,14 +2499,308 @@ let private writeSarifReport (path: string) (findings: ReportedFinding seq) =
                                               "rules", box rulesMetadata ]
                                     ) ]
                           )
+                          "automationDetails", box (dict [ "id", box automationId ])
+                          "originalUriBaseIds", box (dict [ "%SRCROOT%", box (dict [ "uri", box rootUri ]) ])
+                          "invocations", box [ invocation ]
+                          "artifacts", box artifacts
+                          "columnKind", box "utf16CodeUnits"
                           "results", box results ] ] ]
 
     File.WriteAllText(path, JsonSerializer.Serialize(report, JsonSerializerOptions(WriteIndented = true)))
 
+/// CSV, one row per finding, RFC 4180 quoting, UTF-8 with a BOM so Excel
+/// opens it as text rather than guessing. The columns are what a
+/// spreadsheet triage needs: rule, category, level, file (relative to the
+/// source root), the 1-based range, whether a fix exists, the message,
+/// and the fingerprint the baseline keys on.
+let private writeCsvReport (path: string) (target: string) (findings: ReportedFinding seq) =
+    let root = sourceRootOf target
+
+    let cell (text: string) =
+        if text.IndexOfAny [| ','; '"'; '\n'; '\r' |] >= 0 then
+            "\"" + text.Replace("\"", "\"\"") + "\""
+        else
+            text
+
+    let row (cells: string list) =
+        cells |> List.map cell |> String.concat ","
+
+    let lines =
+        seq {
+            yield
+                row
+                    [ "Rule"
+                      "Category"
+                      "Level"
+                      "File"
+                      "StartLine"
+                      "StartColumn"
+                      "EndLine"
+                      "EndColumn"
+                      "AutoFixable"
+                      "Message"
+                      "Description"
+                      "Fingerprint" ]
+
+            for f in findings do
+                yield
+                    row
+                        [ f.Code
+                          reportCategory f.Code
+                          reportLevel f.Code f.Severity
+                          relativeToRoot root f.File
+                          string (max 1 f.StartLine)
+                          string (f.StartColumn + 1)
+                          string (max 1 f.EndLine)
+                          string (f.EndColumn + 1)
+                          (if f.Fixable then "yes" else "no")
+                          plainMessage f
+                          RuleCatalog.describe f.Code
+                          f.Fingerprint ]
+        }
+
+    File.WriteAllText(path, String.concat "\r\n" lines + "\r\n", Text.UTF8Encoding(true))
+
+/// A self-contained HTML page — no scripts fetched, no stylesheets
+/// linked, so it opens from a build artifact or an email attachment. A
+/// summary strip (findings, fixes, per-category counts), then the
+/// findings grouped by rule, each with its file and range, the message,
+/// the source with the range highlighted, and the fix as before/after
+/// text. Filter boxes at the top narrow the page by category, level, and
+/// fixability without a round trip.
+let private writeHtmlReport (path: string) (target: string) (findings: ReportedFinding seq) =
+    let root = sourceRootOf target
+    let findings = List.ofSeq findings
+    let esc (s: string) = Net.WebUtility.HtmlEncode s
+    let sb = Text.StringBuilder()
+    let line (s: string) = sb.AppendLine s |> ignore
+
+    let byCategory =
+        findings
+        |> List.countBy (fun f -> reportCategory f.Code)
+        |> List.sortBy (fun (category, _) ->
+            match RuleCatalog.parse category with
+            | Some c -> RuleCatalog.all |> List.findIndex ((=) c)
+            | None -> 99)
+
+    let fixable = findings |> List.filter (fun f -> f.Fixable) |> List.length
+
+    let files =
+        findings
+        |> List.map (fun f -> Path.GetFullPath f.File)
+        |> List.distinct
+        |> List.length
+
+    let grouped =
+        findings
+        |> List.groupBy (fun f -> f.Code)
+        |> List.sortBy (fun (code, items) ->
+            not (RuleCatalog.isPriority code),
+            (match RuleCatalog.categoryOf code with
+             | RuleCatalog.Category.Correctness -> 0
+             | RuleCatalog.Category.Performance -> 1
+             | RuleCatalog.Category.Idiom -> 2
+             | RuleCatalog.Category.Cosmetic -> 3),
+            -items.Length,
+            code)
+
+    // the context snippet with the finding's own range wrapped in <mark>:
+    // the snippet starts at SnippetLines' first line, and the range's
+    // columns are 0-based offsets into its lines
+    let highlighted (f: ReportedFinding) =
+        let snippetStart, _ = f.SnippetLines
+        let lines = f.Snippet.Split '\n'
+        let firstIndex = f.StartLine - snippetStart
+        let lastIndex = f.EndLine - snippetStart
+
+        let clampCol (text: string) c = max 0 (min text.Length c)
+
+        lines
+        |> Array.mapi (fun i text ->
+            if i < firstIndex || i > lastIndex || firstIndex < 0 then
+                esc text
+            else
+                let startCol = if i = firstIndex then clampCol text f.StartColumn else 0
+
+                let endCol =
+                    if i = lastIndex then
+                        clampCol text f.EndColumn
+                    else
+                        text.Length
+
+                let endCol = max startCol endCol
+
+                esc (text.Substring(0, startCol))
+                + "<mark>"
+                + esc (text.Substring(startCol, endCol - startCol))
+                + "</mark>"
+                + esc (text.Substring endCol))
+        |> String.concat "\n"
+
+    line "<!DOCTYPE html>"
+
+    line
+        "<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+
+    line $"<title>fsharp-refactor report: {esc (Path.GetFileName(target.TrimEnd('\\', '/')))}</title>"
+    line "<style>"
+
+    line
+        ":root{--bg:#fff;--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--code:#f6f8fa;--mark:#fff8c5;--warn:#9a6700;--note:#0969da;--del:#ffebe9;--ins:#dafbe1}"
+
+    line
+        "@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--code:#161b22;--mark:#4d3800;--warn:#d29922;--note:#58a6ff;--del:#3c1618;--ins:#12261e}}"
+
+    line
+        "body{margin:0;padding:24px 32px;font:14px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg);max-width:1200px}"
+
+    line
+        "h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:32px 0 8px;padding-top:12px;border-top:1px solid var(--line)}"
+
+    line ".meta{color:var(--muted);margin-bottom:16px}.meta code{font-size:13px}"
+    line ".summary{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}"
+    line ".card{border:1px solid var(--line);border-radius:6px;padding:8px 14px;min-width:96px}"
+    line ".card b{display:block;font-size:20px}.card span{color:var(--muted);font-size:12px}"
+
+    line
+        ".filters{display:flex;flex-wrap:wrap;gap:16px;margin:12px 0 4px;color:var(--muted)}.filters label{margin-right:8px;cursor:pointer}"
+
+    line ".rule .desc{color:var(--muted);font-weight:normal}"
+    line ".finding{border:1px solid var(--line);border-radius:6px;margin:10px 0;overflow:hidden}"
+    line ".finding.hidden{display:none}"
+
+    line
+        ".head{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline;padding:8px 12px;background:var(--code);border-bottom:1px solid var(--line)}"
+
+    line ".loc{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}"
+
+    line
+        ".lvl{font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:10px;border:1px solid}"
+
+    line ".lvl.warning{color:var(--warn);border-color:var(--warn)}.lvl.note{color:var(--note);border-color:var(--note)}"
+    line ".cat{font-size:12px;color:var(--muted)}.msg{padding:8px 12px}"
+
+    line
+        "pre{margin:0;padding:10px 12px;font:12.5px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-x:auto;white-space:pre;tab-size:4}"
+
+    line "pre.src{border-top:1px solid var(--line)}mark{background:var(--mark);color:inherit;border-radius:2px}"
+
+    line
+        ".fix{border-top:1px solid var(--line)}.fix .lbl{padding:4px 12px;font-size:12px;color:var(--muted);background:var(--code)}"
+
+    line "pre.del{background:var(--del)}pre.ins{background:var(--ins)}"
+    line ".empty{padding:24px;border:1px dashed var(--line);border-radius:6px;color:var(--muted)}"
+    line "footer{margin-top:32px;color:var(--muted);font-size:12px}"
+    line "</style></head><body>"
+
+    line "<h1>fsharp-refactor report</h1>"
+    let stamp = DateTime.UtcNow.ToString "yyyy-MM-dd HH:mm"
+
+    line
+        $"<div class=\"meta\"><code>{esc (Path.GetFullPath target)}</code> · fsharp-refactor {esc toolVersion.Value} · {stamp} UTC · paths relative to <code>{esc root}</code></div>"
+
+    line "<div class=\"summary\">"
+    line $"<div class=\"card\"><b>{findings.Length}</b><span>findings</span></div>"
+    line $"<div class=\"card\"><b>{fixable}</b><span>auto-fixable</span></div>"
+    line $"<div class=\"card\"><b>{grouped.Length}</b><span>rules</span></div>"
+    line $"<div class=\"card\"><b>{files}</b><span>files</span></div>"
+
+    for category, count in byCategory do
+        line $"<div class=\"card\"><b>{count}</b><span>{esc category}</span></div>"
+
+    line "</div>"
+
+    if findings.IsEmpty then
+        line "<div class=\"empty\">No findings. The run surfaced nothing for the enabled rules.</div>"
+    else
+        line "<div class=\"filters\">"
+        line "<span>Category:"
+
+        for category, _ in byCategory do
+            line
+                $"<label><input type=\"checkbox\" data-filter=\"cat\" value=\"{esc category}\" checked> {esc category}</label>"
+
+        line "</span><span>Level:"
+
+        for level in [ "warning"; "note" ] do
+            line $"<label><input type=\"checkbox\" data-filter=\"lvl\" value=\"{level}\" checked> {level}</label>"
+
+        line "</span><span>Auto-fix:"
+        line "<label><input type=\"checkbox\" data-filter=\"fix\" value=\"yes\" checked> auto-fixable</label>"
+        line "<label><input type=\"checkbox\" data-filter=\"fix\" value=\"no\" checked> advisory only</label>"
+        line "</span></div>"
+
+        for code, items in grouped do
+            line
+                $"<h2 class=\"rule\" id=\"{code}\">{code} <span class=\"desc\">— {esc (RuleCatalog.describe code)}</span> <span class=\"cat\">({items.Length})</span></h2>"
+
+            for f in items |> List.sortBy (fun f -> f.File, f.StartLine, f.StartColumn) do
+                let level = reportLevel f.Code f.Severity
+                let category = reportCategory f.Code
+                let fixFlag = if f.Fixable then "yes" else "no"
+
+                line $"<div class=\"finding\" data-cat=\"{esc category}\" data-lvl=\"{level}\" data-fix=\"{fixFlag}\">"
+
+                line
+                    $"<div class=\"head\"><span class=\"loc\">{esc (relativeToRoot root f.File)}:{max 1 f.StartLine}:{f.StartColumn + 1}</span><span class=\"lvl {level}\">{level}</span><span class=\"cat\">{esc category}</span></div>"
+
+                line $"<div class=\"msg\">{esc (plainMessage f)}</div>"
+                line $"<pre class=\"src\">{highlighted f}</pre>"
+
+                match f.Fixes with
+                | [] -> ()
+                | edits ->
+                    line "<div class=\"fix\">"
+
+                    for (sl, sc, _, _, original, text) in edits do
+                        let verb = if original = "" then "insert" else "fix"
+                        line $"<div class=\"lbl\">{verb} at {max 1 sl}:{sc + 1}</div>"
+
+                        if original <> "" then
+                            line $"<pre class=\"del\">- {esc original}</pre>"
+
+                        line $"<pre class=\"ins\">+ {esc text}</pre>"
+
+                    line "</div>"
+
+                line "</div>"
+
+        line "<script>"
+
+        line
+            "(function(){var boxes=document.querySelectorAll('input[data-filter]');function apply(){var on={};boxes.forEach(function(b){(on[b.dataset.filter]=on[b.dataset.filter]||{})[b.value]=b.checked});document.querySelectorAll('.finding').forEach(function(f){var show=on.cat[f.dataset.cat]&&on.lvl[f.dataset.lvl]&&on.fix[f.dataset.fix];f.classList.toggle('hidden',!show)});document.querySelectorAll('h2.rule').forEach(function(h){var n=h.nextElementSibling,any=false;while(n&&n.tagName!=='H2'){if(n.classList.contains('finding')&&!n.classList.contains('hidden'))any=true;n=n.nextElementSibling}h.style.display=any?'':'none'})}boxes.forEach(function(b){b.addEventListener('change',apply)})})();"
+
+        line "</script>"
+
+    line
+        "<footer>Rules are described in <a href=\"https://github.com/Thorium/fsharp-refactor/blob/main/Rules.md\">Rules.md</a>. The same run written as <code>--report findings.sarif</code> uploads to GitHub code scanning.</footer>"
+
+    line "</body></html>"
+    File.WriteAllText(path, sb.ToString(), Text.UTF8Encoding(false))
+
+/// --report writes the format its file name asks for: .html/.htm a page,
+/// .csv a spreadsheet, anything else (.sarif, .json) SARIF 2.1.0.
+let private writeReport (path: string) (target: string) (findings: ReportedFinding seq) =
+    match Path.GetExtension(path).ToLowerInvariant() with
+    | ".html"
+    | ".htm" -> writeHtmlReport path target findings
+    | ".csv" -> writeCsvReport path target findings
+    | _ -> writeSarifReport path target findings
+
 let private recordForReport (finding: ReportedFinding) =
     lock reportedFindings (fun () ->
+        // the same file reaches here under different spellings from the
+        // per-framework passes of a multi-targeted project (relative vs
+        // full, differing case), so the path is normalized or the report
+        // repeats every finding once per framework
+        let file =
+            try
+                Path.GetFullPath(finding.File).ToLowerInvariant()
+            with _ -> // fsharpanalyzer: ignore-line FR0055
+                finding.File.ToLowerInvariant()
+
         let key =
-            $"{finding.Code}|{finding.File}|{finding.StartLine}|{finding.StartColumn}|{finding.Message}"
+            $"{finding.Code}|{file}|{finding.StartLine}|{finding.StartColumn}|{finding.Message}"
 
         if reportedKeys.Add key then
             reportedFindings.Add finding)
@@ -2338,6 +2922,51 @@ let private runPass
                     timings.Add(m.Name, sw.ElapsedMilliseconds)
                     collected.AddRange produced
 
+                if editorOffers then
+                    let editorContext: EditorContext =
+                        { FileName = file
+                          SourceText = sourceText
+                          ParseFileResults = parseResults
+                          CheckFileResults = Some checkResults
+                          TypedTree = checkResults.ImplementationFile
+                          CheckProjectResults = Some projectResults
+                          ProjectOptions = context.ProjectOptions
+                          AnalyzerIgnoreRanges = context.AnalyzerIgnoreRanges }
+
+                    for m in editorAnalyzers.Value do
+                        let! produced =
+                            async {
+                                try
+                                    let work = m.Invoke(null, [| box editorContext |]) :?> Async<Message list>
+                                    return! work
+                                with
+                                | :? TargetInvocationException as ex ->
+                                    eprintfn $"  (editor analyzer {m.Name} failed: {ex.InnerException.Message})"
+                                    return []
+                                | :? InvalidCastException as ex ->
+                                    eprintfn $"  (editor analyzer {m.Name} has an unexpected signature: {ex.Message})"
+                                    return []
+                            }
+
+                        collected.AddRange produced
+
+                    // the CLI wrapper's fix-less note of a finding the editor
+                    // wrapper offers a fix for is the same finding: keep the
+                    // offer, drop the note
+                    let offered =
+                        collected
+                        |> Seq.filter (fun m -> not m.Fixes.IsEmpty)
+                        |> Seq.map (fun m -> $"{m.Code}|{m.Range}")
+                        |> Set.ofSeq
+
+                    let kept =
+                        collected
+                        |> Seq.filter (fun m -> not m.Fixes.IsEmpty || not (offered.Contains $"{m.Code}|{m.Range}"))
+                        |> List.ofSeq
+
+                    collected.Clear()
+                    collected.AddRange kept
+
                 // a suppressed finding is neither reported nor FIXED — for
                 // an apply tool the second half is the important one. Same
                 // semantics as the SDK's own filter (which its signature
@@ -2362,7 +2991,7 @@ let private runPass
                         else
                             msg.Range.FileName
 
-                    let fingerprint, snippet =
+                    let fingerprint, snippet, snippetLines, regionText =
                         fingerprintAndSnippet sourceText findingFile msg.Code msg.Range
 
                     { File = findingFile
@@ -2374,8 +3003,19 @@ let private runPass
                       EndLine = msg.Range.EndLine
                       EndColumn = msg.Range.EndColumn
                       Fixable = not msg.Fixes.IsEmpty
+                      Fixes =
+                        msg.Fixes
+                        |> List.map (fun f ->
+                            f.FromRange.StartLine,
+                            f.FromRange.StartColumn,
+                            f.FromRange.EndLine,
+                            f.FromRange.EndColumn,
+                            f.FromText,
+                            f.ToText)
                       Fingerprint = fingerprint
-                      Snippet = snippet }
+                      Snippet = snippet
+                      SnippetLines = snippetLines
+                      RegionText = regionText }
 
                 // whether a comment is honored is the team's call — the
                 // config's "suppressions" policy; --honor-suppressions is
@@ -2426,6 +3066,12 @@ let private runPass
 
                 if not baselined.IsEmpty then
                     lock reportedFindings (fun () -> baselineSuppressed <- baselineSuppressed + baselined.Length)
+
+                let reportable =
+                    if notesOnly then
+                        reportable |> List.filter (fun (msg, _) -> msg.Fixes.IsEmpty)
+                    else
+                        reportable
 
                 for _, finding in reportable do
                     recordForReport finding
@@ -2548,7 +3194,11 @@ let private runPass
                 $"{note.Code}|{outcome.File}|{note.Range.StartLine}|{note.Range.StartColumn}|{note.Message}"
 
             if printedNotes.Add key then
-                if showNotes then
+                if
+                    showNotes
+                    || RuleCatalog.isPriority note.Code
+                    || note.Severity = Severity.Warning
+                then
                     let firstSentence =
                         let text = note.Message
                         // a bare '.' is not a sentence end — "String.Equals"
@@ -2795,41 +3445,88 @@ let private resolveTargets (raw: string) : Result<Target list, string> =
         else
             []
 
-    let fromDirectory (dir: string) =
-        let solutions =
-            [ yield! Directory.EnumerateFiles(dir, "*.slnx")
-              yield! Directory.EnumerateFiles(dir, "*.sln") ]
+    let rec fromDirectory (dir: string) =
+        let solutionsIn (d: string) =
+            [ yield! Directory.EnumerateFiles(d, "*.slnx")
+              yield! Directory.EnumerateFiles(d, "*.sln") ]
 
-        let projects =
-            match solutions with
-            | [] ->
-                FileWalk.files "*.fsproj" dir
-                |> Seq.map (fun p -> Target.Project(p, None))
+        let solutions = solutionsIn dir
+
+        // a workspace of checkouts — C:\git — has no solution of its own,
+        // but its children do. Each child is then resolved as its own
+        // target set, so every checkout's solutions (and the projects they
+        // leave out) are honoured, instead of one flat walk of every
+        // fsproj under the workspace
+        let checkouts =
+            if solutions.IsEmpty then
+                Directory.EnumerateDirectories dir
+                |> Seq.filter (fun child ->
+                    let name = Path.GetFileName child
+
+                    not (name.StartsWith '.')
+                    && not (List.contains name [ "node_modules"; "bin"; "obj"; "packages"; "paket-files" ]))
                 |> List.ofSeq
-            | _ ->
-                // EVERY solution in the directory, projects deduplicated —
-                // picking the alphabetically first silently skipped
-                // FsCDK.sln's whole library because FsCDK.Samples.sln
-                // sorted ahead of it
-                if solutions.Length > 1 then
-                    printfn $"({solutions.Length} solutions here — analysing the union of their projects)"
+            else
+                []
 
-                solutions
-                |> List.collect projectsInSolution
-                |> List.distinctBy (fun p -> Path.GetFullPath(p).ToLowerInvariant())
-                |> List.map (fun p -> Target.Project(p, None))
+        let workspace =
+            solutions.IsEmpty
+            && checkouts |> List.exists (fun child -> not (solutionsIn child).IsEmpty)
 
-        // loose scripts are code too: build.fsx and friends never appear in
-        // any fsproj, so a directory sweep that stopped at projects silently
-        // skipped them. The walker already prunes obj/bin/packages/.git;
-        // ignorePaths (paket-files above all) applies on top
-        let scripts =
-            FileWalk.files "*.fsx" dir
-            |> Seq.filter (Configuration.isIgnoredPath >> not)
-            |> Seq.map Target.Script
-            |> List.ofSeq
+        if workspace then
+            let named =
+                checkouts |> List.filter (fun c -> not (solutionsIn c).IsEmpty) |> List.length
 
-        projects @ scripts
+            printfn $"({named} checkouts with solutions under {dir} — analysing each checkout on its own)"
+
+            let nested =
+                checkouts
+                |> List.collect (fun child ->
+                    try
+                        fromDirectory child
+                    with ex -> // fsharpanalyzer: ignore-line FR0055
+                        eprintfn $"  ({Path.GetFileName child}: skipped — {ex.Message})"
+                        [])
+
+            let looseScripts =
+                Directory.EnumerateFiles(dir, "*.fsx")
+                |> Seq.filter (Configuration.isIgnoredPath >> not)
+                |> Seq.map Target.Script
+                |> List.ofSeq
+
+            nested @ looseScripts
+        else
+
+            let projects =
+                match solutions with
+                | [] ->
+                    FileWalk.files "*.fsproj" dir
+                    |> Seq.map (fun p -> Target.Project(p, None))
+                    |> List.ofSeq
+                | _ ->
+                    // EVERY solution in the directory, projects deduplicated —
+                    // picking the alphabetically first silently skipped
+                    // FsCDK.sln's whole library because FsCDK.Samples.sln
+                    // sorted ahead of it
+                    if solutions.Length > 1 then
+                        printfn $"({solutions.Length} solutions here — analysing the union of their projects)"
+
+                    solutions
+                    |> List.collect projectsInSolution
+                    |> List.distinctBy (fun p -> Path.GetFullPath(p).ToLowerInvariant())
+                    |> List.map (fun p -> Target.Project(p, None))
+
+            // loose scripts are code too: build.fsx and friends never appear in
+            // any fsproj, so a directory sweep that stopped at projects silently
+            // skipped them. The walker already prunes obj/bin/packages/.git;
+            // ignorePaths (paket-files above all) applies on top
+            let scripts =
+                FileWalk.files "*.fsx" dir
+                |> Seq.filter (Configuration.isIgnoredPath >> not)
+                |> Seq.map Target.Script
+                |> List.ofSeq
+
+            projects @ scripts
 
     if raw.Contains '*' || raw.Contains '?' then
         match expandGlob raw |> List.choose targetOf with
@@ -3903,7 +4600,7 @@ let private findingsPayload (findings: ReportedFinding list) =
           dict
               [ "code", box f.Code
                 "severity", box (severityName f.Severity)
-                "fixable", box f.Fixable
+                "autoFixable", box f.Fixable
                 "file", box f.File
                 "startLine", box f.StartLine
                 "startColumn", box f.StartColumn
@@ -3993,6 +4690,7 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
         honorAllSuppressions <- opts.HonorSuppressions
         parseOnlyRun <- opts.ParseOnly
         showNotes <- opts.Notes
+        notesOnly <- opts.NotesOnly
         lock heldNoteCounts heldNoteCounts.Clear
         // the corpus harness runs main in-process, so per-run stores
         // must not leak findings across invocations
@@ -4093,11 +4791,28 @@ let private executeRun (checker: FSharpChecker) (opts: Options) : int =
             | _ -> runTarget checker opts several target
 
         try
-            let exitCode = targets |> List.map runOne |> List.fold max 0
+            let writeReportNow () =
+                match opts.Report with
+                | Some reportPath ->
+                    writeReport reportPath opts.Target (lock reportedFindings (fun () -> List.ofSeq reportedFindings))
+                | None -> ()
+
+            // a many-target run rewrites the report after every target, so
+            // a crash or a Ctrl-C an hour in still leaves what was found
+            let exitCode =
+                targets
+                |> List.map (fun target ->
+                    let code = runOne target
+
+                    if targets.Length > 1 then
+                        writeReportNow ()
+
+                    code)
+                |> List.fold max 0
 
             match opts.Report with
             | Some reportPath ->
-                writeSarifReport reportPath (lock reportedFindings (fun () -> List.ofSeq reportedFindings))
+                writeReportNow ()
                 printfn $"{reportedFindings.Count} finding(s) written to {reportPath}"
             | None -> ()
 

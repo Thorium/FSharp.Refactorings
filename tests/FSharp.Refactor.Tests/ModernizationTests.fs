@@ -3,6 +3,7 @@ module FSharp.Refactor.Tests.ModernizationTests
 open Xunit
 open FSharp.Refactor
 open FSharp.Refactor.Tests.Parsing
+open FSharp.Compiler.Syntax
 
 let private applyAll (source: string) (edits: (FSharp.Compiler.Text.range * string * string) list) =
     edits
@@ -179,30 +180,58 @@ let ``a disposable passed on bare gets advice only`` () =
         useBindingsIn
             "module Test\nopen System.IO\nlet handOff (sink: FileStream -> unit) (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    sink stream"
     with
-    | [ s ] -> Assert.Equal(None, s.Fix)
+    | [ s ] ->
+        Assert.Equal(None, s.Fix)
+        Assert.Equal(Some "sink", s.Destination)
     | other -> failwithf "Expected exactly one advisory, got %A" other
 
 [<Fact>]
-let ``a disposable returned to the caller must stay a let`` () =
-    // `use` here would dispose the stream before the caller ever saw it.
-    // The caller is the one that should write `use`, so this side stays a
-    // `let` and only gets the advisory
+let ``a disposable piped to a function names the function`` () =
     match
         useBindingsIn
-            "module Test\nopen System.IO\nlet openStream (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    stream"
+            "module Test\nopen System.IO\nlet handOff (sink: FileStream -> unit) (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    stream |> sink"
     with
-    | [ s ] -> Assert.Equal(None, s.Fix)
-    | other -> failwithf "Expected exactly one return-escape advisory, got %A" other
+    | [ s ] ->
+        Assert.Equal(None, s.Fix)
+        Assert.Equal(Some "sink", s.Destination)
+    | other -> failwithf "Expected exactly one advisory, got %A" other
 
 [<Fact>]
-let ``a disposable handed to a returned wrapper stays a let`` () =
+let ``a disposable returned to the caller is the caller's to dispose`` () =
+    // `use` here would dispose the stream before the caller ever saw it,
+    // and the caller is the one that should write `use`: the factory
+    // pattern is not a leak, so nothing is said
+    Assert.Empty(
+        useBindingsIn
+            "module Test\nopen System.IO\nlet openStream (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    stream"
+    )
+
+[<Fact>]
+let ``a disposable handed to a returned wrapper is adopted`` () =
     // StreamReader takes ownership and outlives this scope
-    match
+    Assert.Empty(
         useBindingsIn
             "module Test\nopen System.IO\nlet openReader (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    new StreamReader(stream)"
+    )
+
+[<Fact>]
+let ``a handler chained into an HttpClient is adopted, named arguments and all`` () =
+    // HttpClient disposes its handler; the chain is the ClearBank/Carmel
+    // pattern that used to draw two notes per client
+    Assert.Empty(
+        useBindingsIn
+            "module Test\nopen System.Net.Http\nlet make (url: string) =\n    let handler = new HttpClientHandler(UseCookies = false)\n    new HttpClient(handler, true, BaseAddress = System.Uri url)"
+    )
+
+[<Fact>]
+let ``a disposable compared but never passed still becomes a use binding`` () =
+    match
+        useBindingsIn
+            "module Test\nopen System.IO\nlet read (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    let b = if stream = null then 0 else stream.ReadByte()
+    b"
     with
-    | [ s ] -> Assert.Equal(None, s.Fix)
-    | other -> failwithf "Expected exactly one wrapper-escape advisory, got %A" other
+    | [ s ] -> Assert.Equal(Some("let", "use"), s.Fix)
+    | other -> failwithf "Expected exactly one use-binding fix, got %A" other
 
 [<Fact>]
 let ``a manually disposed local is managed already`` () =
@@ -908,3 +937,556 @@ let ``FR0077 also offers stubs returning the empty value of each member's type``
         let patched = applyEdit source s.Range s.EmptyInsertText
         Assert.True(typechecksCleanly patched, $"Empty-value stubs do not typecheck:\n%s{patched}")
     | other -> failwithf "Expected exactly one implement-missing fix, got %A" other
+
+[<Fact>]
+let ``FR0081: a dot-segment prefix is relative-path notation, not a join`` () =
+    // Fable's `"./" + path` — Path.Combine cannot spell a `./` prefix
+    Assert.Empty(pathsIn "module Test\nlet relative (path: string) = \"./\" + path")
+
+[<Fact>]
+let ``FR0081: appending parent segments is not a join either`` () =
+    Assert.Empty(pathsIn "module Test\nlet up (prefix: string) = prefix + \"../\"")
+
+[<Fact>]
+let ``FR0081: a document pointer joined in a JSON module is not a filesystem path`` () =
+    // FSharp.Data's JsonRuntime: `doc.Path() + "/" + name` is a JSON pointer
+    Assert.Empty(pathsIn "module JsonRuntime\nlet pointer (jsonPath: string) (name: string) = jsonPath + \"/\" + name")
+
+[<Fact>]
+let ``FR0079: the editor fix is the one element itself`` () =
+    match singlesIn "module Test\nopen System.Threading.Tasks\nlet run (t: Task<int>) = Task.WhenAll [| t |]" with
+    | [ s ] ->
+        match s.Fix with
+        | Some(_, original, replacement) ->
+            Assert.Equal("Task.WhenAll [| t |]", original)
+            Assert.Equal("t", replacement)
+        | None -> failwith "Expected the unwrap offer"
+    | other -> failwithf "Expected one single-awaitable finding, got %A" other
+
+[<Fact>]
+let ``FR0089: the editor fix separates the elements with semicolons`` () =
+    let _, _, tuples =
+        cleanupsIn "module Test\nlet xs = [ 1, 2, 3 ]\nlet ys = [| 1.5, 2.5 |]"
+
+    match tuples with
+    | [ a; b ] ->
+        let _, _, ra = a.Fix
+        let _, _, rb = b.Fix
+        Assert.Equal("[ 1; 2; 3 ]", ra)
+        Assert.Equal("[| 1.5; 2.5 |]", rb)
+    | other -> failwithf "Expected two tuple-in-list findings, got %A" other
+
+// ---- FR0147 QualifiedNames ----
+
+// the tight thresholds, so the shapes stay small; the defaults are 6 and 4
+let private qualifiedIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck source
+    QualifiedNames.find 3 2 tree sourceText checkResults
+
+[<Fact>]
+let ``FR0147: a namespace spelled three times becomes an open after the existing opens`` () =
+    let source =
+        "module Test\nopen System\nlet a = System.Threading.Tasks.Task.FromResult 1\nlet b = System.Threading.Tasks.Task.Delay 10\nlet c (t: System.Threading.Tasks.Task<int>) = t.Result"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        Assert.Equal("System.Threading.Tasks", s.Namespace)
+        Assert.Equal(3, s.Uses)
+        let patched = applyAll source s.Edits
+
+        Assert.Equal(
+            "module Test\nopen System\nopen System.Threading.Tasks\nlet a = Task.FromResult 1\nlet b = Task.Delay 10\nlet c (t: Task<int>) = t.Result",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified-names finding, got %A" other
+
+[<Fact>]
+let ``FR0147: only the namespace part goes, a type stays qualified by its name`` () =
+    let source =
+        "module Test\nlet a (p: string) = System.IO.File.Exists p\nlet b (p: string) = System.IO.File.ReadAllText p\nlet c (p: string) = System.IO.Path.GetFileName p"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        Assert.Equal("System.IO", s.Namespace)
+        let patched = applyAll source s.Edits
+        Assert.Contains("open System.IO\nlet a (p: string) = File.Exists p", patched)
+        Assert.Contains("Path.GetFileName p", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified-names finding, got %A" other
+
+[<Fact>]
+let ``FR0147: two uses of a shallow namespace are not worth an open`` () =
+    Assert.Empty(
+        qualifiedIn
+            "module Test\nlet a (p: string) = System.IO.File.Exists p\nlet b (p: string) = System.IO.File.ReadAllText p"
+    )
+
+[<Fact>]
+let ``FR0147: a namespace the file already opens only gets its uses shortened`` () =
+    let source =
+        "module Test\nopen System.IO\nlet a (p: string) = System.IO.File.Exists p"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        let patched = applyAll source s.Edits
+        Assert.Equal("module Test\nopen System.IO\nlet a (p: string) = File.Exists p", patched)
+    | other -> failwithf "Expected one shortening, got %A" other
+
+[<Fact>]
+let ``FR0147: a namespace whose open would clash with a name the file defines is noted, not fixed`` () =
+    // the file's own `File` is why the author qualified System.IO.File
+    let source =
+        "module Test\ntype File = { Name: string }\nlet a (p: string) = System.IO.File.Exists p\nlet b (p: string) = System.IO.File.ReadAllText p\nlet c (p: string) = System.IO.Path.GetFileName p"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        Assert.Equal("System.IO", s.Namespace)
+        Assert.Empty s.Edits
+    | other -> failwithf "Expected one clash note, got %A" other
+
+[<Fact>]
+let ``FR0147: the default thresholds are six uses, or four for a deep namespace`` () =
+    let tree, sourceText, checkResults =
+        parseAndCheck
+            "module Test\nlet a = System.Threading.Tasks.Task.FromResult 1\nlet b = System.Threading.Tasks.Task.FromResult 2\nlet c = System.Threading.Tasks.Task.FromResult 3\nlet d (p: string) = System.IO.File.Exists p\nlet e (p: string) = System.IO.File.Exists p\nlet f (p: string) = System.IO.File.Exists p\nlet g (p: string) = System.IO.File.Exists p\nlet h (p: string) = System.IO.File.Exists p"
+
+    // three deep uses and five shallow ones: neither reaches the default
+    Assert.Empty(QualifiedNames.find 6 4 tree sourceText checkResults)
+
+    let tree2, sourceText2, checkResults2 =
+        parseAndCheck
+            "module Test\nlet a = System.Threading.Tasks.Task.FromResult 1\nlet b = System.Threading.Tasks.Task.FromResult 2\nlet c = System.Threading.Tasks.Task.FromResult 3\nlet d = System.Threading.Tasks.Task.FromResult 4"
+
+    match QualifiedNames.find 6 4 tree2 sourceText2 checkResults2 with
+    | [ s ] -> Assert.Equal(4, s.Uses)
+    | other -> failwithf "Expected the deep namespace at four uses, got %A" other
+
+[<Fact>]
+let ``FR0147: the open lands beside the opens of the same family`` () =
+    let source =
+        "module Test\nopen System\nopen System.IO\nopen Microsoft.FSharp.Collections\nlet a = System.Threading.Tasks.Task.FromResult 1\nlet b = System.Threading.Tasks.Task.Delay 10\nlet c (t: System.Threading.Tasks.Task<int>) = t.Result"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        let patched = applyAll source s.Edits
+
+        Assert.StartsWith(
+            "module Test\nopen System\nopen System.IO\nopen System.Threading.Tasks\nopen Microsoft.FSharp.Collections\n",
+            patched
+        )
+    | other -> failwithf "Expected one qualified-names finding, got %A" other
+
+[<Fact>]
+let ``FR0147: namespaces come deepest first, and their opens end up shallow to deep`` () =
+    let source =
+        "module Test\nlet a (s: string) = System.String.IsNullOrEmpty s\nlet b (s: string) = System.String.IsNullOrEmpty s\nlet c (s: string) = System.String.IsNullOrEmpty s\nlet d = System.Collections.Generic.List<int>()\nlet e = System.Collections.Generic.Dictionary<int, int>()"
+
+    match qualifiedIn source with
+    | [ deep; shallow ] ->
+        Assert.Equal("System.Collections.Generic", deep.Namespace)
+        Assert.Equal("System", shallow.Namespace)
+        // each use belongs to exactly one namespace: no removal overlaps
+        let removals = (deep.Edits @ shallow.Edits) |> List.filter (fun (_, _, r) -> r = "")
+        Assert.Equal(5, removals.Length)
+        // applied deep first (the order emitted), the shallow open lands above
+        let patched = applyAll source (deep.Edits @ shallow.Edits)
+
+        Assert.StartsWith(
+            "module Test\nopen System\nopen System.Collections.Generic\nlet a (s: string) = String.IsNullOrEmpty s",
+            patched
+        )
+
+        Assert.Contains("let d = List<int>()", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected the deep namespace first and the shallow one second, got %A" other
+
+[<Fact>]
+let ``FR0147: an open the file already has is never inserted again`` () =
+    let source =
+        "module Test\nopen System.Collections.Generic\nlet d = System.Collections.Generic.List<int>()\nlet e = System.Collections.Generic.Dictionary<int, int>()"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        Assert.Empty(s.Edits |> List.filter (fun (_, _, r) -> r.StartsWith "open"))
+        let patched = applyAll source s.Edits
+
+        Assert.Equal(
+            "module Test\nopen System.Collections.Generic\nlet d = List<int>()\nlet e = Dictionary<int, int>()",
+            patched
+        )
+    | other -> failwithf "Expected one shortening, got %A" other
+
+[<Fact>]
+let ``FR0147: an existing open System.Collections gets Generic after it and System before it`` () =
+    let source =
+        "module Test\nopen System.Collections\nlet a (s: string) = System.String.IsNullOrEmpty s\nlet b (s: string) = System.String.IsNullOrEmpty s\nlet c (s: string) = System.String.IsNullOrEmpty s\nlet d = System.Collections.Generic.List<int>()\nlet e = System.Collections.Generic.Dictionary<int, int>()"
+
+    match qualifiedIn source with
+    | [ deep; shallow ] ->
+        let deepOpen =
+            deep.Edits
+            |> List.pick (fun (r, _, t) -> if t.StartsWith "open" then Some r else None)
+
+        let shallowOpen =
+            shallow.Edits
+            |> List.pick (fun (r, _, t) -> if t.StartsWith "open" then Some r else None)
+        // line 2 is `open System.Collections`: Generic goes below it, System above it
+        Assert.Equal(3, deepOpen.StartLine)
+        Assert.Equal(2, shallowOpen.StartLine)
+    | other -> failwithf "Expected the deep and the shallow namespace, got %A" other
+
+// ---- FR0075: a same-file callee is read one hop ----
+
+[<Fact>]
+let ``a disposable handed to a same-file function that disposes it is adopted`` () =
+    Assert.Empty(
+        useBindingsIn
+            "module Test\nopen System.IO\nlet private consume (s: Stream) =\n    use s = s\n    s.ReadByte()\nlet read (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    consume stream"
+    )
+
+[<Fact>]
+let ``a disposable handed to a same-file function that keeps it names the leak`` () =
+    match
+        useBindingsIn
+            "module Test\nopen System.IO\nlet private consume (s: Stream) = s.ReadByte()\nlet read (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    consume stream"
+    with
+    | [ s ] ->
+        Assert.Equal(None, s.Fix)
+        Assert.Equal(Some "consume", s.Destination)
+        Assert.True s.DestinationInspected
+    | other -> failwithf "Expected exactly one advisory, got %A" other
+
+[<Fact>]
+let ``a disposable in a tuple element is followed to the matching parameter`` () =
+    Assert.Empty(
+        useBindingsIn
+            "module Test\nopen System.IO\nlet private consume (name: string, s: Stream) =\n    s.Dispose()\n    name\nlet read (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    consume (\"x\", stream)"
+    )
+
+[<Fact>]
+let ``a leak in the entry point says so`` () =
+    match
+        useBindingsIn
+            "module Test\nopen System.IO\n[<EntryPoint>]\nlet main (argv: string[]) =\n    let stream = new FileStream(argv.[0], FileMode.Open)\n    printfn \"%d\" (stream.ReadByte())\n    0"
+    with
+    | [ s ] ->
+        Assert.Equal(Some("let", "use"), s.Fix)
+        Assert.Equal(Some UseBinding.ScopeContext.EntryPoint, s.Context)
+    | other -> failwithf "Expected exactly one use-binding fix, got %A" other
+
+[<Fact>]
+let ``a leaked handle in the entry point is an ordinary leak`` () =
+    // the OS reclaims the handle at exit; there is no unflushed work
+    match
+        useBindingsIn
+            "module Test\n[<EntryPoint>]\nlet main (argv: string[]) =\n    let cts = new System.Threading.CancellationTokenSource()\n    printfn \"%b\" cts.IsCancellationRequested\n    0"
+    with
+    | [ s ] -> Assert.Equal(None, s.Context)
+    | other -> failwithf "Expected exactly one use-binding fix, got %A" other
+
+[<Fact>]
+let ``a leak in an action method is a per-request leak`` () =
+    match
+        useBindingsIn
+            "module Test\nopen System.IO\ntype HttpGetAttribute() =\n    inherit System.Attribute()\ntype Api() =\n    [<HttpGet>]\n    member _.Get(path: string) =\n        let stream = new FileStream(path, FileMode.Open)\n        stream.ReadByte()"
+    with
+    | [ s ] -> Assert.Equal(Some UseBinding.ScopeContext.RequestHandler, s.Context)
+    | other -> failwithf "Expected exactly one use-binding fix, got %A" other
+
+[<Fact>]
+let ``a leak in a controller member is a per-request leak`` () =
+    match
+        useBindingsIn
+            "module Test\nopen System.IO\ntype ControllerBase() =\n    class\n    end\ntype Api() =\n    inherit ControllerBase()\n    member _.Get(path: string) =\n        let stream = new FileStream(path, FileMode.Open)\n        stream.ReadByte()"
+    with
+    | [ s ] -> Assert.Equal(Some UseBinding.ScopeContext.RequestHandler, s.Context)
+    | other -> failwithf "Expected exactly one use-binding fix, got %A" other
+
+[<Fact>]
+let ``FR0147: a file without a module line gets the open before its first declaration`` () =
+    // the implicit module of a last file or a script has no header line to
+    // go under; the "header" range is the first declaration's own line
+    let source =
+        "let a = System.Threading.Tasks.Task.FromResult 1\nlet b = System.Threading.Tasks.Task.Delay 10\nlet c (t: System.Threading.Tasks.Task<int>) = t.Result"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        let patched = applyAll source s.Edits
+
+        Assert.Equal(
+            "open System.Threading.Tasks\nlet a = Task.FromResult 1\nlet b = Task.Delay 10\nlet c (t: Task<int>) = t.Result",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified-names finding, got %A" other
+
+[<Fact>]
+let ``FR0147: an expression head naming a type from elsewhere is a clash, a module of that name is not`` () =
+    // `Queue.Synchronized` is System.Collections.Queue; opening
+    // System.Collections.Generic would re-bind `Queue` to the generic one
+    let clashing =
+        "module Test\nopen System.Collections\nlet q () = Queue.Synchronized(Queue())\nlet a = System.Collections.Generic.List<int>()\nlet b = System.Collections.Generic.List<int>()\nlet c = System.Collections.Generic.List<int>()"
+
+    match qualifiedIn clashing with
+    | [ s ] ->
+        Assert.Equal("System.Collections.Generic", s.Namespace)
+        Assert.Empty s.Edits
+    | other -> failwithf "Expected one clash note, got %A" other
+
+    // `List.map` is the F# List module, which coexists with the generic List
+    let coexisting =
+        "module Test\nlet xs = List.map id [ 1 ]\nlet a = System.Collections.Generic.List<int>()\nlet b = System.Collections.Generic.List<int>()\nlet c = System.Collections.Generic.List<int>()"
+
+    match qualifiedIn coexisting with
+    | [ s ] -> Assert.NotEmpty s.Edits
+    | other -> failwithf "Expected one qualified-names fix, got %A" other
+
+[<Fact>]
+let ``a disposable handed to one of two same-named functions is not followed`` () =
+    match
+        useBindingsIn
+            "module Test\nopen System.IO\nmodule A =\n    let consume (s: Stream) =\n        use s = s\n        s.ReadByte()\nmodule B =\n    let consume (s: Stream) = s.ReadByte()\nopen B\nlet read (path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    consume stream"
+    with
+    | [ s ] ->
+        Assert.Equal(Some "consume", s.Destination)
+        Assert.False s.DestinationInspected
+    | other -> failwithf "Expected exactly one advisory, got %A" other
+
+[<Fact>]
+let ``FR0147: a short name another open already brings is a clash, even for a namespace that is open`` () =
+    // System.Timers has a Timer too: the author qualified System.Threading's
+    // on purpose (prismatic's FSharp.Data.HttpMethod beside System.Net.Http's)
+    let freshOpen =
+        "module Test\nopen System.Timers\nlet a (t: System.Threading.Timer) = t.Dispose()\nlet b (t: System.Threading.Timer) = t.Dispose()\nlet c (t: System.Threading.Timer) = t.Dispose()"
+
+    match qualifiedIn freshOpen with
+    | [ s ] ->
+        Assert.Equal("System.Threading", s.Namespace)
+        Assert.Empty s.Edits
+    | other -> failwithf "Expected one clash note, got %A" other
+
+    // already open, still qualified: nothing to say at all
+    let alreadyOpen =
+        "module Test\nopen System.Threading\nopen System.Timers\nlet a (t: System.Threading.Timer) = t.Dispose()\nlet b (t: System.Threading.Timer) = t.Dispose()\nlet c (t: System.Threading.Timer) = t.Dispose()"
+
+    Assert.Empty(qualifiedIn alreadyOpen)
+
+let private qualifiedInSecond (lib: string) (user: string) =
+    let tree, sourceText, checkResults = parseAndCheckSecond lib user
+    QualifiedNames.find 3 2 tree sourceText checkResults
+
+[<Fact>]
+let ``FR0147: a module named like its namespace is not the namespace`` () =
+    // toro: `namespace rec Toro` holds a `module Toro`; `Toro.noGrad` names
+    // the module, and under `open Toro` a bare `noGrad` reaches nothing
+    let lib =
+        "namespace Toro\nmodule Toro =\n    let noGrad (f: unit -> 'a) : 'a = f ()"
+
+    let user =
+        "module Example\nopen Toro\nlet a = Toro.noGrad (fun () -> 1)\nlet b = Toro.noGrad (fun () -> 2)\nlet c = Toro.noGrad (fun () -> 3)"
+
+    Assert.Empty(qualifiedInSecond lib user)
+
+[<Fact>]
+let ``FR0147: a same-project module of the introduced name is a clash`` () =
+    // FsAutoComplete: Utils.Utils.Expect beside Expecto.Expect — the
+    // qualified Expecto.Expect was the author's way of reaching the other
+    let lib =
+        "namespace Lib\nmodule Expect =\n    let equal (a: int) (b: int) = ()\nnamespace Utils\nmodule Utils =\n    module Expect =\n        let equal (a: int) (b: int) (msg: string) = ()"
+
+    let user =
+        "module Tests\nopen Lib\nopen Utils.Utils\nlet a = Expect.equal 1 1 \"m\"\nlet b = Lib.Expect.equal 1 1\nlet c = Lib.Expect.equal 2 2\nlet d = Lib.Expect.equal 3 3"
+
+    Assert.Empty(qualifiedInSecond lib user)
+
+[<Fact>]
+let ``FR0147: a same-project namespace still gets its open`` () =
+    let lib = "namespace Lib.Deep\ntype Thing() =\n    static member Make() = Thing()"
+
+    let user =
+        "module Example\nlet a = Lib.Deep.Thing.Make()\nlet b = Lib.Deep.Thing.Make()\nlet c = Lib.Deep.Thing.Make()"
+
+    match qualifiedInSecond lib user with
+    | [ s ] ->
+        Assert.Equal("Lib.Deep", s.Namespace)
+        Assert.NotEmpty s.Edits
+    | other -> failwithf "Expected one qualified-names fix, got %A" other
+
+[<Fact>]
+let ``FR0147: the open goes under the module line, not under the doc comment above it`` () =
+    // Logari: a doc comment precedes `module Logari`, and the module's range
+    // starts at the comment
+    let source =
+        "/// Doc line one\n/// Doc line two\nmodule Test\nlet a = System.Threading.Tasks.Task.FromResult 1\nlet b = System.Threading.Tasks.Task.Delay 10\nlet c (t: System.Threading.Tasks.Task<int>) = t.Result"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        let patched = applyAll source s.Edits
+
+        Assert.Equal(
+            "/// Doc line one\n/// Doc line two\nmodule Test\nopen System.Threading.Tasks\nlet a = Task.FromResult 1\nlet b = Task.Delay 10\nlet c (t: Task<int>) = t.Result",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified-names finding, got %A" other
+
+[<Fact>]
+let ``FR0147: an open further down the file covers nothing above it`` () =
+    // Fuuga's Eval.fs opens System.Text.RegularExpressions at line 1811; the
+    // uses above it are not "already open", and the new open cannot land
+    // beside that one either
+    let source =
+        "module Test\nlet a = System.Text.RegularExpressions.Regex(\"x\")\nlet b = System.Text.RegularExpressions.Regex(\"y\")\nlet c = System.Text.RegularExpressions.Regex(\"z\")\nopen System.Text.RegularExpressions\nlet d = Regex(\"w\")"
+
+    match qualifiedIn source with
+    | [ s ] ->
+        let patched = applyAll source s.Edits
+
+        Assert.Equal(
+            "module Test\nopen System.Text.RegularExpressions\nlet a = Regex(\"x\")\nlet b = Regex(\"y\")\nlet c = Regex(\"z\")\nopen System.Text.RegularExpressions\nlet d = Regex(\"w\")",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified-names finding, got %A" other
+
+[<Fact>]
+let ``FR0147: each top-level namespace block gets its own open`` () =
+    // an open in `namespace A` covers nothing in the `namespace B` below it
+    let block (ns: string) (name: string) =
+        $"namespace {ns}\nmodule {name} =\n    let a = System.Threading.Tasks.Task.FromResult 1\n    let b = System.Threading.Tasks.Task.Delay 10\n    let c (t: System.Threading.Tasks.Task<int>) = t.Result"
+
+    let source = block "A" "M" + "\n" + block "B" "N"
+
+    match qualifiedIn source with
+    | [ first; second ] ->
+        let edits = first.Edits @ second.Edits
+        let patched = applyAll source edits
+
+        let shortened (ns: string) (name: string) =
+            $"namespace {ns}\nopen System.Threading.Tasks\nmodule {name} =\n    let a = Task.FromResult 1\n    let b = Task.Delay 10\n    let c (t: Task<int>) = t.Result"
+
+        Assert.Equal(shortened "A" "M" + "\n" + shortened "B" "N", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one finding per block, got %A" other
+
+[<Fact>]
+let ``FR0147: a namespace shadowed by a module of its name is never opened`` () =
+    // Nu: `[<RequireQualifiedAccess>] module OpenGL` in namespace Nu beside
+    // `namespace Nu.OpenGL` — `open Nu.OpenGL` resolves to the module and
+    // is refused, so the qualified spelling stays
+    let lib =
+        "namespace Nu\n[<RequireQualifiedAccess>]\nmodule OpenGL =\n    let version = 1\nnamespace Nu.OpenGL\ntype Thing() =\n    static member Make() = Thing()"
+
+    let user =
+        "module Example\nlet a = Nu.OpenGL.Thing.Make()\nlet b = Nu.OpenGL.Thing.Make()\nlet c = Nu.OpenGL.Thing.Make()"
+
+    // `open Nu` with `OpenGL.Thing` is fine (the module name still
+    // qualifies the access); `open Nu.OpenGL` is what the compiler refuses
+    for s in qualifiedInSecond lib user do
+        for _, _, text in s.Edits do
+            Assert.DoesNotContain("open Nu.OpenGL", text)
+
+[<Fact>]
+let ``FR0147: an active pattern another open brings shadows the constructor of that name`` () =
+    // FsAutoComplete: `(|Ident|_|)` from an opened module over
+    // FSharp.Compiler.Syntax.Ident — the shortened `Ident(...)` applies the
+    // pattern ("This value is not a function")
+    let lib =
+        "namespace Lib.Syntax\ntype Ident(text: string) =\n    member _.Text = text\nnamespace Lib.Helpers\nmodule Patterns =\n    let (|Ident|_|) (s: string) = if s = \"\" then None else Some s"
+
+    let user =
+        "module Example\nopen Lib.Syntax\nopen Lib.Helpers.Patterns\nlet a = Lib.Syntax.Ident(\"a\")\nlet b = Lib.Syntax.Ident(\"b\")\nlet c = Lib.Syntax.Ident(\"c\")"
+
+    Assert.Empty(qualifiedInSecond lib user)
+
+[<Fact>]
+let ``FR0147: an open inside a nested module does not count for the file`` () =
+    // Fuuga's ConfigTests: nested test modules with their own opens; a
+    // qualified System.IO in a later nested module still needs the open
+    let source =
+        "module Test\nmodule First =\n    open System.Text\n    let a = StringBuilder()\nmodule Second =\n    let p = System.IO.Path.Combine(\"a\", \"b\")\n    let q = System.IO.File.Exists p\n    let r = System.IO.File.Exists \"c\""
+
+    match qualifiedIn source with
+    | [ s ] ->
+        Assert.Equal("System.IO", s.Namespace)
+        let patched = applyAll source s.Edits
+
+        Assert.Equal(
+            "module Test\nopen System.IO\nmodule First =\n    open System.Text\n    let a = StringBuilder()\nmodule Second =\n    let p = Path.Combine(\"a\", \"b\")\n    let q = File.Exists p\n    let r = File.Exists \"c\"",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one qualified-names fix, got %A" other
+
+// ---- FR0085: a function spelled like the type keeps the `new` ----
+
+[<Fact>]
+let ``FR0085: a function bound with the type's name keeps new`` () =
+    // TypeProviders SDK: `let SharedRow(elems) = new SharedRow(elems, hash)`;
+    // without `new` the bare name is the function, called with the wrong arguments
+    let shadowed =
+        "module Test\ntype SharedRow(elems: int[], hash: int) =\n    member _.Hash = hash\nlet SharedRow(elems: int[]) = new SharedRow(elems, elems.Length)\nlet make (xs: int[]) = new SharedRow(xs, 1)"
+
+    let tree, sourceText, checkResults = parseAndCheck shadowed
+    Assert.Empty(RedundantNew.find tree sourceText checkResults)
+
+    let plain =
+        "module Test\ntype SharedRow(elems: int[], hash: int) =\n    member _.Hash = hash\nlet make (xs: int[]) = new SharedRow(xs, 1)"
+
+    let tree, sourceText, checkResults = parseAndCheck plain
+    Assert.Single(RedundantNew.find tree sourceText checkResults) |> ignore
+
+[<Fact>]
+let ``a disposable handed to a disposable owner's property or Add is adopted`` () =
+    // prismatic: HttpRequestMessage disposes its Content, MultipartContent
+    // its parts — the most frequent FR0075 notes there were these
+    Assert.Empty(
+        useBindingsIn
+            "module Test\nopen System.Net.Http\nlet send (client: HttpClient) (body: string) =\n    use request = new HttpRequestMessage(HttpMethod.Post, \"http://x\")\n    let content = new StringContent(body)\n    request.Content <- content\n    client.Send request"
+    )
+
+    Assert.Empty(
+        useBindingsIn
+            "module Test\nopen System.Net.Http\nlet build (body: string) =\n    use multipart = new MultipartFormDataContent()\n    let part = new StringContent(body)\n    multipart.Add(part, \"body\")\n    multipart.Headers.ContentLength"
+    )
+
+[<Fact>]
+let ``FR0147: a union case an F#-compiled assembly's namespace brings is a clash`` () =
+    // FsAutoComplete: `type SymbolKind = | Ident | ...` in namespace
+    // FsAutoComplete (FsAutoComplete.Core.dll) beside FCS's Ident class —
+    // an F# assembly nests its types under namespace entities, which a
+    // top-level scan never saw. FSharp.Core is such an assembly: its
+    // Microsoft.FSharp.Control brings `Async`
+    let lib = "namespace Lib.Ctl\ntype Async(x: int) =\n    member _.X = x"
+
+    let user =
+        "module Example\nopen Microsoft.FSharp.Control\nlet a = Lib.Ctl.Async(1).X\nlet b = Lib.Ctl.Async(2).X\nlet c = Lib.Ctl.Async(3).X"
+
+    match qualifiedInSecond lib user with
+    | [ s ] -> Assert.Empty s.Edits
+    | [] -> ()
+    | other -> failwithf "Expected a clash note or silence, got %A" other
+
+// ---- FR0140: a greedy last constructor argument gets its parentheses ----
+
+[<Fact>]
+let ``FR0140: a lambda argument is parenthesised before the named properties`` () =
+    // TypeProviders SDK: `TypeProviderConfig(fun _ -> false)` — appended
+    // properties would land inside the lambda as a tuple
+    let source =
+        "module Test\ntype Cfg(f: int -> bool) =\n    member val Hosted = false with get, set\n    member val Name = \"\" with get, set\nlet make () =\n    let cfg = Cfg(fun _ -> false)\n    cfg.Hosted <- true\n    cfg.Name <- \"x\"\n    cfg"
+
+    let tree, sourceText, checkResults = parseAndCheck source
+
+    match ObjectInitializer.find tree sourceText checkResults with
+    | [ s ] ->
+        Assert.Equal("Cfg((fun _ -> false), Hosted = true, Name = \"x\")", s.ReplacementText)
+        let patched = applyEdit source s.Range s.ReplacementText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one construction rewrite, got %A" other

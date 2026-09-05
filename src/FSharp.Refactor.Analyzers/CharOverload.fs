@@ -31,6 +31,10 @@ type Suggestion =
         OriginalText: string
         /// None = advisory only (culture-sensitive overload).
         ReplacementText: string option
+        /// For a bare culture-sensitive call: the editor's offer of the
+        /// ordinal char overload — (literal range, original, char literal).
+        /// The CLI never applies it; ordinal-versus-culture is intent.
+        OrdinalOffer: (range * string * string) option
         MethodName: string
     }
 
@@ -184,8 +188,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
                       match stripParens arg with
                       | SingleCharString(c, literalRange) ->
-                          // bare culture-sensitive calls get advice only;
-                          // ordinal-safe ones get the literal replaced
+                          // bare culture-sensitive calls get advice only —
+                          // plus an editor offer of the ordinal char
+                          // overload, the author's call to take; ordinal-safe
+                          // ones get the literal replaced
                           let range, replacement =
                               if cultureSensitive then
                                   expr.Range, None
@@ -195,6 +201,11 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           { Range = range
                             OriginalText = textOfRange source range
                             ReplacementText = replacement
+                            OrdinalOffer =
+                              if cultureSensitive then
+                                  Some(literalRange, textOfRange source literalRange, charLiteral c)
+                              else
+                                  None
                             MethodName = methodId.idText }
                       | SynExpr.Tuple(exprs = [ SingleCharString(c, _); OrdinalComparison ]) when cultureSensitive ->
                           // explicit Ordinal matches the char overload: fix
@@ -202,6 +213,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           { Range = arg.Range
                             OriginalText = textOfRange source arg.Range
                             ReplacementText = Some $"({charLiteral c})"
+                            OrdinalOffer = None
                             MethodName = methodId.idText }
                       | _ -> ()
                   | _ -> ()

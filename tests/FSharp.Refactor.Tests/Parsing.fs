@@ -173,3 +173,38 @@ let parseAndCheckPair (sourceA: string) (sourceB: string) =
         |> Array.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
 
     parseResultsA.ParseTree, sourceTextA, checkA, projectResults, pathA, pathB, recheck
+
+/// Like parseAndCheckPair, but the file under test is B: it sees A's
+/// definitions the way a later file of a project sees the earlier ones.
+let parseAndCheckSecond (sourceA: string) (sourceB: string) : ParsedInput * ISourceText * FSharpCheckFileResults =
+    let dir =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsref-tests", System.Guid.NewGuid().ToString "N")
+
+    System.IO.Directory.CreateDirectory dir |> ignore
+    let pathA = System.IO.Path.Combine(dir, "A.fs")
+    let pathB = System.IO.Path.Combine(dir, "B.fs")
+    System.IO.File.WriteAllText(pathA, sourceA)
+    System.IO.File.WriteAllText(pathB, sourceB)
+
+    let probeOptions, _ =
+        checker.GetProjectOptionsFromScript(
+            System.IO.Path.Combine(dir, "probe.fsx"),
+            SourceText.ofString "",
+            assumeDotNetFramework = false
+        )
+        |> Async.RunSynchronously
+
+    let options =
+        { probeOptions with
+            ProjectFileName = System.IO.Path.Combine(dir, "Second.fsproj")
+            SourceFiles = [| pathA; pathB |] }
+
+    let sourceTextB = SourceText.ofString sourceB
+
+    let parseResultsB, answerB =
+        checker.ParseAndCheckFileInProject(pathB, 0, sourceTextB, options)
+        |> Async.RunSynchronously
+
+    match answerB with
+    | FSharpCheckFileAnswer.Succeeded c -> parseResultsB.ParseTree, sourceTextB, c
+    | FSharpCheckFileAnswer.Aborted -> failwith $"second-file typecheck aborted for:\n{sourceB}"

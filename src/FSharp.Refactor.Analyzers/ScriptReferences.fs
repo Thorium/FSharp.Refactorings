@@ -36,6 +36,10 @@ open System.IO
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open FSharp.Refactor.Text
+open System.Text.RegularExpressions
+
+/// Runs of path separators, kept as split pieces so a rewrite preserves them.
+let private separatorRuns = Regex(@"([\\/]+)", RegexOptions.Compiled)
 
 type Suggestion =
     {
@@ -107,8 +111,7 @@ let private rank (original: Framework) (sdkMajor: int option) (candidate: Framew
 
 /// `Name.1.2.3` → (Name, [1;2;3]).
 let private parseVersioned (segment: string) =
-    let m =
-        System.Text.RegularExpressions.Regex.Match(segment, @"^(.+?)\.(\d+(?:\.\d+)+)$")
+    let m = Regex.Match(segment, @"^(.+?)\.(\d+(?:\.\d+)+)$")
 
     if m.Success then
         Some(m.Groups.[1].Value, m.Groups.[2].Value.Split '.' |> Array.map int |> List.ofArray)
@@ -120,8 +123,7 @@ let private parseVersioned (segment: string) =
 let sdkMajorOf (compilerOptions: string seq) =
     compilerOptions
     |> Seq.tryPick (fun o ->
-        let m =
-            System.Text.RegularExpressions.Regex.Match(o, @"[\\/]ref[\\/]net(\d+)\.0[\\/]")
+        let m = Regex.Match(o, @"[\\/]ref[\\/]net(\d+)\.0[\\/]")
 
         if m.Success then Some(int m.Groups.[1].Value) else None)
 
@@ -233,7 +235,7 @@ let find (script: string) (tree: ParsedInput) (source: ISourceText) (compilerOpt
                       // segment's name (`Foo.net45/lib/net45`) is not the
                       // one rewritten
                       let replacement =
-                          let pieces = System.Text.RegularExpressions.Regex.Split(original, @"([\\/]+)")
+                          let pieces = separatorRuns.Split original
 
                           // path segments are the non-separator pieces whose
                           // text ends with the segment name (the first piece

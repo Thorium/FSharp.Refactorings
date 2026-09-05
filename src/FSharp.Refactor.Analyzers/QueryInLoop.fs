@@ -147,9 +147,68 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           | Some(outerEnum: SynExpr) -> mentionsChunking outerEnum.Range
                           | None -> false)
 
+                  // inside `query { }` a nested `for` is a JOIN the provider
+                  // translates into one statement — but only when the OUTER
+                  // loop's source is itself IQueryable: an in-memory outer
+                  // sequence runs the inner query once per element, in a
+                  // query block or out of it
+                  // the outer source is queryable when it is a queryable
+                  // value, or a `query { }` of its own — SQLProvider's tests
+                  // nest sub-queries three deep, all one statement
+                  let outerIsQueryable (e: SynExpr) =
+                      match stripParens e with
+                      | SourcePathLastIdent outerId -> resolvesToQueryable check source outerId
+                      | SynExpr.App(funcExpr = SynExpr.Ident q; argExpr = SynExpr.ComputationExpr _) ->
+                          q.idText.EndsWith("query", System.StringComparison.OrdinalIgnoreCase)
+                      | _ -> false
+
+                  let translatedJoin =
+                      insideQuotedCode path
+                      && (path
+                          |> List.tryPick (fun node ->
+                              match node with
+                              | SyntaxNode.SynExpr(SynExpr.ForEach(enumExpr = outer)) -> Some outer
+                              | _ -> None)
+                          |> Option.exists outerIsQueryable)
+
+                  // a query under a loop that pages with skip/take, or filters
+                  // by the outer element's batch (`chunk.Contains order.Id`),
+                  // runs one statement per batch on purpose — SQLProvider's
+                  // pagination and batching tests, not N+1
+                  let paginated =
+                      let outerVariables =
+                          path
+                          |> List.collect (fun node ->
+                              match node with
+                              | SyntaxNode.SynExpr(SynExpr.ForEach(pat = p)) -> patNames p
+                              | _ -> [])
+                          |> Set.ofList
+
+                      let queryBody =
+                          path
+                          |> List.tryPick (fun node ->
+                              match node with
+                              | SyntaxNode.SynExpr(SynExpr.ComputationExpr(expr = body)) -> Some body
+                              | _ -> None)
+
+                      match queryBody with
+                      | Some body ->
+                          index.Exprs
+                          |> Array.exists (fun (_, e) ->
+                              Range.rangeContainsRange body.Range e.Range
+                              && (match e with
+                                  | SynExpr.App(funcExpr = SynExpr.Ident op) ->
+                                      op.idText = "skip" || op.idText = "take"
+                                  | SynExpr.App(funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ x; m ]))) ->
+                                      m.idText = "Contains" && outerVariables.Contains x.idText
+                                  | _ -> false))
+                      | None -> false
+
                   if
                       not outerLoops.IsEmpty
                       && not intentionalBatching
+                      && not translatedJoin
+                      && not paginated
                       && resolvesToQueryable check source sourceId
                   then
                       { Range = expr.Range

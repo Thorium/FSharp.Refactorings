@@ -103,6 +103,70 @@ let private buildsRecord (index: AstIndex.Index) (bindingRange: range) =
         | SynExpr.Record _ -> Range.rangeContainsRange bindingRange e.Range
         | _ -> false)
 
+/// Does the member lean on the group's inference for a parameter it does
+/// not annotate? A type test, a downcast, a member access or an indexer on
+/// a bare parameter is typed by the group's callers; standing alone the
+/// parameter is a bare 'a and the compiler refuses the test ("runtime
+/// coercion from 'a involves an indeterminate type" — the TypeProviders
+/// SDK's GetFieldInit). Such a member leaves only with its header written
+/// out by the typed check, like a record builder.
+let private leansOnParameters
+    (check: FSharpCheckFileResults option)
+    (source: ISourceText)
+    (index: AstIndex.Index)
+    (binding: SynBinding)
+    =
+    let (SynBinding(headPat = pat; expr = body)) = binding
+
+    let bare =
+        match pat with
+        | SynPat.LongIdent(argPats = SynArgPats.Pats pats) ->
+            pats
+            |> List.choose (fun p ->
+                match p with
+                | SynPat.Named(ident = SynIdent(ident = id)) -> Some id.idText
+                | SynPat.Paren(SynPat.Named(ident = SynIdent(ident = id)), _) -> Some id.idText
+                | _ -> None)
+            |> Set.ofList
+        | _ -> Set.empty
+
+    let isInstClause (SynMatchClause(pat = p)) =
+        match p with
+        | SynPat.IsInst _
+        | SynPat.As(SynPat.IsInst _, _, _) -> true
+        | _ -> false
+
+    // a record label resolves on a bare parameter (`p.Index` names the
+    // record), a class member does not: only the latter leans on the group
+    let memberLeans (id: Ident) (m: Ident) =
+        bare.Contains id.idText
+        && (match check with
+            | Some check ->
+                let r = m.idRange
+                let lineText = source.GetLineString(r.EndLine - 1)
+
+                match check.GetSymbolUseAtLocation(r.EndLine, r.EndColumn, lineText, [ m.idText ]) with
+                | Some symbolUse ->
+                    match symbolUse.Symbol with
+                    | :? FSharpField -> false
+                    | _ -> true
+                | None -> false
+            | None -> false)
+
+    not bare.IsEmpty
+    && index.Exprs
+       |> Seq.exists (fun (_, e) ->
+           Range.rangeContainsRange body.Range e.Range
+           && (match e with
+               | SynExpr.TypeTest(expr = SynExpr.Ident id)
+               | SynExpr.Downcast(expr = SynExpr.Ident id)
+               | SynExpr.DotIndexedGet(objectExpr = SynExpr.Ident id) -> bare.Contains id.idText
+               | SynExpr.DotGet(expr = SynExpr.Ident id; longDotId = SynLongIdent(id = m :: _)) -> memberLeans id m
+               | SynExpr.LongIdent(longDotId = SynLongIdent(id = id :: m :: _)) -> memberLeans id m
+               | SynExpr.Match(expr = SynExpr.Ident id; clauses = clauses) ->
+                   bare.Contains id.idText && clauses |> List.exists isInstClause
+               | _ -> false))
+
 /// The member's header line with every plain parameter annotated with the
 /// type the group's inference found for it, and its return type added, so
 /// the body's record expressions keep an expected type once the member
@@ -272,7 +336,10 @@ let find (check: FSharpCheckFileResults option) (parseTree: ParsedInput) (source
                       // a record-building member leaves with its types
                       // written out, or not at all
                       let movableText =
-                          if buildsRecord index.Value binding.RangeOfBindingWithRhs then
+                          if
+                              buildsRecord index.Value binding.RangeOfBindingWithRhs
+                              || leansOnParameters check source index.Value binding
+                          then
                               match check with
                               | Some check ->
                                   annotatedHeaderLine check source binding (List.item i keywordStarts)

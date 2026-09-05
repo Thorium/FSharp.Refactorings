@@ -83,6 +83,9 @@ let parse (json: string) : Map<string, bool> =
 ///   along unchanged rather than removing. The observation is worth
 ///   having on demand; volunteered on every run it is noise about a
 ///   rewrite that often will not pay. An opt-in, not a default.
+///   FR0019 (Equals without GetHashCode) duplicates the compiler: FS0346
+///   warns on every shape the rule can find, and F# records and unions
+///   get both for free. An opt-in, not a default.
 let private defaultOff =
     set
         [ "fr0002"
@@ -94,7 +97,9 @@ let private defaultOff =
           "fr0114"
           "pyramidflip"
           "fr0141"
-          "generativeloop" ]
+          "generativeloop"
+          "fr0019"
+          "equalshashcode" ]
 // FR0130 and FR0133 both once described themselves as off by default while
 // never being listed here, so every sweep ran them; aligning the code to
 // that text took away the [<Literal>]s and the backtick names sweeps had

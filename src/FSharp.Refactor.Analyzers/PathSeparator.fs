@@ -39,8 +39,14 @@ let rec private plusOperandsLoop (acc: SynExpr list) (e: SynExpr) =
         plusOperandsLoop (rhs :: acc) lhs
     | leaf -> leaf :: acc
 
+/// Names that say the slash-joined thing is NOT a filesystem path: web
+/// addresses, and document pointers (`doc.Path() + "/" + name` in a JSON
+/// runtime is a JSON pointer, spelled with forward slashes by definition).
 let private urlSmell =
-    Regex(@"(?i)url|uri|http|link|route|endpoint|href|slug|query", RegexOptions.Compiled)
+    Regex(
+        @"(?i)url|uri|http|link|route|endpoint|href|slug|query|(?<!\.)\b(json|xml|xpath|html|pointer)",
+        RegexOptions.Compiled
+    )
 
 /// Positive path evidence, required for forward-slash joins ('\' is
 /// path-ish on its own): path-flavored identifiers, the classic directory
@@ -58,6 +64,9 @@ let private rootedLiteral =
     Regex(@"^([A-Za-z]:[\\/]|\\\\|~[\\/]|\.{1,2}[\\/])", RegexOptions.Compiled)
 
 let private extensionLiteral = Regex(@"\.\w{1,5}$", RegexOptions.Compiled)
+
+/// `./`, `../`, `../../` — relative-path notation, not a separator.
+let private dotSegments = Regex(@"^[/\\]?(\.{1,2}[/\\])+$", RegexOptions.Compiled)
 
 let private existsOnDisk (text: string) =
     try
@@ -133,6 +142,10 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
                   |> List.indexed
                   |> List.choose (fun (i, o) ->
                       match o with
+                      // `"./" + path` and `prefix + "../"` prepend or
+                      // append dot-segments: relative-path notation, which
+                      // Path.Combine cannot spell — not a join
+                      | SynExpr.Const(SynConst.String(text, _, _), _) when dotSegments.IsMatch text -> None
                       | SynExpr.Const(SynConst.String(text, _, _), _) ->
                           separatorOf text
                           |> Option.filter (fun sep ->
@@ -149,6 +162,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
               let smellsOfUrl =
                   literalTexts |> List.exists (fun t -> t.Contains "://")
                   || urlSmell.IsMatch(textOfRange source expr.Range)
+                  // the file's own name says what kind of path it builds:
+                  // JsonRuntime.fs joins JSON pointers, not directories
+                  || urlSmell.IsMatch(System.IO.Path.GetFileName expr.Range.FileName)
 
               let hasNonLiteralPart =
                   operands

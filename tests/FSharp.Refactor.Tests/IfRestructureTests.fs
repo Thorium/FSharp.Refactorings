@@ -781,3 +781,22 @@ let ``a backticked parameter keeps its backticks when annotated`` () =
         let patched = applyEdit patched s.InsertRange s.InsertText
         Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
     | other -> failwithf "Expected one extraction, got %A" other
+
+[<Fact>]
+let ``a member testing the type of a bare parameter leaves with its header written out`` () =
+    // TypeProviders SDK: `GetFieldInit bb x` matched `x` with `:? string`;
+    // inside the group x's type came from the caller, alone it is a bare 'a
+    let source =
+        "module Test\ntype Buf() =\n    member _.Emit(b: byte[]) = ()\nlet rec first (buf: Buf) (x: obj) = second buf x\nand second buf x =\n    match x with\n    | :? string as s -> buf.Emit(System.Text.Encoding.Unicode.GetBytes s)\n    | _ -> ()"
+
+    match recGroupsTyped source with
+    | [ s ] ->
+        Assert.Equal("second", s.MemberName)
+        Assert.StartsWith("let second (buf: Buf) (x: obj) : unit =", s.InsertText)
+        let patched = applyEdit source s.RemoveRange ""
+        let patched = applyEdit patched s.InsertRange s.InsertText
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one extraction, got %A" other
+
+    // without the typed tree there is nothing to write out: it stays
+    Assert.Empty(recGroupsIn source)

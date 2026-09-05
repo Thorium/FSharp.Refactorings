@@ -171,11 +171,20 @@ let find
                     let seen = System.Collections.Generic.Dictionary<string, string>()
 
                     for SynEnumCase(ident = SynIdent(ident = caseId); valueExpr = valueExpr) in cases do
+                        // every integral spelling keys the same way: `16`,
+                        // `0x10` and `16u` are one value (FCS's vendored
+                        // ilnativeres.fs aliases its flags with `u` suffixes)
                         let key =
                             match valueExpr with
                             | SynExpr.Const(SynConst.Int32 v, _) -> Some(string v)
                             | SynExpr.Const(SynConst.Int64 v, _) -> Some(string v)
                             | SynExpr.Const(SynConst.Byte v, _) -> Some(string v)
+                            | SynExpr.Const(SynConst.SByte v, _) -> Some(string v)
+                            | SynExpr.Const(SynConst.Int16 v, _) -> Some(string v)
+                            | SynExpr.Const(SynConst.UInt16 v, _) -> Some(string v)
+                            | SynExpr.Const(SynConst.UInt32 v, _) -> Some(string v)
+                            | SynExpr.Const(SynConst.UInt64 v, _) -> Some(string v)
+                            | SynExpr.Const(SynConst.Char v, _) -> Some(string (int v))
                             | _ -> None
 
                         match key with

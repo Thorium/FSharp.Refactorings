@@ -65,9 +65,41 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         let index = AstIndex.ofTree parseTree
 
-        [ for _, expr in index.Exprs do
+        // `dt.Date <> DateTime.Today` is a same-day test against a date
+        // this machine produced (a fill-in date, a parse default): both
+        // sides are the same clock, so the calendar cut is not a bug there
+        let sameDayCompare (path: SyntaxNode list) (r: range) =
+            let endsWithDate (e: SynExpr) =
+                match e with
+                | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+                    (List.last ids).idText = "Date"
+                | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) when not ids.IsEmpty ->
+                    (List.last ids).idText = "Date"
+                | _ -> false
+
+            let isCompare (op: SynExpr) =
+                match op with
+                | SynExpr.Ident id
+                | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ id ])) ->
+                    id.idText = "op_Equality" || id.idText = "op_Inequality"
+                | _ -> false
+
+            match path with
+            // Today on the right: outer App(App(op, lhs), Today)
+            | SyntaxNode.SynExpr(SynExpr.App(funcExpr = SynExpr.App(isInfix = true; funcExpr = op; argExpr = lhs))) :: _ when
+                isCompare op && not (Range.rangeContainsRange lhs.Range r)
+                ->
+                endsWithDate lhs
+            // Today on the left: inner App(op, Today), then outer App(_, rhs)
+            | SyntaxNode.SynExpr(SynExpr.App(isInfix = true; funcExpr = op)) :: SyntaxNode.SynExpr(SynExpr.App(
+                argExpr = rhs)) :: _ when isCompare op -> endsWithDate rhs
+            | _ -> false
+
+        [ for path, expr in index.Exprs do
               match expr with
-              | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when ids.Length >= 2 ->
+              | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
+                  ids.Length >= 2 && not (sameDayCompare path expr.Range)
+                  ->
                   let names = ids |> List.map (fun i -> i.idText)
 
                   // ...UtcNow.Date ANYWHERE in the chain (`.AddDays` etc may

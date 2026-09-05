@@ -102,7 +102,7 @@ let private repoFile name =
 /// The table's rows: code, category, enabled flag, api flag. An empty flag
 /// cell renders as a single space between its pipes.
 let private rulesTableRows () =
-    Regex.Matches(repoFile "Rules.md", @"^\| (FR\d{4}) \| (\w+) \| (v?) ?\| (v?) ?\|", RegexOptions.Multiline)
+    Regex.Matches(repoFile "Rules.md", @"^\| (FR\d{4}) \| (\w+) \| (v?) ?\| (v?) ?\| (v?) ?\|", RegexOptions.Multiline)
     |> Seq.map (fun m -> m.Groups.[1].Value, m.Groups.[2].Value, m.Groups.[3].Value = "v", m.Groups.[4].Value = "v")
     |> List.ofSeq
 
@@ -151,3 +151,27 @@ let ``Rules.md enabled column matches the default-off list`` () =
             (enabled = expected),
             $"{code} ({name}): Rules.md says enabled={enabled}, Configuration says {expected}"
         )
+
+[<Fact>]
+let ``Rules.md advisory rows match the catalog's advisory set`` () =
+    let dashRows =
+        Regex.Matches(repoFile "Rules.md", @"^\| (FR\d{4}) \|.*\| — \|\s*$", RegexOptions.Multiline)
+        |> Seq.map (fun m -> m.Groups.[1].Value)
+        |> Set.ofSeq
+
+    let missing = Set.difference dashRows RuleCatalog.advisory
+    let extra = Set.difference RuleCatalog.advisory dashRows
+    Assert.True(missing.IsEmpty, $"Rules.md marks as advisory but the catalog does not: %A{missing}")
+    Assert.True(extra.IsEmpty, $"the catalog marks as advisory but Rules.md offers a fix: %A{extra}")
+
+[<Fact>]
+let ``Rules.md priority column matches the catalog's priority set`` () =
+    let flagged =
+        Regex.Matches(repoFile "Rules.md", @"^\| (FR\d{4}) \| \w+ \| v? ?\| v? ?\| v \|", RegexOptions.Multiline)
+        |> Seq.map (fun m -> m.Groups.[1].Value)
+        |> Set.ofSeq
+
+    let missing = Set.difference RuleCatalog.priority flagged
+    let extra = Set.difference flagged RuleCatalog.priority
+    Assert.True(missing.IsEmpty, $"the catalog marks as priority but Rules.md does not: %A{missing}")
+    Assert.True(extra.IsEmpty, $"Rules.md marks as priority but the catalog does not: %A{extra}")

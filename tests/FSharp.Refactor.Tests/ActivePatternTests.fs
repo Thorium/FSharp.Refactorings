@@ -6,7 +6,7 @@ open FSharp.Refactor.Tests.Parsing
 
 let private findIn (source: string) =
     let tree, sourceText, checkResults = parseAndCheck source
-    ActivePattern.find tree sourceText checkResults
+    ActivePattern.find true tree sourceText checkResults
 
 /// Apply both edits of the suggestion (clause first — it sits later in the
 /// document — then the insertion) and verify the result typechecks.
@@ -108,3 +108,46 @@ let ``a guard variable the body never reads becomes a wildcard`` () =
     assertSingleSuggestion
         "module Test\nlet kind (ch: char) =\n    match ch with\n    | c when System.Char.IsDigit c -> \"digit\"\n    | _ -> \"other\""
         "module Test\n[<return: Struct>]\nlet inline private (|IsDigit|_|) (input: char) =\n    if System.Char.IsDigit input then ValueSome input else ValueNone\nlet kind (ch: char) =\n    match ch with\n    | IsDigit _ -> \"digit\"\n    | _ -> \"other\""
+
+[<Fact>]
+let ``a declaration left of its siblings' column gets no pattern`` () =
+    // TypeProviders SDK's Codebuf: a `let` the compiler tolerates offside of
+    // the module body; an attribute line spliced at its column attaches to
+    // nothing
+    let offside =
+        "module Test\nmodule Inner =\n     let isX (i: int) = i > 0\n    let f i =\n        match i with\n        | x when isX x -> x\n        | _ -> 0"
+
+    let tree, sourceText, checkResults = parseAndCheck offside
+    Assert.Empty(ActivePattern.find true tree sourceText checkResults)
+
+    let aligned =
+        "module Test\nmodule Inner =\n    let isX (i: int) = i > 0\n    let f i =\n        match i with\n        | x when isX x -> x\n        | _ -> 0"
+
+    let tree, sourceText, checkResults = parseAndCheck aligned
+    Assert.Single(ActivePattern.find true tree sourceText checkResults) |> ignore
+
+[<Fact>]
+let ``an offside declaration two modules deep under a namespace gets no pattern either`` () =
+    // the TypeProviders SDK's exact nesting: namespace, module, nested
+    // module whose first declaration sits one column right of the offender
+    let source =
+        "namespace Provider\nmodule Outer =\n    let isX (i: int) = i > 0\n    module Codebuf =\n         let first = 1\n        let f i =\n            match i with\n            | x when isX x -> x\n            | _ -> 0"
+
+    let tree, sourceText, checkResults = parseAndCheck source
+    Assert.Empty(ActivePattern.find true tree sourceText checkResults)
+
+[<Fact>]
+let ``an old FSharp.Core gets the option-returning pattern`` () =
+    // the TypeProviders SDK pins FSharp.Core 4.7, where `[<return: Struct>]`
+    // does not exist: the attribute attached to nothing and the pattern
+    // was refused
+    let source =
+        "module Test\nlet isX (i: int) = i > 0\nlet f i =\n    match i with\n    | x when isX x -> x\n    | _ -> 0"
+
+    let tree, sourceText, checkResults = parseAndCheck source
+
+    match ActivePattern.find false tree sourceText checkResults with
+    | [ s ] ->
+        Assert.DoesNotContain("Struct", s.InsertText)
+        Assert.Contains("then Some input else None", s.InsertText)
+    | other -> failwithf "Expected one pattern, got %A" other

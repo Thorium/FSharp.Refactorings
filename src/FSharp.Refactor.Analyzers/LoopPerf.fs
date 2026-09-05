@@ -47,6 +47,10 @@ type ConstructionSuggestion =
         TypeName: string
     }
 
+/// A bare identifier path — `x`, `xs.Length`, `Some.Module.value`.
+let private atomicIdent =
+    System.Text.RegularExpressions.Regex(@"^[A-Za-z_][\w'.]*$", System.Text.RegularExpressions.RegexOptions.Compiled)
+
 let private collectionModules = set [ "List"; "Array"; "Seq" ]
 
 /// Types whose construction inside a loop is expensive by design.
@@ -284,8 +288,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
                               let probeArg (itemExpr: SynExpr) =
                                   let itemText = textOfRange source itemExpr.Range
 
-                                  let atomic =
-                                      System.Text.RegularExpressions.Regex.IsMatch(itemText, @"^[A-Za-z_][\w'.]*$")
+                                  let atomic = atomicIdent.IsMatch itemText
 
                                   if atomic then itemText else $"({itemText})"
 
@@ -370,11 +373,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) : ContainsSuggestion lis
                                           |> List.map (fun (_, _, r, itemExpr) ->
                                               let itemText = textOfRange source itemExpr.Range
 
-                                              let atomic =
-                                                  System.Text.RegularExpressions.Regex.IsMatch(
-                                                      itemText,
-                                                      @"^[A-Za-z_][\w'.]*$"
-                                                  )
+                                              let atomic = atomicIdent.IsMatch itemText
 
                                               let arg = if atomic then itemText else $"({itemText})"
                                               r, textOfRange source r, $"{setName}.Contains {arg}")

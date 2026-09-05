@@ -53,18 +53,23 @@ let private isOverride (SynBinding(valData = SynValData(memberFlags = flags))) =
     flags |> Option.exists (fun f -> f.IsOverrideOrExplicitImpl)
 
 /// All member bindings of a type definition (object-model body plus
-/// augmentation-style members).
-let private memberBindings (SynTypeDefn(typeRepr = repr; members = extraMembers)) =
-    let ofMembers members =
+/// augmentation-style members). With `includeInterfaces`, the bindings
+/// inside `interface X with ...` blocks too — where IDisposable.Dispose
+/// and IEquatable.Equals actually live.
+let private memberBindingsOf (includeInterfaces: bool) (SynTypeDefn(typeRepr = repr; members = extraMembers)) =
+    let rec ofMembers members =
         members
         |> List.collect (fun m ->
             match m with
             | SynMemberDefn.Member(memberDefn = binding) -> [ binding ]
+            | SynMemberDefn.Interface(members = Some inner) when includeInterfaces -> ofMembers inner
             | _ -> [])
 
     match repr with
     | SynTypeDefnRepr.ObjectModel(members = members) -> ofMembers members @ ofMembers extraMembers
     | _ -> ofMembers extraMembers
+
+let private memberBindings typeDefn = memberBindingsOf false typeDefn
 
 /// Abstract slots declared directly in the type.
 let private abstractSlotNames (SynTypeDefn(typeRepr = repr)) =
@@ -101,61 +106,13 @@ let private ctorExprs (SynTypeDefn(typeRepr = repr)) =
             | _ -> [])
     | _ -> []
 
-/// References to `self.<name>` for any of the given names, anywhere in an
-/// expression (worklist walk over the shapes constructors contain).
-[<TailCall>]
-let rec private selfRefsLoop
-    (self: string)
-    (names: Set<string>)
-    (acc: ResizeArray<Ident>)
-    (pending: SynExpr list)
-    : unit =
-    match pending with
-    | [] -> ()
-    | e :: rest ->
-        let next =
-            match e with
-            | SynExpr.LongIdent(longDotId = SynLongIdent(id = [ head; name ])) when
-                head.idText = self && names.Contains name.idText
-                ->
-                acc.Add name
-                rest
-            | SynExpr.DotGet(expr = SynExpr.Ident head; longDotId = SynLongIdent(id = [ name ])) when
-                head.idText = self && names.Contains name.idText
-                ->
-                acc.Add name
-                rest
-            | SynExpr.Paren(expr = inner)
-            | SynExpr.Typed(expr = inner)
-            | SynExpr.DotGet(expr = inner)
-            | SynExpr.Lambda(body = inner) -> inner :: rest
-            | SynExpr.App(funcExpr = f; argExpr = a) -> f :: a :: rest
-            | SynExpr.Tuple(exprs = es)
-            | SynExpr.ArrayOrList(exprs = es) -> es @ rest
-            | SynExpr.ArrayOrListComputed(expr = inner) -> inner :: rest
-            | SynExpr.Sequential(expr1 = e1; expr2 = e2) -> e1 :: e2 :: rest
-            | SynExpr.IfThenElse(ifExpr = c; thenExpr = t; elseExpr = els) -> c :: t :: (Option.toList els) @ rest
-            | SynExpr.Match(expr = scr; clauses = clauses) ->
-                scr :: (clauses |> List.map (fun (SynMatchClause(resultExpr = r)) -> r)) @ rest
-            | LetOrUseE lou -> (lou.Bindings |> List.map (fun (SynBinding(expr = b)) -> b)) @ lou.Body :: rest
-            | _ -> rest
-
-        selfRefsLoop self names acc next
-
 /// Members that hash containers, debuggers, and finalization call
 /// implicitly — an exception thrown there surfaces far from its cause.
 let private specialMembers = set [ "Equals"; "GetHashCode"; "ToString"; "Dispose" ]
 
 /// Raising functions from FSharp.Core.
 let private raisingFunctions =
-    set
-        [ "raise"
-          "failwith"
-          "failwithf"
-          "invalidOp"
-          "invalidArg"
-          "nullArg"
-          "notImplemented" ]
+    set [ "raise"; "failwith"; "failwithf"; "invalidOp"; "invalidArg"; "nullArg" ]
 
 /// Find Equals-without-GetHashCode, ctor-time abstract calls, and raises in
 /// members that are never expected to throw.
@@ -168,12 +125,24 @@ let find
     let raiseSuggestions = ResizeArray<RaiseInSpecialSuggestion>()
     let index = AstIndex.ofTree parseTree
 
-    // raise-like applications, for range-containment checks
+    // raise-like applications, for range-containment checks — the direct
+    // call, `raise <| X()`, and `X() |> raise`
     let raiseSites =
         index.Exprs
         |> Array.choose (fun (_, e) ->
             match e with
             | SynExpr.App(isInfix = false; funcExpr = SingleIdent fn) when raisingFunctions.Contains fn.idText ->
+                Some(fn.idText, e.Range)
+            | SynExpr.App(
+                isInfix = false
+                funcExpr = SynExpr.App(isInfix = true; funcExpr = SingleIdent op; argExpr = SingleIdent fn)) when
+                op.idText = "op_PipeLeft" && raisingFunctions.Contains fn.idText
+                ->
+                Some(fn.idText, e.Range)
+            | SynExpr.App(
+                isInfix = false
+                funcExpr = SynExpr.App(isInfix = true; funcExpr = SingleIdent op)
+                argExpr = SingleIdent fn) when op.idText = "op_PipeRight" && raisingFunctions.Contains fn.idText ->
                 Some(fn.idText, e.Range)
             | _ -> None)
 
@@ -204,7 +173,7 @@ let find
                         // rule 3 (FR0054): raises inside members callers never
                         // expect to throw (excluding ones inside a try-with,
                         // which the member handles itself)
-                        for binding in memberBindings typeDefn |> List.filter isOverride do
+                        for binding in memberBindingsOf true typeDefn |> List.filter isOverride do
                             match memberName binding, binding with
                             | Some nameId, SynBinding(expr = body) when specialMembers.Contains nameId.idText ->
                                 let handledRanges =
@@ -230,14 +199,35 @@ let find
 
                         match selfIdentifier typeDefn with
                         | Some self when not abstracts.IsEmpty ->
-                            let refs = ResizeArray<Ident>()
-                            selfRefsLoop self abstracts refs (ctorExprs typeDefn)
+                            // every `self.<slot>` anywhere inside a ctor-time
+                            // binding: the index already walked each shape
+                            // (assignment right-hand sides, loops, try blocks),
+                            // where a hand-rolled worklist used to stop short
+                            let ctorRanges = ctorExprs typeDefn |> List.map (fun e -> e.Range)
 
-                            for ident in refs do
-                                ctorSuggestions.Add
-                                    { MemberName = ident.idText
-                                      Range = ident.idRange
-                                      OriginalText = textOfRange source ident.idRange }
+                            let inCtor (r: range) =
+                                ctorRanges |> List.exists (fun c -> Range.rangeContainsRange c r)
+
+                            for _, e in index.Exprs do
+                                let referenced =
+                                    match e with
+                                    | SynExpr.LongIdent(longDotId = SynLongIdent(id = head :: name :: _)) when
+                                        head.idText = self && abstracts.Contains name.idText && inCtor e.Range
+                                        ->
+                                        Some name
+                                    | SynExpr.DotGet(expr = SynExpr.Ident head; longDotId = SynLongIdent(id = name :: _)) when
+                                        head.idText = self && abstracts.Contains name.idText && inCtor e.Range
+                                        ->
+                                        Some name
+                                    | _ -> None
+
+                                match referenced with
+                                | Some ident ->
+                                    ctorSuggestions.Add
+                                        { MemberName = ident.idText
+                                          Range = ident.idRange
+                                          OriginalText = textOfRange source ident.idRange }
+                                | None -> ()
                         | _ -> ()
                 | _ -> () }
 

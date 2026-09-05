@@ -330,9 +330,49 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           let args =
                               sets |> List.map (fun (p, rhs) -> $"{p.idText} = {argumentText source rhs}")
 
+                          // a greedy last argument — `T(fun _ -> false)` — would
+                          // swallow the named properties appended after it
+                          // (`fun _ -> false, Hosted = true` is a lambda returning
+                          // a tuple: the TypeProviders SDK's
+                          // TypeProviderConfig); it gets its own parentheses
+                          let ctorText =
+                              let lastArgument =
+                                  match ctor with
+                                  | SynExpr.New(expr = SynExpr.Paren(expr = inner))
+                                  | SynExpr.App(argExpr = SynExpr.Paren(expr = inner)) ->
+                                      match inner with
+                                      | SynExpr.Tuple(exprs = es) -> Some(List.last es)
+                                      | e -> Some e
+                                  | _ -> None
+
+                              let greedy (e: SynExpr) =
+                                  match e with
+                                  | SynExpr.Lambda _
+                                  | SynExpr.MatchLambda _
+                                  | SynExpr.Match _
+                                  | SynExpr.IfThenElse _
+                                  | SynExpr.TryWith _
+                                  | SynExpr.TryFinally _
+                                  | SynExpr.Sequential _
+                                  | SynExpr.LetOrUse _ -> true
+                                  | _ -> false
+
+                              match lastArgument with
+                              | Some e when greedy e ->
+                                  let before =
+                                      textOfRange
+                                          source
+                                          (Range.mkRange ctor.Range.FileName ctor.Range.Start e.Range.Start)
+
+                                  let after =
+                                      textOfRange source (Range.mkRange ctor.Range.FileName e.Range.End ctor.Range.End)
+
+                                  before + "(" + textOfRange source e.Range + ")" + after
+                              | _ -> textOfRange source ctor.Range
+
                           { Range = region
                             OriginalText = textOfRange source region
-                            ReplacementText = withNamedArgs (textOfRange source ctor.Range) ctor.Range.StartColumn args
+                            ReplacementText = withNamedArgs ctorText ctor.Range.StartColumn args
                             Count = sets.Length }
                   | _ -> ()
               | _ -> () ]

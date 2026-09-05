@@ -87,6 +87,7 @@
     <Compile Include="..\FSharp.Refactor.Analyzers\NaNComparison.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\WeakLock.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\FormatArgs.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\BlockingSites.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\SyncOverAsync.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\Taskify.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\Accumulation.fs" />
@@ -111,6 +112,7 @@
     <Compile Include="..\FSharp.Refactor.Analyzers\ScriptLoads.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\ScriptReferences.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\RecordFields.fs" />
+    <Compile Include="..\FSharp.Refactor.Analyzers\QualifiedNames.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\CatchLogException.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\DateTimeRules.fs" />
     <Compile Include="..\FSharp.Refactor.Analyzers\MonitorLock.fs" />

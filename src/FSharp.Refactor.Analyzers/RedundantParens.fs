@@ -78,7 +78,7 @@ let isBareableArgument (source: ISourceText) (inner: SynExpr) =
         let text = textOfRange source inner.Range
 
         text.StartsWith '('
-        || (text.Length > 0 && (System.Char.IsLetter text.[0] || text.[0] = '_'))
+        || (text.Length > 0 && (Char.IsLetter text.[0] || text.[0] = '_'))
     | SynExpr.LongIdent _ -> true
     // `m (())` passes unit as a VALUE — to a generic `'t` parameter, say;
     // bare, `m ()` is a call with no arguments, and a method with a

@@ -200,3 +200,159 @@ let ``a near-limit int64 multiplication is noted`` () =
     match checkedIn "module Test\nlet f (n: int64) = n * 600_000_000_000_000_000L" with
     | [ s ] -> Assert.Equal("600_000_000_000_000_000L", s.ConstantText)
     | other -> failwithf "Expected exactly one int64 note, got %A" other
+
+[<Fact>]
+let ``FR0032: a field the type disposes itself is managed, not ownerless`` () =
+    // FSharp.Data's FileWatcher: the watcher is disposed when the last
+    // subscriber leaves — a protocol, not a leak
+    let disposables, _, _ =
+        designIn
+            "module Test\nopen System.IO\ntype Watcher(path: string) =\n    let watcher = new FileSystemWatcher(path)\n    let mutable count = 1\n    member _.Unsubscribe() =\n        count <- count - 1\n        if count = 0 then watcher.Dispose()"
+
+    Assert.Empty disposables
+
+[<Fact>]
+let ``FR0047: a Dispose that delegates to DisposeAsync disposes through the async body`` () =
+    // FsAutoComplete's ServerProgressReport: cts is disposed in DisposeAsync,
+    // and Dispose only forwards — the field is not missed
+    let _, _, undisposed =
+        designIn
+            "module Test\nopen System\nopen System.Threading\nopen System.Threading.Tasks\ntype Reporter() =\n    let cts = new CancellationTokenSource()\n    interface IAsyncDisposable with\n        member _.DisposeAsync() =\n            cts.Dispose()\n            ValueTask()\n    interface IDisposable with\n        member x.Dispose() = (x :> IAsyncDisposable).DisposeAsync() |> ignore"
+
+    Assert.Empty undisposed
+
+[<Fact>]
+let ``FR0105: MaxValue plus something overflows, MaxValue minus something is a sentinel`` () =
+    match
+        checkedIn "module Test\nlet a (n: int) = System.Int32.MaxValue + n\nlet b (n: int) = System.Int32.MaxValue - n"
+    with
+    | [ s ] -> Assert.Equal("System.Int32.MaxValue", s.ConstantText)
+    | other -> failwithf "Expected one near-limit finding, got %A" other
+
+[<Fact>]
+let ``FR0046: locking this is a weak lock, spelled with a pipe too`` () =
+    match
+        locksIn
+            "module Test\ntype Cache() =\n    let mutable n = 0\n    member this.Bump() =\n        lock this\n        <| fun () -> n <- n + 1"
+    with
+    | [ s ] ->
+        Assert.Equal(WeakLock.WeakKind.SelfObject, s.Kind)
+        Assert.Empty s.Fix // a member has no module-level slot for a lock object
+    | other -> failwithf "Expected one weak-lock finding, got %A" other
+
+[<Fact>]
+let ``FR0046: a lock on stdout is noted without a fix`` () =
+    match locksIn "module Test\nlet say (s: string) = lock stdout (fun () -> printfn \"%s\" s)" with
+    | [ s ] ->
+        Assert.Equal(WeakLock.WeakKind.SharedSingleton "stdout", s.Kind)
+        Assert.Empty s.Fix
+    | other -> failwithf "Expected one shared-singleton finding, got %A" other
+
+[<Fact>]
+let ``FR0046: a lock on a string literal gets a lock object before the binding`` () =
+    let source =
+        "module Test\nlet mutable count = 0\nlet bump () = lock \"cache\" (fun () -> count <- count + 1)"
+
+    match locksIn source with
+    | [ s ] ->
+        Assert.Equal(WeakLock.WeakKind.StringValue, s.Kind)
+
+        let patched =
+            s.Fix
+            |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.Equal(
+            "module Test\nlet mutable count = 0\nlet private bumpLock = obj ()\n\nlet bump () = lock bumpLock (fun () -> count <- count + 1)",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one weak-lock finding, got %A" other
+
+[<Fact>]
+let ``FR0046: a lock on a module string value gets its lock object next to that value`` () =
+    let source =
+        "module Test\nlet key = \"cache\"\nlet mutable count = 0\nlet bump () = lock key (fun () -> count <- count + 1)"
+
+    match locksIn source with
+    | [ s ] ->
+        let patched =
+            s.Fix
+            |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.Equal(
+            "module Test\nlet key = \"cache\"\nlet private keyLock = obj ()\nlet mutable count = 0\nlet bump () = lock keyLock (fun () -> count <- count + 1)",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one weak-lock finding, got %A" other
+
+[<Fact>]
+let ``FR0105: a million-scale multiplier is a unit conversion that overflows int32`` () =
+    match checkedIn "module Test\nlet micros (seconds: int) = seconds * 1_000_000" with
+    | [ s ] ->
+        Assert.Equal(CheckedArithmetic.OverflowKind.ScaleFactor, s.Kind)
+        Assert.Equal("1_000_000", s.ConstantText)
+    | other -> failwithf "Expected one scale-factor finding, got %A" other
+
+[<Fact>]
+let ``FR0105: the editor's first offer widens to int64 and typechecks, the second goes through Checked`` () =
+    let source = "module Test\nlet micros (seconds: int) = seconds * 1_000_000"
+
+    match checkedIn source with
+    | [ s ] ->
+        match s.WidenFix, s.CheckedFix with
+        | Some(r, _, widened), Some(r2, _, checked') ->
+            Assert.Equal("int64 seconds * 1_000_000L |> Checked.int", widened)
+            let patched = applyEdit source r widened
+            Assert.True(typechecksCleanly patched, $"Widened source does not typecheck:\n%s{patched}")
+            Assert.Equal("Checked.( * ) seconds 1_000_000", checked')
+            let patched2 = applyEdit source r2 checked'
+            Assert.True(typechecksCleanly patched2, $"Checked source does not typecheck:\n%s{patched2}")
+        | other -> failwithf "Expected both offers, got %A" other
+    | other -> failwithf "Expected one finding, got %A" other
+
+[<Fact>]
+let ``FR0105: a MaxValue expression is noted without a widening offer`` () =
+    match checkedIn "module Test\nlet next (n: int) = System.Int32.MaxValue + n" with
+    | [ s ] ->
+        Assert.Equal(CheckedArithmetic.OverflowKind.LimitConstant, s.Kind)
+        Assert.Equal(None, s.WidenFix)
+    | other -> failwithf "Expected one limit-constant finding, got %A" other
+
+[<Fact>]
+let ``FR0105: the widening rewrites the whole arithmetic expression and narrows back through Checked`` () =
+    let source = "module Test\nlet x = (1000000 * 1000000 + 5) / 100000"
+
+    match checkedIn source with
+    | [ s ] ->
+        match s.WidenFix with
+        | Some(r, _, widened) ->
+            Assert.Equal("(1000000L * 1000000L + 5L) / 100000L |> Checked.int", widened)
+            let patched = applyEdit source r widened
+            Assert.True(typechecksCleanly patched, $"Widened source does not typecheck:\n%s{patched}")
+        | None -> failwith "Expected the widening offer"
+    | other -> failwithf "Expected one finding, got %A" other
+
+[<Fact>]
+let ``FR0046: a lock in a nested module gets its lock object in that module, indented`` () =
+    let source =
+        "module Test\nmodule Inner =\n    let mutable count = 0\n    let bump () = lock \"cache\" (fun () -> count <- count + 1)"
+
+    match locksIn source with
+    | [ s ] ->
+        let patched =
+            s.Fix
+            |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.Equal(
+            "module Test\nmodule Inner =\n    let mutable count = 0\n    let private bumpLock = obj ()\n\n    let bump () = lock bumpLock (fun () -> count <- count + 1)",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one weak-lock finding, got %A" other

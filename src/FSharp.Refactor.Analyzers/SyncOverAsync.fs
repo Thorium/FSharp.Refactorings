@@ -16,8 +16,13 @@
 /// thread instead.
 ///
 /// `Thread.Sleep n` in statement position gets a fix (`do! Async.Sleep n`
-/// in async, `do! Task.Delay n` in task); the other shapes are advice —
-/// rewriting them to binds restructures the surrounding code.
+/// in async, `do! Task.Delay n` in task), and so do a statement-position
+/// `t.Wait()` (`do! t`) and `Task.WaitAll(...)` (`do! Task.WhenAll(...)`);
+/// a `let x = <blocking>` directly under the builder becomes a `let!`. A
+/// blocking call inside `Assert.Throws<E>(fun () -> ...)` moves with the
+/// assert to the framework's async spelling. The other shapes are advice —
+/// rewriting them to binds restructures the surrounding code. The shapes
+/// and their awaitables are shared with FR0142 through BlockingSites.
 ///
 /// All receivers/methods are typed-gated (Task.Result, Task.Wait, an
 /// awaiter's GetResult, FSharp.Core's RunSynchronously, Thread.Sleep), so
@@ -64,6 +69,10 @@ type Suggestion =
         /// `t`, `t.GetAwaiter().GetResult()` gives `t`. The taskify fix
         /// binds this with let!/return!.
         Receiver: range voption
+        /// For a CE site: the call sits inside a lambda within the
+        /// computation (a callback, a Func), where the builder's bind
+        /// cannot reach it — the lambda's signature is the sync boundary.
+        InLambda: bool
     }
 
 let private ceBuilders = set [ "async"; "task"; "backgroundTask" ]
@@ -165,7 +174,25 @@ let private (|RunSyncApplication|_|) (e: SynExpr) =
 /// identifier path — `Async.AwaitTask client.GetAsync(u)` would apply to
 /// the wrong thing.
 let private asArgument (text: string) =
-    if Regex.IsMatch(text, @"^[A-Za-z_][\w'.]*$") then
+    // one pair of parentheses around the whole text is atomic already
+    let parenthesized =
+        text.StartsWith "("
+        && text.EndsWith ")"
+        && (let mutable depth = 0
+            let mutable closedEarly = false
+
+            for i in 0 .. text.Length - 2 do
+                if text.[i] = '(' then
+                    depth <- depth + 1
+                elif text.[i] = ')' then
+                    depth <- depth - 1
+
+                    if depth = 0 then
+                        closedEarly <- true
+
+            not closedEarly)
+
+    if parenthesized || Regex.IsMatch(text, @"^[A-Za-z_][\w'.]*$") then
         text
     else
         $"({text})"
@@ -355,10 +382,51 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                       Some(BlockKind.ThreadSleep, Some arg, None)
                   | _ -> None
 
+              // outside any CE two shapes are the documented synchronous idiom,
+              // not a deadlock: `t.Wait(timeout)` is a bounded wait, and a
+              // `.Result` read after `proc.WaitForExit()` in the same body
+              // drains a task that already completed (the Process stdout
+              // pattern; prismatic's scripts, forty times over)
+              let boundedWait =
+                  match expr with
+                  | SynExpr.App(isInfix = false; funcExpr = CallIdent id; argExpr = arg) when id.idText = "Wait" ->
+                      (match arg with
+                       | UnitConst -> false
+                       | _ -> true)
+                  | _ -> false
+
+              let afterWaitForExit () =
+                  let bindingRange =
+                      path
+                      |> List.tryPick (fun node ->
+                          match node with
+                          | SyntaxNode.SynBinding(SynBinding _ as b) -> Some b.RangeOfBindingWithRhs
+                          | _ -> None)
+
+                  match bindingRange with
+                  | Some r ->
+                      index.Exprs
+                      |> Array.exists (fun (_, e) ->
+                          match e with
+                          | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)) when
+                              not ids.IsEmpty && (List.last ids).idText = "WaitForExit"
+                              ->
+                              Range.rangeContainsRange r e.Range && e.Range.StartLine < expr.Range.StartLine
+                          | _ -> false)
+                  | None -> false
+
               match blocking with
               | Some(kind, sleepArg, blockIdent) ->
+                  let idiomatic =
+                      (kind = BlockKind.TaskWait && boundedWait)
+                      || (kind = BlockKind.TaskResult && afterWaitForExit ())
+
                   match innermostCe expr.Range with
-                  | None when kind <> BlockKind.ThreadSleep && kind <> BlockKind.RunSynchronously ->
+                  | None when
+                      kind <> BlockKind.ThreadSleep
+                      && kind <> BlockKind.RunSynchronously
+                      && not idiomatic
+                      ->
                       // sync-over-async at a boundary: an antipattern even
                       // outside CEs — either the caller becomes async (wrap
                       // in task { } and bind) or the synchronous API should
@@ -389,8 +457,78 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         Builder = None
                         Fixes = []
                         AlternativeFixes = alternatives
-                        Receiver = receiver }
+                        Receiver = receiver
+                        InLambda = false }
                   | Some(builder, ceRange) ->
+                      let taskBuilder = builder = "task" || builder = "backgroundTask"
+
+                      // the plain `let` whose entire RHS is `target`
+                      // — found structurally, not via the walker's
+                      // path conventions
+                      let bindingKeywordFor (target: range) =
+                          index.Exprs
+                          |> Array.tryPick (fun (_, e) ->
+                              match e with
+                              | LetOrUseE lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
+                                  match lou.Bindings with
+                                  // simple named pattern, no type
+                                  // annotation: `let! x : T = ..` is
+                                  // not a shape to gamble on
+                                  | [ SynBinding(
+                                          isMutable = false
+                                          returnInfo = None
+                                          headPat = SynPat.Named _
+                                          expr = rhs
+                                          trivia = btrivia) ] when Range.equals rhs.Range target ->
+                                      Some btrivia.LeadingKeyword.Range
+                                  | _ -> None
+                              | _ -> None)
+
+                      let bindingRewrite (target: range) (bound: string) =
+                          match bindingKeywordFor target with
+                          | Some kw when textOfRange source kw = "let" ->
+                              [ kw, "let", "let!"; target, textOfRange source target, bound ]
+                          | _ -> []
+
+                      // statement position: a sequential element, the CE
+                      // body itself, a let-continuation, or `do ...`
+                      let statementTarget =
+                          match path with
+                          | SyntaxNode.SynExpr(SynExpr.Do _ as doExpr) :: _ -> Some doExpr.Range
+                          | SyntaxNode.SynExpr(SynExpr.Sequential _) :: _
+                          | SyntaxNode.SynExpr(SynExpr.ComputationExpr _) :: _
+                          | SyntaxNode.SynExpr(SynExpr.LetOrUse _) :: _ -> Some expr.Range
+                          | _ -> None
+
+                      // a statement with a successor can end in a `let! _ =`;
+                      // the last one cannot, a block does not end on a bind
+                      let notLast =
+                          let afterDo =
+                              match path with
+                              | SyntaxNode.SynExpr(SynExpr.Do _) :: rest -> rest
+                              | p -> p
+
+                          match afterDo with
+                          | SyntaxNode.SynExpr(SynExpr.Sequential(expr1 = first)) :: _ ->
+                              Range.rangeContainsRange first.Range expr.Range
+                          | _ -> false
+
+                      let insideFixableSpine =
+                          not (insideLambdaWithin ceRange expr.Range)
+                          && not (insideOtherCeWithin ceRange expr.Range)
+                          && not (inNoBindZone expr.Range)
+
+                      // the awaitable behind a blocking site, as the
+                      // builder's own bind operand: a Task binds directly in
+                      // task { }, behind Async.AwaitTask in async { }
+                      let bindOperand (text: string) =
+                          if taskBuilder then
+                              Some text
+                          elif builder = "async" then
+                              Some $"Async.AwaitTask {asArgument text}"
+                          else
+                              None
+
                       let fixes =
                           match kind, sleepArg with
                           | BlockKind.ThreadSleep, Some arg when
@@ -398,15 +536,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               && not (insideOtherCeWithin ceRange expr.Range)
                               && not (inNoBindZone expr.Range)
                               ->
-                              // statement position: a sequential element, the
-                              // CE body itself, a let-continuation, or `do ...`
-                              let target =
-                                  match path with
-                                  | SyntaxNode.SynExpr(SynExpr.Do _ as doExpr) :: _ -> Some doExpr.Range
-                                  | SyntaxNode.SynExpr(SynExpr.Sequential _) :: _
-                                  | SyntaxNode.SynExpr(SynExpr.ComputationExpr _) :: _
-                                  | SyntaxNode.SynExpr(SynExpr.LetOrUse _) :: _ -> Some expr.Range
-                                  | _ -> None
+                              let target = statementTarget
 
                               let waiter =
                                   if builder = "async" then
@@ -432,36 +562,6 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                               // Async.AwaitTask for a Task — and ValueTask
                               // has no AwaitTask overload at all, so those
                               // stay advice in async
-                              let taskBuilder = builder = "task" || builder = "backgroundTask"
-
-                              // the plain `let` whose entire RHS is `target`
-                              // — found structurally, not via the walker's
-                              // path conventions
-                              let bindingKeywordFor (target: range) =
-                                  index.Exprs
-                                  |> Array.tryPick (fun (_, e) ->
-                                      match e with
-                                      | LetOrUseE lou when not (lou.IsBang || lou.IsUse || lou.IsRecursive) ->
-                                          match lou.Bindings with
-                                          // simple named pattern, no type
-                                          // annotation: `let! x : T = ..` is
-                                          // not a shape to gamble on
-                                          | [ SynBinding(
-                                                  isMutable = false
-                                                  returnInfo = None
-                                                  headPat = SynPat.Named _
-                                                  expr = rhs
-                                                  trivia = btrivia) ] when Range.equals rhs.Range target ->
-                                              Some btrivia.LeadingKeyword.Range
-                                          | _ -> None
-                                      | _ -> None)
-
-                              let bindingRewrite (target: range) (bound: string) =
-                                  match bindingKeywordFor target with
-                                  | Some kw when textOfRange source kw = "let" ->
-                                      [ kw, "let", "let!"; target, textOfRange source target, bound ]
-                                  | _ -> []
-
                               // a TASK receiver: direct in task { }, behind
                               // Async.AwaitTask in async { } (real Task only)
                               let bindTaskReceiver (recvRange: range) =
@@ -516,6 +616,64 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                       bindingRewrite rhsRange (textOfRange source comp.Range))
                                   |> Option.defaultValue []
                               | _ -> []
+                          // `t.Wait()` / `Task.WaitAll(...)` as a statement:
+                          // `do! t` / `do! Task.WhenAll(...)` — a `let! _ =`
+                          // when the joined tasks carry values and a
+                          // statement follows
+                          | BlockKind.TaskWait, _ when insideFixableSpine ->
+                              match statementTarget, BlockingSites.blockingOf check source expr with
+                              | Some target, Some b when not b.NoBind ->
+                                  match bindOperand b.DoText, bindOperand b.Awaitable with
+                                  | Some operand, _ when b.UnitResult ->
+                                      [ target, textOfRange source target, $"do! {operand}" ]
+                                  | _, Some operand when notLast ->
+                                      [ target, textOfRange source target, $"let! _ = {operand}" ]
+                                  | _ -> []
+                              | _ -> []
+                          // a blocking call inside the delegate of
+                          // `Assert.Throws<E>(fun () -> ...)`: the assert has
+                          // an async spelling, and the `let ex =` it feeds
+                          // becomes a `let!` (xUnit, MSTest) or stays (NUnit)
+                          | _ when
+                              insideLambdaWithin ceRange expr.Range
+                              && not (insideOtherCeWithin ceRange expr.Range)
+                              && not (inNoBindZone expr.Range)
+                              ->
+                              path
+                              |> List.tryPick (fun node ->
+                                  match node with
+                                  | SyntaxNode.SynExpr(SynExpr.App _ as app) when
+                                      Range.rangeContainsRange ceRange app.Range
+                                      && not (insideLambdaWithin ceRange app.Range)
+                                      && not (insideOtherCeWithin ceRange app.Range)
+                                      ->
+                                      BlockingSites.assertThrows check source app |> Option.map (fun b -> app, b)
+                                  | _ -> None)
+                              |> Option.map (fun (app, b) ->
+                                  if b.NoBind then
+                                      [ app.Range, textOfRange source app.Range, b.Awaitable ]
+                                  else
+                                      match bindOperand b.Awaitable with
+                                      | Some bound ->
+                                          match bindingRewrite app.Range bound with
+                                          | [] ->
+                                              // `Assert.Throws<E>(...) |> ignore` with a
+                                              // successor: `let! _ = ...`
+                                              index.Exprs
+                                              |> Array.tryPick (fun (ipath, e) ->
+                                                  match e, ipath with
+                                                  | BlockingSites.Ignored inner,
+                                                    SyntaxNode.SynExpr(SynExpr.Sequential(expr1 = first)) :: _ when
+                                                      Range.equals inner.Range app.Range
+                                                      && Range.rangeContainsRange first.Range e.Range
+                                                      ->
+                                                      Some
+                                                          [ e.Range, textOfRange source e.Range, $"let! _ = {bound}" ]
+                                                  | _ -> None)
+                                              |> Option.defaultValue []
+                                          | edits -> edits
+                                      | None -> [])
+                              |> Option.defaultValue []
                           | _ -> []
 
                       { Range = expr.Range
@@ -523,6 +681,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                         Builder = Some builder
                         Fixes = fixes
                         AlternativeFixes = []
-                        Receiver = ValueNone }
+                        Receiver = ValueNone
+                        InLambda = insideLambdaWithin ceRange expr.Range }
                   | None -> ()
               | None -> () ]

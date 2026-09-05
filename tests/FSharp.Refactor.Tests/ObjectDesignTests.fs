@@ -208,3 +208,50 @@ let ``the concat alternative uses the short spelling under open System`` () =
     match concatIn source with
     | [ s ] -> Assert.Equal(Some "String.Concat(\"x\", a, \"-\", b)", s.ConcatAlternative)
     | other -> failwithf "Expected one suggestion, got %A" other
+
+[<Fact>]
+let ``FR0032: the editor fix appends a plain IDisposable disposing every created field`` () =
+    let source =
+        "module Test\nopen System.IO\ntype Holder(path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    let reader = new StreamReader(stream)\n    member _.Read() = reader.ReadLine()"
+
+    let disposables, _, _ = designIn source
+
+    match disposables with
+    | [ first; second ] ->
+        Assert.Equal("stream", first.FieldName)
+        Assert.True(first.Fix.IsSome, "the first field carries the type's fix")
+        Assert.True(second.Fix.IsNone, "the second field carries none")
+        let r, _, replacement = first.Fix.Value
+        let patched = applyEdit source r replacement
+        Assert.Contains("interface System.IDisposable with", patched)
+        Assert.Contains("stream.Dispose()", patched)
+        Assert.Contains("reader.Dispose()", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected two leaked-field findings, got %A" other
+
+[<Fact>]
+let ``FR0047: the editor fix disposes the missed field first in Dispose`` () =
+    let source =
+        "module Test\nopen System.IO\ntype Holder(path: string) =\n    let stream = new FileStream(path, FileMode.Open)\n    let reader = new StreamReader(stream)\n    interface System.IDisposable with\n        member _.Dispose() =\n            reader.Dispose()"
+
+    let _, _, undisposed = designIn source
+
+    match undisposed with
+    | [ s ] ->
+        Assert.Equal("stream", s.FieldName)
+        let r, _, replacement = s.Fix.Value
+        let patched = applyEdit source r replacement
+        Assert.Contains("stream.Dispose()\n            reader.Dispose()", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one undisposed-field finding, got %A" other
+
+[<Fact>]
+let ``FR0032: a type inheriting a disposable base is noted without the interface fix`` () =
+    let source =
+        "module Test\nopen System.IO\ntype Holder(path: string) =\n    inherit MemoryStream()\n    let reader = new StreamReader(path)\n    member _.Read() = reader.ReadLine()"
+
+    let disposables, _, _ = designIn source
+
+    match disposables with
+    | [ s ] -> Assert.True(s.Fix.IsNone, "a disposable base makes the added interface a duplicate")
+    | other -> failwithf "Expected one leaked-field finding, got %A" other

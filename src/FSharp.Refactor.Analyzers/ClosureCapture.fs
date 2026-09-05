@@ -76,7 +76,19 @@ let private resolvesToSink (check: FSharpCheckFileResults) (source: ISourceText)
         | _ -> false
     | None -> false
 
-/// A sink call shape: the method identifier and its lambda argument.
+/// The root identifier of a receiver expression — `x` in `x.Changed.Add`
+/// or `(x.Inner).Changed.Add` — when it is a plain name.
+[<TailCall>]
+let rec private receiverRootLoop (e: SynExpr) =
+    match e with
+    | SynExpr.Ident id -> Some id.idText
+    | SynExpr.LongIdent(longDotId = SynLongIdent(id = first :: _)) -> Some first.idText
+    | SynExpr.DotGet(expr = inner)
+    | SynExpr.Paren(expr = inner) -> receiverRootLoop inner
+    | _ -> None
+
+/// A call storing a handler: the sink method, the handler, and the root
+/// of the publisher's expression.
 [<return: Struct>]
 let private (|SinkCall|_|) (e: SynExpr) =
     let methodAndArg =
@@ -84,13 +96,15 @@ let private (|SinkCall|_|) (e: SynExpr) =
         | SynExpr.App(isInfix = false; funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = ids)); argExpr = arg) when
             ids.Length >= 2
             ->
-            ValueSome(List.last ids, arg)
-        | SynExpr.App(isInfix = false; funcExpr = SynExpr.DotGet(longDotId = SynLongIdent(id = ids)); argExpr = arg) ->
-            ValueSome(List.last ids, arg)
+            ValueSome(List.last ids, arg, Some ids.Head.idText)
+        | SynExpr.App(
+            isInfix = false
+            funcExpr = SynExpr.DotGet(expr = receiver; longDotId = SynLongIdent(id = ids))
+            argExpr = arg) -> ValueSome(List.last ids, arg, receiverRootLoop receiver)
         | _ -> ValueNone
 
     match methodAndArg with
-    | ValueSome(methodId, arg) when
+    | ValueSome(methodId, arg, receiver) when
         sinkMethods.Contains methodId.idText
         || ((methodId.idText = "add" || methodId.idText = "subscribe")
             && (match e with
@@ -98,15 +112,15 @@ let private (|SinkCall|_|) (e: SynExpr) =
                 | _ -> false))
         ->
         match stripParens arg with
-        | SynExpr.Lambda _ as lambda -> ValueSome(methodId, lambda)
+        | SynExpr.Lambda _ as lambda -> ValueSome(methodId, lambda, receiver)
         // a method group — `src.Changed.Add this.OnChanged` — pins `this`
         // for the publisher's lifetime just as hard as a lambda; so does
         // one wrapped in a delegate constructor:
         // `w.Created.AddHandler(FileSystemEventHandler this.OnCreated)`
-        | SynExpr.LongIdent _ as captured -> ValueSome(methodId, captured)
+        | SynExpr.LongIdent _ as captured -> ValueSome(methodId, captured, receiver)
         | SynExpr.App(isInfix = false; funcExpr = SynExpr.Ident _; argExpr = inner) ->
             match stripParens inner with
-            | SynExpr.LongIdent _ as captured -> ValueSome(methodId, captured)
+            | SynExpr.LongIdent _ as captured -> ValueSome(methodId, captured, receiver)
             | _ -> ValueNone
         | _ -> ValueNone
     | _ -> ValueNone
@@ -195,7 +209,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
 
         [ for _, expr in index.Exprs do
               match expr with
-              | SinkCall(methodId, lambda) ->
+              | SinkCall(methodId, lambda, receiver) ->
                   let enclosing =
                       typeContexts
                       |> List.tryPick (fun (typeRange, letNames, scopes) ->
@@ -215,8 +229,17 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                           Option.fold (fun names self -> Set.add self names) letNames selfOpt
                           - lambdaBoundNames lambda
 
+                      // a publisher the object owns — its own event
+                      // (`x.Disposing.Add(fun _ -> ... x ...)`), or one held
+                      // in its own field — cannot outlive the object: the
+                      // reference is a cycle inside one lifetime, not a leak
+                      let ownPublisher =
+                          match receiver with
+                          | Some root -> capturable.Contains root
+                          | None -> false
+
                       match mentioned capturable lambda.Range with
-                      | Some captured when resolvesToSink check source methodId ->
+                      | Some captured when not ownPublisher && resolvesToSink check source methodId ->
                           { Range = lambda.Range
                             CapturedName = captured
                             SinkName = methodId.idText }

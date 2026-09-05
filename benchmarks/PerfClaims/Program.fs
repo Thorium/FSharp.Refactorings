@@ -1261,6 +1261,8 @@ let notApplicable =
       "FR0134", "DateTimeOffset carries the offset the DateTime dropped; no perf claim"
       "FR0135", "one star in a comment; nothing executes differently"
       "FR0136", "Guid.Empty is the same value the constructor made; no perf claim"
+
+      "FR0147", "an open changes name resolution at compile time and nothing at runtime; no perf claim"
       "FR0140",
       "named-property construction is the same calls in the same order; it reads better, it does not run faster"
       "FR0141", "a note; nothing is rewritten, so there is nothing to measure" ]

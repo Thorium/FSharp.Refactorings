@@ -68,3 +68,16 @@ let ``Contains inside a query expression keeps the string overload`` () =
         charOverloadsIn
             "open System.Linq\nlet f (xs: string list) =\n    query {\n        for x in xs.AsQueryable() do\n            where (x.Contains \"a\")\n            select x\n    }"
     )
+
+[<Fact>]
+let ``FR0038: a culture-sensitive call carries the ordinal char overload as an editor offer`` () =
+    match charOverloadsIn "module Test\nlet f (s: string) = s.StartsWith \"@\"" with
+    | [ s ] ->
+        Assert.Equal(None, s.ReplacementText)
+
+        match s.OrdinalOffer with
+        | Some(_, original, replacement) ->
+            Assert.Equal("\"@\"", original)
+            Assert.Equal("'@'", replacement)
+        | None -> failwith "Expected the ordinal offer"
+    | other -> failwithf "Expected one char-overload note, got %A" other

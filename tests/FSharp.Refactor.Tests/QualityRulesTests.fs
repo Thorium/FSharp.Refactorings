@@ -2332,3 +2332,236 @@ let ``FR0070 still offers the struct fix when the quotation reads other fields``
 
     let _, structs, _ = structHintsIn source
     Assert.Contains(structs, fun s -> s.TypeName = "Itm" && s.Fix.IsSome)
+
+[<Fact>]
+let ``FR0121: a same-day comparison against a Date is not a calendar cut`` () =
+    // FSharp.Data's TimeOnly probe: TryParse fills in today's date, and the
+    // check `dt.Date <> DateTime.Today` asks whether a real date was given
+    Assert.Empty(
+        wallClocksIn
+            "module Test\nopen System\nlet hasRealDate (dt: DateTime) = dt.Date <> DateTime.Today\nlet isToday (dt: DateTime) = DateTime.Today = dt.Date"
+    )
+
+[<Fact>]
+let ``FR0121: Today used as a value is still a calendar cut`` () =
+    match wallClocksIn "module Test\nopen System\nlet stamp () = DateTime.Today.AddDays 1.0" with
+    | [ _ ] -> ()
+    | other -> failwithf "Expected one wall-clock note, got %A" other
+
+[<Fact>]
+let ``FR0123: a guarded Enter whose body binds in a computation is not called a leak`` () =
+    // SQLProvider's providers: Enter, try ... finally Exit around a task
+    // body — the shape cannot leak, only the lock rewrite is withheld
+    match
+        monitorLocksIn
+            "module Test\nopen System.Threading\nlet gate = obj ()\nlet run (work: System.Threading.Tasks.Task<int>) =\n    task {\n        Monitor.Enter gate\n        try\n            let! v = work\n            return v + 1\n        finally\n            Monitor.Exit gate\n    }"
+    with
+    | [ s ] ->
+        Assert.True(s.Guarded)
+        Assert.Equal(None, s.Fix)
+    | other -> failwithf "Expected one guarded lock note, got %A" other
+
+// ---- widenings from the C:\git sweep ----
+
+[<Fact>]
+let ``FR0068: enum aliases spelled with unsigned suffixes are duplicates too`` () =
+    let _, _, enums =
+        miscIn
+            "module Test\n[<System.Flags>]\ntype Section =\n    | MemProtected = 16384u\n    | NoDeferSpecExc = 16384u\n    | GPRel = 32768u"
+
+    match enums with
+    | [ e ] -> Assert.Equal("NoDeferSpecExc", e.CaseName)
+    | other -> failwithf "Expected one duplicate, got %A" other
+
+[<Fact>]
+let ``FR0122: the bare Regex constructor under the open is checked`` () =
+    match invalidPatternsIn "module Test\nopen System.Text.RegularExpressions\nlet r = Regex(\"(unclosed\")" with
+    | [ (_, pattern, _) ] -> Assert.Equal("(unclosed", pattern)
+    | other -> failwithf "Expected one invalid pattern, got %A" other
+
+[<Fact>]
+let ``FR0122: a pattern valid only under IgnorePatternWhitespace is compiled with it`` () =
+    Assert.Empty(
+        invalidPatternsIn
+            "module Test\nopen System.Text.RegularExpressions\nlet r = Regex(\"a b # a comment (\", RegexOptions.IgnorePatternWhitespace)"
+    )
+
+[<Fact>]
+let ``FR0127: a connection string carrying a real password is a leak, a placeholder is not`` () =
+    match
+        secretsIn
+            "module Test\nlet cs = \"Data Source=db.example.net;Initial Catalog=x;User Id=app;Password=W3lf0rd!Prod\"\nlet sample = \"Server=.;Database=x;User Id=sa;Password=password\""
+    with
+    | [ s ] -> Assert.Equal("connection-string password", s.Provider)
+    | other -> failwithf "Expected exactly one connection-string leak, got %A" other
+
+[<Fact>]
+let ``FR0127: a type provider's connection-string argument and a three-segment JWT are scanned`` () =
+    let found =
+        secretsIn
+            "module Test\ntype Db = SqlDataProvider<ConnectionString = \"Server=db;Database=x;Uid=app;Pwd=Sup3rS3cret9\">\nlet token = \"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\"\nlet header = \"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9\""
+        |> List.map (fun s -> s.Provider)
+        |> List.sort
+
+    Assert.Equal<string list>([ "JWT"; "connection-string password" ], found)
+
+[<Fact>]
+let ``FR0124: a template spelled as a chain of literals is read whole`` () =
+    match
+        logTemplatesIn
+            "module M =
+    let f (logger: ILogger) (a: string) (b: string) = logger.LogError(\"only {Pinned} of {Blocks} blocks \" + \"pinned; pin all {Blocks} blocks\", a, b, b)"
+    with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.DuplicateName "Blocks", s.Problem)
+    | other -> failwithf "Expected one duplicate-name finding, got %A" other
+
+[<Fact>]
+let ``FR0124: an array literal as the params argument counts its elements`` () =
+    Assert.Empty(
+        logTemplatesIn
+            "module M =
+    let f (logger: ILogger) (a: int) (b: int) (c: int) = logger.LogError(\"a={A}; b={B}; c={C}\", [| box a; box b; box c |])"
+    )
+
+[<Fact>]
+let ``FR0124: Serilog's static Log carries the same template rules`` () =
+    match
+        logTemplatesIn
+            "namespace Serilog\ntype Log =\n    static member Information(template: string, [<System.ParamArray>] args: obj[]) = ignore (template, args)\nnamespace Test\nopen Serilog\nmodule M =\n    let f (user: string) = Log.Information($\"Refreshed token for {user}\")"
+    with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.Interpolated, s.Problem)
+    | other -> failwithf "Expected one interpolated-template finding, got %A" other
+
+// ---- FR0066 / FR0146: unparametrized SQL ----
+
+[<Fact>]
+let ``FR0066: a dynamic string bound one hop before the command is the same leak`` () =
+    let _, sqls, _ =
+        securityIn
+            "module Test\nlet f (con: MySql.Data.MySqlClient.MySqlConnection) (keys: string list) =\n    let querySql = \"SELECT Skey FROM setting WHERE Skey IN (\" + String.concat \",\" keys + \")\"\n    use command = new MySqlCommand(querySql, con)\n    command"
+
+    match sqls with
+    | [ s ] ->
+        Assert.Equal("MySqlCommand", s.Sink)
+        Assert.False s.Unparametrized
+    | other -> failwithf "Expected one string-built SQL finding, got %A" other
+
+[<Fact>]
+let ``FR0066: CreateCommand and a helper named for SQL are sinks`` () =
+    let _, sqls, _ =
+        securityIn
+            "module Test\nlet g (provider: ISqlProvider) (con: obj) (name: string) =\n    use com = provider.CreateCommand(con, $\"SELECT typeof([{name}]) FROM t\")\n    executeSql (\"UPDATE t SET x = '\" + name + \"'\") []"
+
+    Assert.Equal<string list>([ "CreateCommand"; "executeSql" ], sqls |> List.map (fun s -> s.Sink))
+
+[<Fact>]
+let ``FR0146: a literal statement with no parameter marker is suspicious, a parametrized one is not`` () =
+    let _, sqls, _ =
+        securityIn
+            "module Test\nlet h (cmd: System.Data.IDbCommand) =\n    cmd.CommandText <- \"SELECT * FROM users\"\n    cmd.CommandText <- \"SELECT * FROM users WHERE id = @id\"\n    cmd.CommandText <- \"CREATE TABLE t (id int)\""
+
+    match sqls with
+    | [ s ] ->
+        Assert.True s.Unparametrized
+        Assert.Equal("CommandText", s.Sink)
+    | other -> failwithf "Expected one unparametrized finding, got %A" other
+
+let private logaryScaffold =
+    "namespace Logary\nmodule Message =\n    let eventInfo (template: string) = template\n    let eventWarn (template: string) = template\n    let setField (name: string) (value: obj) (message: string) = ignore (name, value); message\nnamespace Test\nopen Logary\n"
+
+let private logaryTemplatesIn (source: string) =
+    let tree, sourceText, checkResults = parseAndCheck (logaryScaffold + source)
+    LogTemplates.find tree sourceText checkResults
+
+[<Fact>]
+let ``FR0124: a Logary placeholder no setField fills is reported`` () =
+    match
+        logaryTemplatesIn
+            "module M =\n    let f (writeLog: string -> unit) (query: string) =\n        Message.eventInfo \"Executing {sql} for {user}\" |> Message.setField \"sql\" (box query) |> writeLog"
+    with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.MissingFields [ "user" ], s.Problem)
+    | other -> failwithf "Expected one missing-field finding, got %A" other
+
+[<Fact>]
+let ``FR0124: a Logary pipeline that fills every placeholder is fine, point-free too`` () =
+    Assert.Empty(
+        logaryTemplatesIn
+            "module M =\n    let f (writeLog: string -> unit) (query: string) (err: string) =\n        Message.eventInfo \"Executing {sql}\" |> Message.setField \"sql\" (box query) |> writeLog\n        \"SetupTest err: {err}\" |> Message.eventInfo |> Message.setField \"err\" (box err) |> writeLog"
+    )
+
+[<Fact>]
+let ``FR0124: an interpolated Logary template is flagged`` () =
+    match
+        logaryTemplatesIn
+            "module M =\n    let f (writeLog: string -> unit) (id: int) =\n        Message.eventWarn $\"Null ref for {id}\" |> writeLog"
+    with
+    | [ s ] -> Assert.Equal(LogTemplates.TemplateProblem.Interpolated, s.Problem)
+    | other -> failwithf "Expected one interpolated finding, got %A" other
+
+// ---- FR0120 across logging libraries ----
+
+[<Fact>]
+let ``FR0120: a Serilog Log.Error in a handler that forgets the exception gets it first`` () =
+    let source =
+        "namespace Serilog\ntype Log =\n    static member Error(template: string, [<System.ParamArray>] args: obj[]) = ignore (template, args)\n    static member Error(ex: exn, template: string, [<System.ParamArray>] args: obj[]) = ignore (ex, template, args)\nnamespace Test\nopen Serilog\nmodule M =\n    let go (id: int) =\n        try ()\n        with ex -> Log.Error(\"sync failed {Id}\", id)"
+
+    match catchLogsIn source with
+    | [ s ] ->
+        Assert.Equal("Serilog", s.Family)
+        Assert.Equal("ex", s.ExceptionName)
+        Assert.Equal("Error", s.LogMethod)
+    | other -> failwithf "Expected one Serilog finding, got %A" other
+
+[<Fact>]
+let ``FR0120: a Logary event pipeline in a handler without addExn gets the stage`` () =
+    let source =
+        "namespace Logary\nmodule Message =\n    let eventError (template: string) = template\n    let setField (name: string) (value: obj) (message: string) = ignore (name, value); message\n    let addExn (ex: exn) (message: string) = ignore ex; message\nnamespace Test\nopen Logary\nmodule M =\n    let go (writeLog: string -> unit) (id: int) =\n        try ()\n        with ex -> Message.eventError \"sync failed {Id}\" |> Message.setField \"Id\" (box id) |> writeLog"
+
+    match catchLogsIn source with
+    | [ s ] ->
+        Assert.Equal("Logary", s.Family)
+        // the insertion point sits right after the event stage
+        let patched = applyEdit (loggerScaffold + source) s.Range " |> Message.addExn ex"
+        Assert.Contains("Message.eventError \"sync failed {Id}\" |> Message.addExn ex |> Message.setField", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one Logary finding, got %A" other
+
+[<Fact>]
+let ``FR0120: a Logary pipeline that already adds the exception is fine`` () =
+    Assert.Empty(
+        catchLogsIn
+            "namespace Logary\nmodule Message =\n    let eventError (template: string) = template\n    let addExn (ex: exn) (message: string) = ignore ex; message\nnamespace Test\nopen Logary\nmodule M =\n    let go (writeLog: string -> unit) =\n        try ()\n        with ex -> Message.eventError \"sync failed\" |> Message.addExn ex |> writeLog"
+    )
+
+[<Fact>]
+let ``FR0146: a literal statement handed to a SQL helper with an empty parameter list is the same no-parameter command``
+    ()
+    =
+    let _, sqls, _ =
+        securityIn
+            "module Test\nlet maxEventId (readSqlInteger: string -> obj list -> int) = readSqlInteger \"select max(id) from events\" []\nlet byId (readSqlInteger: string -> obj list -> int) (id: int) = readSqlInteger \"select count(*) from events where id = @id\" [ box id ]"
+
+    match sqls with
+    | [ s ] ->
+        Assert.True s.Unparametrized
+        Assert.Equal("readSqlInteger", s.Sink)
+    | other -> failwithf "Expected one unparametrized helper finding, got %A" other
+
+[<Fact>]
+let ``FR0127: a connection string mentioning test anywhere is a fixture, not a leak`` () =
+    Assert.Empty(
+        secretsIn
+            "module Test\nlet cs = \"Data Source=db.example.net;Initial Catalog=welendus_test_database;User Id=app;Password=W3lf0rd!Prod\"\nlet cs2 = \"Server=.;Database=x;User Id=sa;Password=TestW3lf0rd!\""
+    )
+
+[<Fact>]
+let ``FR0124: Logary fields set by other stages are not missing, and setFieldValue names its field`` () =
+    let scaffold =
+        "namespace Logary\nmodule Message =\n    let eventInfo (template: string) = template\n    let setField (name: string) (value: obj) (message: string) = ignore (name, value); message\n    let setFieldValue (name: string) (value: obj) (message: string) = ignore (name, value); message\n    let setFieldsFromObject (o: obj) (message: string) = ignore o; message\nnamespace Test\nopen Logary\n"
+
+    let source =
+        scaffold
+        + "module M =\n    let f (writeLog: string -> unit) (query: string) =\n        Message.eventInfo \"Executing {sql} for {user}\" |> Message.setField \"sql\" (box query) |> Message.setFieldsFromObject (box query) |> writeLog\n    let g (writeLog: string -> unit) (query: string) =\n        Message.eventInfo \"Executing {sql}\" |> Message.setFieldValue \"sql\" (box query) |> writeLog"
+
+    let tree, sourceText, checkResults = parseAndCheck source
+    Assert.Empty(LogTemplates.find tree sourceText checkResults)

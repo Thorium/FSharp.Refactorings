@@ -26,6 +26,10 @@ type Suggestion =
         Range: range
         /// e.g. "Task.WhenAll".
         CallName: string
+        /// The editor's fix: the call replaced by its one element. The
+        /// result type changes (Task<'T[]> to Task<'T>), so the author
+        /// takes it, a sweep never does.
+        Fix: (range * string * string) option
     }
 
 let private gatedCalls =
@@ -71,15 +75,26 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
     else
         let index = AstIndex.ofTree parseTree
 
+        // the one element of the literal, for the editor's fix
+        let singleElement (arg: SynExpr) =
+            match stripParens arg with
+            | SynExpr.ArrayOrList(_, [ only ], _) -> Some only
+            | SynExpr.ArrayOrListComputed(expr = inner) -> Some inner
+            | _ -> None
+
         [ for _, expr in index.Exprs do
               match expr with
               | SynExpr.App(
                   isInfix = false
                   funcExpr = SynExpr.LongIdent(longDotId = SynLongIdent(id = [ m; f ]))
-                  argExpr = SingleElementLiteral) ->
+                  argExpr = SingleElementLiteral as arg) ->
                   match gatedCalls.TryFind(m.idText, f.idText) with
                   | Some entity when resolvesToGatedEntity check source entity f ->
                       { Range = expr.Range
-                        CallName = $"{m.idText}.{f.idText}" }
+                        CallName = $"{m.idText}.{f.idText}"
+                        Fix =
+                          singleElement arg
+                          |> Option.map (fun only ->
+                              expr.Range, textOfRange source expr.Range, textOfRange source only.Range) }
                   | _ -> ()
               | _ -> () ]

@@ -341,3 +341,65 @@ let ``an MSTest TestMethod in a TestClass is a test`` () =
          + "open Support\nopen Microsoft.VisualStudio.TestTools.UnitTesting\n[<TestClass>]\ntype Fixture() =\n    [<TestMethod>]\n    member _.``reads`` () ="
          + body)
         expectedMember
+
+// ---- FR0142: Task.WaitAll and Assert.Throws move too ----
+
+[<Fact>]
+let ``WaitAll on plain tasks becomes do-bang WhenAll`` () =
+    assertRewrite
+        (scaffold
+         + "[<Fact>]\nlet ``joins`` () =\n    let a = run ()\n    let b = run ()\n    Task.WaitAll(a, b)")
+        "task {\n        let a = run ()\n        let b = run ()\n        do! Task.WhenAll(a, b)\n    } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``WaitAll on generic tasks binds and discards`` () =
+    // WhenAll of Task<T> params yields the results: `do!` has no unit to
+    // bind, `let! _ =` does
+    assertRewrite
+        (scaffold
+         + "[<Fact>]\nlet ``joinsValues`` () =\n    Task.WaitAll(fetch (), fetch ())\n    ()")
+        "task {\n        let! _ = Task.WhenAll(fetch (), fetch ())\n        ()\n    } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``WaitAll on a task array value becomes do-bang WhenAll`` () =
+    assertRewrite
+        (scaffold
+         + "[<Fact>]\nlet ``joinsArray`` () =\n    let ts = [| run (); run () |]\n    Task.WaitAll ts")
+        "task {\n        let ts = [| run (); run () |]\n        do! Task.WhenAll ts\n    } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``WaitAll with a timeout is a different contract`` () =
+    Assert.Empty(
+        findIn (
+            scaffold
+            + "[<Fact>]\nlet ``timedJoin`` () =\n    let a = run ()\n    Task.WaitAll([| a |], 1000) |> ignore"
+        )
+    )
+
+/// xUnit's Assert with the sync and async throw asserts, declared in the
+/// fixture under the `Xunit` module so the rule trusts it.
+[<Literal>]
+let private assertScaffold =
+    "type Assert =\n    static member Throws<'E when 'E :> exn>(f: Action) : 'E = Unchecked.defaultof<'E>\n    static member ThrowsAsync<'E when 'E :> exn>(f: Func<Task>) : Task<'E> = Task.FromResult Unchecked.defaultof<'E>\n"
+
+[<Fact>]
+let ``a blocking call inside Assert.Throws moves to ThrowsAsync and binds`` () =
+    assertRewrite
+        (scaffold
+         + assertScaffold
+         + "[<Fact>]\nlet ``throws`` () =\n    let t = fetch ()\n    let ex = Assert.Throws<InvalidOperationException>(fun () -> t.Wait())\n    ignore ex.Message")
+        "task {\n        let t = fetch ()\n        let! ex = Assert.ThrowsAsync<InvalidOperationException>(fun () -> t :> System.Threading.Tasks.Task)\n        ignore ex.Message\n    } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``a discarded Assert.Throws with a successor binds to underscore`` () =
+    assertRewrite
+        (scaffold
+         + assertScaffold
+         + "[<Fact>]\nlet ``throwsIgnored`` () =\n    Assert.Throws<InvalidOperationException>(fun () -> load () |> Async.RunSynchronously |> ignore) |> ignore\n    ()")
+        "task {\n        let! _ = Assert.ThrowsAsync<InvalidOperationException>(fun () -> load () |> Async.StartImmediateAsTask :> System.Threading.Tasks.Task)\n        ()\n    } :> System.Threading.Tasks.Task"
+
+[<Fact>]
+let ``NUnit's ThrowsAsync returns the exception, so the let stays a let`` () =
+    assertRewrite
+        "namespace NUnit.Framework\nopen System\nopen System.Threading.Tasks\ntype TestAttribute() =\n    inherit Attribute()\ntype Assert =\n    static member Throws<'E when 'E :> exn>(f: Action) : 'E = Unchecked.defaultof<'E>\n    static member ThrowsAsync<'E when 'E :> exn>(f: Func<Task>) : 'E = Unchecked.defaultof<'E>\nmodule Tests =\n    let fetch () = Task.FromResult 1\n    [<Test>]\n    let ``throws`` () =\n        let t = fetch ()\n        let ex = Assert.Throws<InvalidOperationException>(fun () -> t.Wait())\n        ignore ex.Message"
+        "task {\n            let t = fetch ()\n            let ex = Assert.ThrowsAsync<InvalidOperationException>(fun () -> t :> System.Threading.Tasks.Task)\n            ignore ex.Message\n        } :> System.Threading.Tasks.Task"

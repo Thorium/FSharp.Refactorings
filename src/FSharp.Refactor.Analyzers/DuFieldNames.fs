@@ -279,7 +279,7 @@ type private Signature =
 
 /// Union cases declared anywhere in a signature tree, by case name.
 let private unionCasesOfSignature (tree: ParsedInput) =
-    let cases = System.Collections.Generic.Dictionary<string, SynField list>()
+    let cases = Dictionary<string, SynField list>()
 
     let rec ofDecls (decls: SynModuleSigDecl list) =
         for decl in decls do

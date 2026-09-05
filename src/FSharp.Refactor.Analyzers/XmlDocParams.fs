@@ -27,6 +27,11 @@ type Suggestion =
         MissingParams: string list
         /// The binding's name, for the message.
         BindingName: string
+        /// The editor's offer: where to insert, and the `<param>` lines to
+        /// insert there — one empty tag per missing parameter, after the
+        /// comment's last `<param>` line, in its indentation. Empty tags
+        /// are a scaffold for the author, so the CLI never writes them.
+        Insertion: (range * string) option
     }
 
 let private paramTagRegex =
@@ -56,7 +61,43 @@ let private parameterNames (headPat: SynPat) =
     | SynPat.LongIdent(argPats = SynArgPats.Pats args) -> args |> List.collect patBoundNames
     | _ -> []
 
-let private checkBinding (suggestions: ResizeArray<Suggestion>) (SynBinding(headPat = headPat; xmlDoc = xmlDoc)) =
+/// The insertion for the missing tags: the end of the comment's last
+/// `<param>` line, and the new lines spelled with that line's prefix
+/// (indentation and `///`).
+let private insertionFor (source: ISourceText) (xmlDoc: PreXmlDoc) (missing: string list) =
+    try
+        let r = xmlDoc.ToXmlDoc(false, None).Range
+
+        let lastParamLine =
+            [ r.StartLine - 1 .. r.EndLine - 1 ]
+            |> List.filter (fun l -> l >= 0 && l < source.GetLineCount())
+            |> List.tryFindBack (fun l -> source.GetLineString(l).Contains "<param")
+
+        lastParamLine
+        |> Option.bind (fun l ->
+            let text = source.GetLineString l
+            let slashes = text.IndexOf "///"
+
+            if slashes < 0 then
+                None
+            else
+                let prefix = text.Substring(0, slashes + 3) + " "
+                let at = Position.mkPos (l + 1) text.Length
+
+                let lines =
+                    missing
+                    |> List.map (fun p -> $"\n{prefix}<param name=\"{p}\"></param>")
+                    |> String.concat ""
+
+                Some(Range.mkRange r.FileName at at, lines))
+    with _ -> // fsharpanalyzer: ignore-line FR0055
+        None
+
+let private checkBinding
+    (source: ISourceText)
+    (suggestions: ResizeArray<Suggestion>)
+    (SynBinding(headPat = headPat; xmlDoc = xmlDoc))
+    =
     let documented = documentedParams xmlDoc
 
     if not documented.IsEmpty then
@@ -73,13 +114,14 @@ let private checkBinding (suggestions: ResizeArray<Suggestion>) (SynBinding(head
             suggestions.Add
                 { Range = headPat.Range
                   MissingParams = missing
-                  BindingName = name }
+                  BindingName = name
+                  Insertion = insertionFor source xmlDoc missing }
 
 /// Find bindings whose doc comments document only some parameters.
 let find (parseTree: ParsedInput) (source: ISourceText) : Suggestion list =
-    ignore source
     let index = AstIndex.ofTree parseTree
     let suggestions = ResizeArray<Suggestion>()
+    let checkBinding = checkBinding source
 
     for _, decl in index.Decls do
         match decl with

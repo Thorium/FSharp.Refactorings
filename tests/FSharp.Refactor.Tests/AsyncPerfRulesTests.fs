@@ -277,8 +277,8 @@ let ``other Replace arguments are left alone`` () =
 // ---- FR0055 SwallowedException ----
 
 let private swallowedIn (source: string) =
-    let tree, sourceText = parse source
-    SwallowedException.find tree sourceText
+    let tree, sourceText, checkResults = parseAndCheck source
+    SwallowedException.find tree sourceText (Some checkResults)
 
 [<Fact>]
 let ``empty wildcard catch is noted`` () =
@@ -340,7 +340,7 @@ let private recursiveSeqIn (source: string) =
 let ``a rec function yielding itself through seq is noted`` () =
     match
         recursiveSeqIn
-            "module Test\nlet rec countDown n = seq {\n    yield n\n    if n > 0 then yield! countDown (n - 1)\n}"
+            "module Test\nlet rec countDown n = seq {\n    yield n\n    if n > 0 then yield! countDown (n - 1)\n    yield -1\n}"
     with
     | [ s ] ->
         Assert.Equal("countDown", s.FunctionName)
@@ -1214,3 +1214,332 @@ let ``variant D: after a let-bang`` () =
         variantHasTwin
             "module Test\nopen System.IO\nlet f (reader: StreamReader) =\n    async {\n        let! res = async { return 1 } |> Async.Catch\n        let err = reader.ReadToEnd()\n        return err\n    }"
     )
+
+[<Fact>]
+let ``FR0057: the editor scaffold appends empty param tags after the last one`` () =
+    let source =
+        "module Test\n/// <summary>Scales.</summary>\n/// <param name=\"value\">The value.</param>\nlet scale (value: int) (factor: int) (offset: int) = value * factor + offset"
+
+    match xmlDocsIn source with
+    | [ s ] ->
+        match s.Insertion with
+        | Some(at, text) ->
+            Assert.Equal(3, at.StartLine)
+            Assert.Equal("\n/// <param name=\"factor\"></param>\n/// <param name=\"offset\"></param>", text)
+            let patched = applyEdit source at text
+
+            Assert.Equal(
+                "module Test\n/// <summary>Scales.</summary>\n/// <param name=\"value\">The value.</param>\n/// <param name=\"factor\"></param>\n/// <param name=\"offset\"></param>\nlet scale (value: int) (factor: int) (offset: int) = value * factor + offset",
+                patched
+            )
+        | None -> failwith "Expected a scaffold insertion"
+    | other -> failwithf "Expected exactly one doc-drift note, got %A" other
+
+[<Fact>]
+let ``FR0058: a recursive yield! in tail position is a loop, not a nested enumerator`` () =
+    // FSharp.Data's CSV reader: `yield! readLines (n + 1)` as the body's
+    // last step compiles to a jump
+    Assert.Empty(
+        recursiveSeqIn "module Test\nlet rec readLines (n: int) = seq {\n    yield n\n    yield! readLines (n + 1)\n}"
+    )
+
+    Assert.Empty(
+        recursiveSeqIn
+            "module Test\nlet rec countDown n = seq {\n    yield n\n    if n > 0 then yield! countDown (n - 1) else ()\n}"
+    )
+
+[<Fact>]
+let ``FR0058: a recursive yield! under a for is still noted`` () =
+    match
+        recursiveSeqIn
+            "module Test\ntype Node = { Value: int; Children: Node list }\nlet rec walk (node: Node) = seq {\n    yield node.Value\n    for c in node.Children do\n        yield! walk c\n}"
+    with
+    | [ s ] -> Assert.Equal("walk", s.FunctionName)
+    | other -> failwithf "Expected exactly one recursive-seq note, got %A" other
+
+[<Fact>]
+let ``FR0058: a self-call yielding a plain value nests nothing`` () =
+    // FSharp.Data's innerText': the recursion returns a string, not a sequence
+    Assert.Empty(
+        recursiveSeqIn
+            "module Test\ntype Node = | Text of string | Elem of Node list\nlet rec innerText (n: Node) =\n    match n with\n    | Text t -> t\n    | Elem content ->\n        seq {\n            for e in content do\n                yield innerText e\n        }\n        |> String.concat \"\""
+    )
+
+[<Fact>]
+let ``FR0049: a blocking call inside a lambda within the computation is marked as such`` () =
+    // FSharp.Data's CsvFile: `Func<_>(fun () -> ... |> Async.RunSynchronously)`
+    // built inside async { } — the builder's bind cannot reach it
+    match
+        blockingIn
+            "let read () = async { return 1 }\nlet f () = async {\n    let reader = System.Func<int>(fun () -> read () |> Async.RunSynchronously)\n    return reader.Invoke()\n}"
+    with
+    | [ s ] ->
+        Assert.Equal(Some "async", s.Builder)
+        Assert.True(s.InLambda)
+        Assert.Empty s.Fixes
+    | other -> failwithf "Expected one lambda-bound blocking site, got %A" other
+
+[<Fact>]
+let ``FR0020: an abstract member reached through an assignment's right-hand side is a ctor-time call`` () =
+    // Fable's ObjectExprBase: `do x.Value <- this.dup x.contents`
+    let _, ctorCalls, _ =
+        objectRulesIn
+            "module Test\n[<AbstractClass>]\ntype ObjectExprBase (x: int ref) as this =\n    do x.Value <- this.dup x.contents\n    abstract member dup: int -> int"
+
+    match ctorCalls with
+    | [ c ] -> Assert.Equal("dup", c.MemberName)
+    | other -> failwithf "Expected one ctor-time abstract call, got %A" other
+
+[<Fact>]
+let ``FR0054: a Dispose inside an interface block that raises is caught`` () =
+    let _, _, raises =
+        objectRulesIn
+            "module Test\ntype R() =\n    interface System.IDisposable with\n        member _.Dispose() = failwith \"simulated\""
+
+    match raises with
+    | [ r ] -> Assert.Equal("Dispose", r.MemberName)
+    | other -> failwithf "Expected one raise-in-Dispose finding, got %A" other
+
+[<Fact>]
+let ``FR0054: a pipe-shaped raise counts`` () =
+    let _, _, raises =
+        objectRulesIn
+            "module Test\ntype R() =\n    override _.GetHashCode() = raise <| System.InvalidOperationException \"no hash\""
+
+    match raises with
+    | [ r ] -> Assert.Equal("GetHashCode", r.MemberName)
+    | other -> failwithf "Expected one pipe-shaped raise finding, got %A" other
+
+// ---- FR0055 offers ----
+
+[<Fact>]
+let ``FR0055: a pure division body gets the guard, and the catch goes`` () =
+    let source =
+        "module Test\nlet ratio (total: int) (count: int) = try total / count with _ -> 0"
+
+    match swallowedIn source with
+    | [ s ] ->
+        let guard = s.Offers |> List.find (fun o -> o.Label.StartsWith "Fix: guard")
+
+        let patched =
+            guard.Edits
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.Equal(
+            "module Test\nlet ratio (total: int) (count: int) = if count = 0 then 0 else total / count",
+            patched
+        )
+
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one swallowed-exception finding, got %A" other
+
+[<Fact>]
+let ``FR0055: a one-call Parse body becomes TryParse`` () =
+    let source =
+        "module Test\nlet parse (s: string) =\n    try Some(System.Int32.Parse s) with _ -> None\nlet parse2 (s: string) =\n    try System.Int32.Parse s with _ -> 0"
+
+    match swallowedIn source with
+    | [ _; second ] ->
+        let offer =
+            second.Offers
+            |> List.find (fun o -> o.Label.StartsWith "Fix: System.Int32.TryParse")
+
+        let patched =
+            offer.Edits
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.Contains("match System.Int32.TryParse s with\n    | true, v -> v\n    | _ -> 0", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected two findings, got %A" other
+
+[<Fact>]
+let ``FR0055: a file-IO body gets the narrower catch`` () =
+    let source =
+        "module Test\nlet read (path: string) = try System.IO.File.ReadAllText path with ex -> \"\""
+
+    match swallowedIn source with
+    | [ s ] ->
+        let offer =
+            s.Offers |> List.find (fun o -> o.Label.StartsWith "Alternative: catch the IO")
+
+        let patched =
+            offer.Edits
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.Contains("with (:? System.IO.IOException | :? System.UnauthorizedAccessException) as ex ->", patched)
+        Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+    | other -> failwithf "Expected one finding, got %A" other
+
+[<Fact>]
+let ``FR0055: a file that logs through MEL gets a log line in its own idiom`` () =
+    let source =
+        "module Test\ntype ILogger =\n    abstract LogError: exn * string * obj[] -> unit\nlet work (logger: ILogger) (id: int) =\n    logger.LogError(null, \"started {Id}\", [| box id |])\n    try\n        printfn \"%d\" id\n    with _ -> ()"
+
+    match swallowedIn source with
+    | [ s ] ->
+        let offer =
+            s.Offers |> List.find (fun o -> o.Label.StartsWith "Alternative: log it")
+
+        let patched =
+            offer.Edits
+            |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+            |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+        Assert.True(
+            patched.Contains
+                "logger.LogError(ex, \"Exception: {Message} in method {Method} with parameter {id}\", ex.Message, \"work\", id)",
+            patched
+        )
+    | other -> failwithf "Expected one finding, got %A" other
+
+[<Fact>]
+let ``FR0055: the guard spells the zero of the divisor's type, never for a float, and stays away without a type`` () =
+    let source =
+        "module Test\nlet a (total: float) (count: float) = try total / count with _ -> 0.0\nlet b (total: int64) (count: int64) = try total / count with _ -> 0L\nlet c (total: decimal) (count: decimal) = try total / count with _ -> 0m"
+
+    let guards =
+        swallowedIn source
+        |> List.map (fun s ->
+            s.Offers
+            |> List.tryFind (fun o -> o.Label.StartsWith "Fix: guard")
+            |> Option.map (fun o -> o.Edits |> List.map (fun (_, _, r) -> r) |> List.head))
+
+    Assert.Equal<string option list>(
+        // float division never throws: no guard to offer
+        [ None
+          Some "if count = 0L then 0L else total / count"
+          Some "if count = 0m then 0m else total / count" ],
+        guards
+    )
+
+    for r in guards |> List.choose id do
+        let patched = source.Replace("try total / count with _ -> 0.0", r)
+        ignore patched
+
+    let untyped =
+        let tree, sourceText =
+            parse "module Test\nlet a (total: int) (count: int) = try total / count with _ -> 0"
+
+        SwallowedException.find tree sourceText None
+
+    match untyped with
+    | [ s ] -> Assert.Empty(s.Offers |> List.filter (fun o -> o.Label.StartsWith "Fix: guard"))
+    | other -> failwithf "Expected one finding, got %A" other
+
+// ---- FR0049: statement-position waits and Assert.Throws become binds ----
+
+let private applyFixes (source: string) (fixes: (FSharp.Compiler.Text.range * string * string) list) =
+    fixes
+    |> List.sortByDescending (fun (r, _, _) -> r.StartLine, r.StartColumn)
+    |> List.fold (fun acc (r, _, replacement) -> applyEdit acc r replacement) source
+
+[<Fact>]
+let ``FR0049: a statement-position Wait inside task becomes do-bang`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task) = task {\n    t.Wait()\n    return 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        match s.Fixes with
+        | [ (_, "t.Wait()", "do! t") ] ->
+            let patched = applyFixes source s.Fixes
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | other -> failwithf "Expected the do! fix, got %A" other
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``FR0049: WaitAll inside task becomes do-bang WhenAll`` () =
+    let source =
+        "let f (a: System.Threading.Tasks.Task) (b: System.Threading.Tasks.Task) = task {\n    System.Threading.Tasks.Task.WaitAll(a, b)\n    return 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        match s.Fixes with
+        | [ (_, _, "do! System.Threading.Tasks.Task.WhenAll(a, b)") ] ->
+            let patched = applyFixes source s.Fixes
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | other -> failwithf "Expected the WhenAll fix, got %A" other
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``FR0049: a Wait on a generic task inside async awaits the upcast task`` () =
+    let source =
+        "let f (t: System.Threading.Tasks.Task<int>) = async {\n    t.Wait()\n    return 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        match s.Fixes with
+        | [ (_, _, "do! Async.AwaitTask (t :> System.Threading.Tasks.Task)") ] ->
+            let patched = applyFixes source s.Fixes
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | other -> failwithf "Expected the AwaitTask fix, got %A" other
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``FR0049: a final WaitAll of generic tasks has no bind shape`` () =
+    // `let! _ =` cannot end a block, `do!` cannot take a Task<T[]>
+    let source =
+        "let f (a: System.Threading.Tasks.Task<int>) (b: System.Threading.Tasks.Task<int>) = task {\n    System.Threading.Tasks.Task.WaitAll(a, b)\n}"
+
+    match blockingIn source with
+    | [ s ] -> Assert.Empty s.Fixes
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``FR0049: a blocking call inside Assert.Throws moves with the assert`` () =
+    let source =
+        "module Xunit\nopen System\nopen System.Threading.Tasks\ntype Assert =\n    static member Throws<'E when 'E :> exn>(f: Action) : 'E = Unchecked.defaultof<'E>\n    static member ThrowsAsync<'E when 'E :> exn>(f: Func<Task>) : Task<'E> = Task.FromResult Unchecked.defaultof<'E>\nlet f (t: Task<int>) = task {\n    let ex = Assert.Throws<InvalidOperationException>(fun () -> t.Wait())\n    return ex.Message\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.True s.InLambda
+
+        match s.Fixes with
+        | [ (_, "let", "let!"); (_, _, replacement) ] ->
+            Assert.Equal(
+                "Assert.ThrowsAsync<InvalidOperationException>(fun () -> t :> System.Threading.Tasks.Task)",
+                replacement
+            )
+
+            let patched = applyFixes source s.Fixes
+            Assert.True(typechecksCleanly patched, $"Patched source does not typecheck:\n%s{patched}")
+        | other -> failwithf "Expected the let!-bind pair, got %A" other
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+// ---- FR0055: test files are quiet ----
+
+[<Fact>]
+let ``FR0055: a file that opens a test framework gets no notes`` () =
+    // a test's `try ... with _ -> 0` is deliberate: the assertion after it
+    // is the observation, and the guard would be noise
+    let body = "let ratio (total: int) (count: int) = try total / count with _ -> 0"
+
+    Assert.NotEmpty(swallowedIn ("module Tests\nmodule Xunit =\n    let marker = 1\n" + body))
+    Assert.Empty(swallowedIn ("module Tests\nmodule Xunit =\n    let marker = 1\nopen Xunit\n" + body))
+
+[<Fact>]
+let ``FR0049: an Assert.Throws inside a nested lambda stays advice`` () =
+    // the `let ex =` sits in a List.iter callback: a `let!` there would not
+    // compile, so the assert is left where it is
+    let source =
+        "module Xunit\nopen System\nopen System.Threading.Tasks\ntype Assert =\n    static member Throws<'E when 'E :> exn>(f: Action) : 'E = Unchecked.defaultof<'E>\n    static member ThrowsAsync<'E when 'E :> exn>(f: Func<Task>) : Task<'E> = Task.FromResult Unchecked.defaultof<'E>\nlet f (ts: Task<int> list) = task {\n    ts\n    |> List.iter (fun t ->\n        let ex = Assert.Throws<InvalidOperationException>(fun () -> t.Wait())\n        ignore ex)\n    return 1\n}"
+
+    match blockingIn source with
+    | [ s ] ->
+        Assert.True s.InLambda
+        Assert.Empty s.Fixes
+    | other -> failwithf "Expected exactly one blocking site, got %A" other
+
+[<Fact>]
+let ``FR0049: a bounded Wait and a Result after WaitForExit outside a CE are the sync idiom`` () =
+    // prismatic's scripts: stdout is read asynchronously, WaitForExit blocks,
+    // then .Result drains a task that already completed
+    Assert.Empty(
+        blockingIn
+            "module Test\nopen System.Diagnostics\nlet run (psi: ProcessStartInfo) =\n    use proc = Process.Start psi\n    let output = proc.StandardOutput.ReadToEndAsync()\n    proc.WaitForExit()\n    output.Result"
+    )
+
+    Assert.Empty(blockingIn "let stop (t: System.Threading.Tasks.Task) = t.Wait(System.TimeSpan.FromSeconds 10.0)")
+
+    // an unbounded Wait outside a CE is still the boundary note
+    Assert.NotEmpty(blockingIn "let stop (t: System.Threading.Tasks.Task) = t.Wait()")

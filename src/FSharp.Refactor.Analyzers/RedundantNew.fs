@@ -194,17 +194,38 @@ let private siblingUnionCases (entity: FSharpEntity) =
     with _ -> // fsharpanalyzer: ignore-line FR0055
         Set.empty
 
+/// Values and functions this file binds by name, at any level: a `let`
+/// spelled like a type takes the bare name over the constructor.
+let private boundValueNames (index: AstIndex.Index) =
+    let ofBinding (SynBinding(headPat = pat)) =
+        match pat with
+        | SynPat.Named(ident = SynIdent(ident = id)) -> Some id.idText
+        | SynPat.LongIdent(longDotId = SynLongIdent(id = [ id ])) -> Some id.idText
+        | _ -> None
+
+    [ for _, decl in index.Decls do
+          match decl with
+          | SynModuleDecl.Let(bindings = bindings) -> yield! bindings |> List.choose ofBinding
+          | _ -> ()
+      for _, e in index.Exprs do
+          match e with
+          | LetOrUseE lou -> yield! lou.Bindings |> List.choose ofBinding
+          | _ -> () ]
+    |> Set.ofList
+
 /// Would the bare name mean something else — a union case, or a type of
 /// another arity — once `new` no longer forces the constructor path?
 let private bareNameCaptured
     (check: FSharpCheckFileResults)
     (source: ISourceText)
     (fileCases: Lazy<Set<string>>)
+    (fileValues: Lazy<Set<string>>)
     (signatures: Lazy<FSharpAssemblySignature list>)
     (memo: Dictionary<string, Set<string>>)
     (ident: Ident)
     =
     fileCases.Value.Contains ident.idText
+    || fileValues.Value.Contains ident.idText
     || (let r = ident.idRange
         let lineText = source.GetLineString(r.EndLine - 1)
 
@@ -240,6 +261,7 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
         // once per file, not once per `new` — and LAZILY, so a file with no
         // non-disposable construction never pays for the symbol scan at all
         let fileUnionCases = lazy (capturingUnionCases check)
+        let fileValues = lazy (boundValueNames index)
         let signatures = lazy (assemblySignatures check)
         let ambiguousByNamespace = Dictionary<string, Set<string>>()
 
@@ -270,7 +292,16 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                   match typeIdent with
                   | Some typeIdent when
                       resolvesToNonDisposable check source typeIdent
-                      && not (bareNameCaptured check source fileUnionCases signatures ambiguousByNamespace typeIdent)
+                      && not (
+                          bareNameCaptured
+                              check
+                              source
+                              fileUnionCases
+                              fileValues
+                              signatures
+                              ambiguousByNamespace
+                              typeIdent
+                      )
                       ->
                       // the `new ` keyword: from the expression start to the
                       // type's start

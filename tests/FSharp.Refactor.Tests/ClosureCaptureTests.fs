@@ -109,3 +109,23 @@ let ``a method-group subscription pins this too`` () =
     match suggestions with
     | [ s ] -> Assert.Equal("this", s.CapturedName)
     | other -> failwithf "Expected exactly one method-group note, got %A" other
+
+[<Fact>]
+let ``a handler on the object's own event is a cycle inside one lifetime`` () =
+    // FSharp.Data's `x.Disposing.Add(fun _ -> ... x ...)`: the publisher IS
+    // the captured object, so nothing outlives anything
+    Assert.Empty(
+        capturesIn (
+            sourcePrefix
+            + "type Sub() as x =\n    let fired = Event<int>()\n    let mutable total = 0\n    do x.Fired.Add(fun n -> x.Bump n)\n    member _.Fired = fired.Publish\n    member this.Bump n = total <- total + n"
+        )
+    )
+
+[<Fact>]
+let ``a handler on a publisher held in the object's own field is owned too`` () =
+    Assert.Empty(
+        capturesIn (
+            sourcePrefix
+            + "type Sub() =\n    let src = Src()\n    let mutable total = 0\n    member this.Hook() = src.Fired.Add(fun n -> this.Bump n)\n    member this.Bump n = total <- total + n"
+        )
+    )

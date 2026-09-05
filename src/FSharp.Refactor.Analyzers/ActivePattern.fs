@@ -115,7 +115,15 @@ let private inputParameter (check: FSharpCheckFileResults) (source: ISourceText)
 
 /// Find `when` guards of the form `f var` that can become active patterns.
 /// Requires typed check results for the guard's parameter type.
-let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileResults) : Suggestion list =
+/// `structForm`: FSharp.Core 6 or newer, where `[<return: Struct>]` exists;
+/// an older FSharp.Core (the TypeProviders SDK pins 4.7) gets the option-
+/// returning pattern, which every FSharp.Core compiles.
+let find
+    (structForm: bool)
+    (parseTree: ParsedInput)
+    (source: ISourceText)
+    (check: FSharpCheckFileResults)
+    : Suggestion list =
     let suggestions = ResizeArray<Suggestion>()
 
     // only consulted when a candidate guard is found, which is rare
@@ -146,6 +154,18 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                             | SynModuleDecl.Let _ -> Some decl
                             | _ -> None)
 
+                    // the column its sibling declarations start at: the first
+                    // declaration of the same module body
+                    let contextColumn =
+                        path
+                        |> List.tryPick (fun node ->
+                            match node with
+                            | SyntaxNode.SynModule(SynModuleDecl.NestedModule(decls = first :: _)) ->
+                                Some first.Range.StartColumn
+                            | SyntaxNode.SynModuleOrNamespace(SynModuleOrNamespace(decls = first :: _)) ->
+                                Some first.Range.StartColumn
+                            | _ -> None)
+
                     match enclosingDecl with
                     | None -> ()
                     | Some decl ->
@@ -173,7 +193,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                         .Substring(0, decl.Range.StartColumn)
                                         .Trim() = ""
 
-                                if ownLine && not (fileText.Value.Contains $"(|{patternName}|") then
+                                let aligned = contextColumn |> Option.forall (fun c -> c = decl.Range.StartColumn)
+
+                                if ownLine && aligned && not (fileText.Value.Contains $"(|{patternName}|") then
                                     match inputParameter check source fnExpr with
                                     | ValueNone -> ()
                                     | ValueSome inputParam ->
@@ -187,13 +209,21 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                         // references), and struct-returning (no
                                         // allocation per match attempt)
                                         let binding =
-                                            sprintf
-                                                "[<return: Struct>]\n%slet inline private (|%s|_|) %s =\n%s    if %s input then ValueSome input else ValueNone"
-                                                indent
-                                                patternName
-                                                inputParam
-                                                indent
-                                                fnText
+                                            if structForm then
+                                                sprintf
+                                                    "[<return: Struct>]\n%slet inline private (|%s|_|) %s =\n%s    if %s input then ValueSome input else ValueNone"
+                                                    indent
+                                                    patternName
+                                                    inputParam
+                                                    indent
+                                                    fnText
+                                            else
+                                                sprintf
+                                                    "let inline private (|%s|_|) %s =\n%s    if %s input then Some input else None"
+                                                    patternName
+                                                    inputParam
+                                                    indent
+                                                    fnText
 
                                         let insertAt =
                                             Range.mkRange decl.Range.FileName decl.Range.Start decl.Range.Start
@@ -207,9 +237,9 @@ let find (parseTree: ParsedInput) (source: ISourceText) (check: FSharpCheckFileR
                                         // it unused — FS1182, an error under
                                         // FsAutoComplete's warnings-as-errors
                                         let bodyReads =
-                                            System.Text.RegularExpressions.Regex.IsMatch(
+                                            Regex.IsMatch(
                                                 textOfRange source body.Range,
-                                                $@"\b{System.Text.RegularExpressions.Regex.Escape var.idText}\b"
+                                                $@"\b{Regex.Escape var.idText}\b"
                                             )
 
                                         let binder = if bodyReads then var.idText else "_"
